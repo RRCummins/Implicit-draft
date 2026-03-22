@@ -1,3 +1,5 @@
+//! Loads built-in and user-overridden color themes for Source+Hints mode.
+
 use std::{env, fs, path::PathBuf};
 
 use anyhow::{Context, Result, anyhow};
@@ -135,6 +137,22 @@ impl Theme {
                 rule: Color::Rgb(88, 91, 112),
                 list_marker: Color::Rgb(166, 227, 161),
             })),
+            "catppuccin-latte" => Ok(Self::from_palette(Palette {
+                headings: [
+                    Color::Rgb(30, 102, 245),
+                    Color::Rgb(4, 165, 229),
+                    Color::Rgb(64, 160, 43),
+                    Color::Rgb(223, 142, 29),
+                    Color::Rgb(234, 118, 203),
+                    Color::Rgb(108, 111, 133),
+                ],
+                code_fg: Color::Rgb(76, 79, 105),
+                code_bg: Color::Rgb(220, 224, 232),
+                blockquote: Color::Rgb(124, 127, 147),
+                link: Color::Rgb(30, 102, 245),
+                rule: Color::Rgb(172, 176, 190),
+                list_marker: Color::Rgb(64, 160, 43),
+            })),
             _ => Err(anyhow!("unknown theme: {name}")),
         }
     }
@@ -256,6 +274,12 @@ mod tests {
     #[test]
     fn loads_builtin_theme() {
         let theme = Theme::load_named("dark").expect("builtin theme");
+        assert_eq!(theme.heading(1), theme.heading1);
+    }
+
+    #[test]
+    fn loads_catppuccin_latte_theme() {
+        let theme = Theme::load_named("catppuccin-latte").expect("builtin theme");
         assert_eq!(theme.heading(1), theme.heading1);
     }
 

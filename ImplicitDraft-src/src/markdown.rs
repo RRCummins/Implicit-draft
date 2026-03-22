@@ -1,3 +1,5 @@
+//! Styles markdown source lines for Source+Hints mode.
+
 use ratatui::{
     style::Style,
     text::{Line, Span},
@@ -129,6 +131,9 @@ fn find_wrapped(line: &str, start: &str, end: &str) -> Option<(usize, usize)> {
     let search_from = start_index + start.len();
     let rest = &line[search_from..];
     let end_index = rest.find(end)?;
+    if end_index == 0 {
+        return None;
+    }
     Some((start_index, search_from + end_index + end.len()))
 }
 
@@ -156,9 +161,24 @@ fn is_rule(line: &str) -> bool {
         return false;
     }
 
-    ['-', '*', '_']
-        .into_iter()
-        .any(|marker| trimmed.chars().all(|ch| ch == marker))
+    let mut markers = trimmed.chars().filter(|ch| !ch.is_whitespace());
+    let Some(first) = markers.next() else {
+        return false;
+    };
+
+    if !matches!(first, '-' | '*' | '_') {
+        return false;
+    }
+
+    let mut count = 1;
+    for marker in markers {
+        if marker != first {
+            return false;
+        }
+        count += 1;
+    }
+
+    count >= 3
 }
 
 fn heading_level(line: &str) -> Option<usize> {
@@ -249,5 +269,22 @@ mod tests {
 
         assert_eq!(rendered.len(), 3);
         assert_eq!(rendered[1].spans.len(), 1);
+    }
+
+    #[test]
+    fn prefers_bold_match_over_empty_italic_pair() {
+        let theme = Theme::source_hints_default();
+        let rendered = style_document(&[String::from("**bold**")], &theme);
+
+        assert_eq!(rendered[0].spans.len(), 1);
+        assert_eq!(rendered[0].spans[0].content.as_ref(), "**bold**");
+    }
+
+    #[test]
+    fn matches_spaced_rules() {
+        assert!(is_rule("- - -"));
+        assert!(is_rule("* * *"));
+        assert!(is_rule("_ _ _"));
+        assert!(!is_rule("- - x"));
     }
 }
