@@ -54,7 +54,7 @@ fn render_line(line: &str, theme: &Theme, width: usize) -> Line<'static> {
     }
 
     if let Some((prefix, content)) = parse_task_item(line) {
-        let mut spans = vec![Span::styled(prefix.to_owned(), theme.list_marker)];
+        let mut spans = vec![Span::styled(prefix, theme.list_marker)];
         spans.extend(inline_preview_spans(content, theme, Style::default()));
         return Line::from(spans);
     }
@@ -65,8 +65,8 @@ fn render_line(line: &str, theme: &Theme, width: usize) -> Line<'static> {
         return Line::from(spans);
     }
 
-    if let Some(content) = parse_blockquote(line) {
-        let mut spans = vec![Span::styled("▌ ", theme.blockquote)];
+    if let Some((prefix, content)) = parse_blockquote(line) {
+        let mut spans = vec![Span::styled(prefix, theme.blockquote)];
         spans.extend(inline_preview_spans(content, theme, theme.blockquote));
         return Line::from(spans);
     }
@@ -243,14 +243,15 @@ fn parse_link(line: &str) -> Option<InlineSegment> {
     })
 }
 
-fn parse_task_item(line: &str) -> Option<(&'static str, &str)> {
+fn parse_task_item(line: &str) -> Option<(String, &str)> {
     let trimmed = line.trim_start();
     let offset = line.len() - trimmed.len();
+    let indent = " ".repeat(offset);
 
     for prefix in ["- [ ] ", "* [ ] ", "+ [ ] "] {
         if let Some(rest) = trimmed.strip_prefix(prefix) {
             return Some((
-                "☐ ",
+                format!("{indent}☐ "),
                 &line[offset + prefix.len()..offset + prefix.len() + rest.len()],
             ));
         }
@@ -259,7 +260,7 @@ fn parse_task_item(line: &str) -> Option<(&'static str, &str)> {
     for prefix in ["- [x] ", "- [X] ", "* [x] ", "* [X] ", "+ [x] ", "+ [X] "] {
         if let Some(rest) = trimmed.strip_prefix(prefix) {
             return Some((
-                "☑ ",
+                format!("{indent}☑ "),
                 &line[offset + prefix.len()..offset + prefix.len() + rest.len()],
             ));
         }
@@ -271,12 +272,13 @@ fn parse_task_item(line: &str) -> Option<(&'static str, &str)> {
 fn parse_list_item(line: &str) -> Option<(String, &str)> {
     let trimmed = line.trim_start();
     let offset = line.len() - trimmed.len();
+    let indent = " ".repeat(offset);
 
     for bullet in ["- ", "* ", "+ "] {
         if let Some(rest) = trimmed.strip_prefix(bullet) {
             let content_start = offset + bullet.len();
             return Some((
-                "• ".to_owned(),
+                format!("{indent}• "),
                 &line[content_start..content_start + rest.len()],
             ));
         }
@@ -285,16 +287,32 @@ fn parse_list_item(line: &str) -> Option<(String, &str)> {
     let digits = trimmed.chars().take_while(|ch| ch.is_ascii_digit()).count();
     if digits > 0 && trimmed[digits..].starts_with(". ") {
         let marker_end = offset + digits + 2;
-        return Some((line[offset..marker_end].to_owned(), &line[marker_end..]));
+        return Some((
+            format!("{indent}{}", &line[offset..marker_end]),
+            &line[marker_end..],
+        ));
     }
 
     None
 }
 
-fn parse_blockquote(line: &str) -> Option<&str> {
+fn parse_blockquote(line: &str) -> Option<(String, &str)> {
     let trimmed = line.trim_start();
-    let rest = trimmed.strip_prefix('>')?;
-    Some(rest.trim_start())
+    let offset = line.len() - trimmed.len();
+    let mut rest = trimmed;
+    let mut depth = 0usize;
+
+    while let Some(next) = rest.strip_prefix('>') {
+        depth += 1;
+        rest = next.trim_start();
+    }
+
+    if depth == 0 {
+        return None;
+    }
+
+    let prefix = format!("{}{}", " ".repeat(offset), "▌ ".repeat(depth));
+    Some((prefix, rest))
 }
 
 fn fence_marker_for(trimmed: &str) -> Option<&'static str> {
@@ -402,12 +420,39 @@ mod tests {
     }
 
     #[test]
+    fn preserves_nested_list_indentation() {
+        let theme = Theme::source_hints_default();
+        let rendered = render_document(
+            &[
+                String::from("  - child"),
+                String::from("    - [ ] task"),
+                String::from("  2. item"),
+            ],
+            &theme,
+            24,
+        );
+
+        assert_eq!(rendered[0].spans[0].content.as_ref(), "  • ");
+        assert_eq!(rendered[1].spans[0].content.as_ref(), "    ☐ ");
+        assert_eq!(rendered[2].spans[0].content.as_ref(), "  2. ");
+    }
+
+    #[test]
     fn hides_heading_markup_and_shows_rule() {
         let theme = Theme::source_hints_default();
         let rendered = render_document(&[String::from("# Title"), String::from("---")], &theme, 8);
 
         assert_eq!(rendered[0].spans[0].content.as_ref(), "Title");
         assert_eq!(rendered[1].spans[0].content.as_ref(), "────────");
+    }
+
+    #[test]
+    fn preserves_nested_blockquote_depth() {
+        let theme = Theme::source_hints_default();
+        let rendered = render_document(&[String::from("  > > quoted")], &theme, 20);
+
+        assert_eq!(rendered[0].spans[0].content.as_ref(), "  ▌ ▌ ");
+        assert_eq!(rendered[0].spans[1].content.as_ref(), "quoted");
     }
 
     #[test]
