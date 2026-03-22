@@ -63,6 +63,10 @@ impl App {
         Ok(())
     }
 
+    pub fn theme(&self) -> Theme {
+        self.theme
+    }
+
     fn handle_event(&mut self, event: Event) {
         let Event::Key(key) = event else {
             return;

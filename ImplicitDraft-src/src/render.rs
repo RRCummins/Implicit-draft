@@ -1,7 +1,6 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Flex, Layout, Rect},
-    style::{Modifier, Style},
     text::Line,
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
@@ -9,9 +8,17 @@ use ratatui::{
 use crate::{
     app::{App, ViewModel},
     picker::PickerEntry,
+    theme::Theme,
 };
 
+#[derive(Clone, Copy)]
+struct WelcomeMeta {
+    selected_row: Option<usize>,
+    search_active: bool,
+}
+
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    let theme = app.theme();
     let [buffer_area, status_area] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1)])
@@ -25,7 +32,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             cursor,
             scroll,
             dialog,
-        } => draw_editor(frame, buffer_area, lines, cursor, scroll, dialog),
+        } => draw_editor(frame, buffer_area, lines, cursor, scroll, dialog, theme),
         ViewModel::Picker {
             cwd,
             filter,
@@ -40,6 +47,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             &entries,
             selected_row,
             metadata,
+            theme,
         ),
         ViewModel::Welcome {
             logo,
@@ -53,14 +61,16 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             &logo,
             &shortcuts,
             &recents,
-            selected_row,
-            search_active,
+            WelcomeMeta {
+                selected_row,
+                search_active,
+            },
+            theme,
         ),
     }
 
     let status = Line::from(app.status_line());
-    let status_bar =
-        Paragraph::new(status).style(Style::default().add_modifier(Modifier::REVERSED));
+    let status_bar = Paragraph::new(status).style(theme.selection.patch(theme.ui_chrome));
 
     frame.render_widget(status_bar, status_area);
 }
@@ -72,8 +82,16 @@ fn draw_editor(
     cursor: Option<(usize, usize)>,
     scroll: (usize, usize),
     dialog: Option<[String; 3]>,
+    theme: Theme,
 ) {
-    let editor = Paragraph::new(lines).block(Block::default());
+    let mut lines = lines;
+    if let Some((_, row)) = cursor.filter(|(_, row)| *row < lines.len()) {
+        lines[row].style = lines[row].style.patch(theme.cursor);
+    }
+
+    let editor = Paragraph::new(lines)
+        .block(Block::default())
+        .style(theme.background);
     let editor = editor.scroll((scroll.0 as u16, scroll.1 as u16));
     frame.render_widget(editor, area);
 
@@ -86,10 +104,13 @@ fn draw_editor(
         frame.render_widget(Clear, dialog_area);
 
         let dialog = Paragraph::new(lines.into_iter().map(Line::raw).collect::<Vec<_>>())
+            .style(theme.background)
             .block(
                 Block::default()
                     .title(" Unsaved Changes ")
-                    .borders(Borders::ALL),
+                    .borders(Borders::ALL)
+                    .border_style(theme.ui_chrome)
+                    .title_style(theme.ui_chrome),
             )
             .wrap(Wrap { trim: false });
 
@@ -104,6 +125,7 @@ fn draw_picker(
     entries: &[PickerEntry],
     selected_row: Option<usize>,
     metadata: [String; 4],
+    theme: Theme,
 ) {
     let [list_area, meta_area] = two_column(area);
 
@@ -111,20 +133,32 @@ fn draw_picker(
         .iter()
         .enumerate()
         .map(|(index, entry)| {
-            let mut style = Style::default();
+            let mut style = theme.background;
             if Some(index) == selected_row {
-                style = style.add_modifier(Modifier::REVERSED);
+                style = style.patch(theme.selection);
             }
             Line::styled(entry.label().to_owned(), style)
         })
         .collect::<Vec<_>>();
 
-    let list =
-        Paragraph::new(list_lines).block(Block::default().title(title).borders(Borders::ALL));
+    let list = Paragraph::new(list_lines).style(theme.background).block(
+        Block::default()
+            .title(title)
+            .title_style(theme.ui_chrome)
+            .borders(Borders::ALL)
+            .border_style(theme.ui_chrome),
+    );
     frame.render_widget(list, list_area);
 
     let meta = Paragraph::new(metadata.into_iter().map(Line::raw).collect::<Vec<_>>())
-        .block(Block::default().title(" Selection ").borders(Borders::ALL))
+        .style(theme.background)
+        .block(
+            Block::default()
+                .title(" Selection ")
+                .title_style(theme.ui_chrome)
+                .borders(Borders::ALL)
+                .border_style(theme.ui_chrome),
+        )
         .wrap(Wrap { trim: false });
     frame.render_widget(meta, meta_area);
 }
@@ -135,8 +169,8 @@ fn draw_welcome(
     logo: &[String],
     shortcuts: &[(String, String)],
     recents: &[(String, String)],
-    selected_row: Option<usize>,
-    search_active: bool,
+    meta: WelcomeMeta,
+    theme: Theme,
 ) {
     let [hero_area, body_area, hint_area] = Layout::vertical([
         Constraint::Length(8),
@@ -149,10 +183,13 @@ fn draw_welcome(
     let [shortcuts_area, recents_area] = two_column(body_area);
 
     let logo_widget = Paragraph::new(logo.iter().cloned().map(Line::raw).collect::<Vec<_>>())
+        .style(theme.background)
         .block(
             Block::default()
                 .title(" Braille Logo ")
-                .borders(Borders::ALL),
+                .title_style(theme.ui_chrome)
+                .borders(Borders::ALL)
+                .border_style(theme.ui_chrome),
         );
     frame.render_widget(logo_widget, logo_area);
 
@@ -164,7 +201,14 @@ fn draw_welcome(
         Line::raw("Press N for a new untitled buffer"),
     ];
     let title = Paragraph::new(title_lines)
-        .block(Block::default().title(" Home ").borders(Borders::ALL))
+        .style(theme.background)
+        .block(
+            Block::default()
+                .title(" Home ")
+                .title_style(theme.ui_chrome)
+                .borders(Borders::ALL)
+                .border_style(theme.ui_chrome),
+        )
         .wrap(Wrap { trim: false });
     frame.render_widget(title, title_area);
 
@@ -173,7 +217,14 @@ fn draw_welcome(
         .map(|(label, value)| Line::raw(format!("{label:<8} {value}")))
         .collect::<Vec<_>>();
     let shortcut_widget = Paragraph::new(shortcut_lines)
-        .block(Block::default().title(" Shortcuts ").borders(Borders::ALL));
+        .style(theme.background)
+        .block(
+            Block::default()
+                .title(" Shortcuts ")
+                .title_style(theme.ui_chrome)
+                .borders(Borders::ALL)
+                .border_style(theme.ui_chrome),
+        );
     frame.render_widget(shortcut_widget, shortcuts_area);
 
     let recent_lines = if recents.is_empty() {
@@ -183,29 +234,37 @@ fn draw_welcome(
             .iter()
             .enumerate()
             .map(|(index, (path, age))| {
-                let mut style = Style::default();
-                if Some(index) == selected_row {
-                    style = style.add_modifier(Modifier::REVERSED);
+                let mut style = theme.background;
+                if Some(index) == meta.selected_row {
+                    style = style.patch(theme.selection);
                 }
                 Line::styled(format!("{path}  {age}"), style)
             })
             .collect::<Vec<_>>()
     };
     let recents_widget = Paragraph::new(recent_lines)
+        .style(theme.background)
         .block(
             Block::default()
                 .title(" Recent Files ")
-                .borders(Borders::ALL),
+                .title_style(theme.ui_chrome)
+                .borders(Borders::ALL)
+                .border_style(theme.ui_chrome),
         )
         .wrap(Wrap { trim: false });
     frame.render_widget(recents_widget, recents_area);
 
-    let hint = Paragraph::new(vec![Line::raw(if search_active {
+    let hint = Paragraph::new(vec![Line::raw(if meta.search_active {
         "/ search active in picker"
     } else {
         "O open picker   N new buffer   Enter open recent   / search files   Q quit"
     })])
-    .block(Block::default().borders(Borders::TOP));
+    .style(theme.background.patch(theme.ui_chrome))
+    .block(
+        Block::default()
+            .borders(Borders::TOP)
+            .border_style(theme.ui_chrome),
+    );
     frame.render_widget(hint, hint_area);
 }
 

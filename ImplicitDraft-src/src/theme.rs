@@ -21,6 +21,10 @@ pub struct Theme {
     pub link: Style,
     pub rule: Style,
     pub list_marker: Style,
+    pub ui_chrome: Style,
+    pub cursor: Style,
+    pub selection: Style,
+    pub background: Style,
 }
 
 #[derive(Debug, Deserialize)]
@@ -39,6 +43,10 @@ struct ThemeFile {
     link: Option<String>,
     rule: Option<String>,
     list_marker: Option<String>,
+    ui_chrome: Option<String>,
+    cursor: Option<String>,
+    selection: Option<String>,
+    background: Option<String>,
 }
 
 impl Theme {
@@ -88,6 +96,10 @@ impl Theme {
                 link: Color::LightBlue,
                 rule: Color::DarkGray,
                 list_marker: Color::LightGreen,
+                ui_chrome: Color::Cyan,
+                cursor: Color::Rgb(42, 58, 76),
+                selection: Color::DarkGray,
+                background: Color::Reset,
             })),
             "light" => Ok(Self::from_palette(Palette {
                 headings: [
@@ -104,6 +116,10 @@ impl Theme {
                 link: Color::Blue,
                 rule: Color::Gray,
                 list_marker: Color::Green,
+                ui_chrome: Color::Blue,
+                cursor: Color::Rgb(214, 224, 235),
+                selection: Color::Rgb(220, 228, 238),
+                background: Color::Reset,
             })),
             "gruvbox" => Ok(Self::from_palette(Palette {
                 headings: [
@@ -120,6 +136,10 @@ impl Theme {
                 link: Color::Rgb(131, 165, 152),
                 rule: Color::Rgb(80, 73, 69),
                 list_marker: Color::Rgb(184, 187, 38),
+                ui_chrome: Color::Rgb(250, 189, 47),
+                cursor: Color::Rgb(69, 64, 61),
+                selection: Color::Rgb(60, 56, 54),
+                background: Color::Reset,
             })),
             "catppuccin-mocha" => Ok(Self::from_palette(Palette {
                 headings: [
@@ -136,6 +156,10 @@ impl Theme {
                 link: Color::Rgb(137, 180, 250),
                 rule: Color::Rgb(88, 91, 112),
                 list_marker: Color::Rgb(166, 227, 161),
+                ui_chrome: Color::Rgb(148, 226, 213),
+                cursor: Color::Rgb(69, 71, 90),
+                selection: Color::Rgb(49, 50, 68),
+                background: Color::Reset,
             })),
             "catppuccin-latte" => Ok(Self::from_palette(Palette {
                 headings: [
@@ -152,6 +176,10 @@ impl Theme {
                 link: Color::Rgb(30, 102, 245),
                 rule: Color::Rgb(172, 176, 190),
                 list_marker: Color::Rgb(64, 160, 43),
+                ui_chrome: Color::Rgb(30, 102, 245),
+                cursor: Color::Rgb(220, 224, 232),
+                selection: Color::Rgb(204, 208, 218),
+                background: Color::Reset,
             })),
             _ => Err(anyhow!("unknown theme: {name}")),
         }
@@ -188,6 +216,12 @@ impl Theme {
                 .add_modifier(Modifier::UNDERLINED),
             rule: Style::default().fg(palette.rule),
             list_marker: Style::default().fg(palette.list_marker),
+            ui_chrome: Style::default()
+                .fg(palette.ui_chrome)
+                .add_modifier(Modifier::BOLD),
+            cursor: Style::default().bg(palette.cursor),
+            selection: Style::default().bg(palette.selection),
+            background: Style::default().bg(palette.background),
         }
     }
 
@@ -206,6 +240,10 @@ impl Theme {
         apply_fg(&mut self.link, file.link)?;
         apply_fg(&mut self.rule, file.rule)?;
         apply_fg(&mut self.list_marker, file.list_marker)?;
+        apply_fg(&mut self.ui_chrome, file.ui_chrome)?;
+        apply_bg(&mut self.cursor, file.cursor)?;
+        apply_bg(&mut self.selection, file.selection)?;
+        apply_bg(&mut self.background, file.background)?;
         Ok(())
     }
 }
@@ -219,6 +257,10 @@ struct Palette {
     link: Color,
     rule: Color,
     list_marker: Color,
+    ui_chrome: Color,
+    cursor: Color,
+    selection: Color,
+    background: Color,
 }
 
 fn config_dir() -> PathBuf {
