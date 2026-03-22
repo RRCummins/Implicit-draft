@@ -8,16 +8,46 @@ use crate::{
     buffer::Buffer,
     markdown,
     picker::{Picker, PickerAction, PickerEntry},
-    recents, render,
+    preview, recents, render,
     theme::Theme,
     welcome::{BRAILLE_LOGO, SHORTCUTS, WelcomeState},
 };
 
 const FRAME_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const EDITOR_HELP: &str = "ctrl+z undo | ctrl+r redo | ctrl+s save | ctrl+q quit";
+const PREVIEW_HELP: &str = "ctrl+p source+hints | arrows/page move | preview is read-only";
 const PICKER_HELP: &str = "enter open | a toggle filter | esc home";
 const HOME_HELP: &str = "o open | n new | enter recent | / search | q quit";
 const SEARCH_HELP: &str = "type to filter | backspace delete | enter keep | esc clear";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EditorMode {
+    SourceHints,
+    Preview,
+}
+
+impl EditorMode {
+    fn cycle(self) -> Self {
+        match self {
+            Self::SourceHints => Self::Preview,
+            Self::Preview => Self::SourceHints,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::SourceHints => "Source+Hints",
+            Self::Preview => "Preview",
+        }
+    }
+
+    fn help(self) -> &'static str {
+        match self {
+            Self::SourceHints => EDITOR_HELP,
+            Self::Preview => PREVIEW_HELP,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct App {
@@ -111,56 +141,91 @@ impl App {
                         _ => {}
                     }
                 } else {
-                    match key.code {
-                        KeyCode::Left => editor.buffer.move_left(),
-                        KeyCode::Right => editor.buffer.move_right(),
-                        KeyCode::Up => editor.buffer.move_up(),
-                        KeyCode::Down => editor.buffer.move_down(),
-                        KeyCode::Home => editor.buffer.move_home(),
-                        KeyCode::End => editor.buffer.move_end(),
-                        KeyCode::PageUp => editor.buffer.page_up(editor.viewport_height),
-                        KeyCode::PageDown => editor.buffer.page_down(editor.viewport_height),
-                        KeyCode::Backspace => {
-                            Self::apply_edit(editor, Buffer::backspace);
-                            next_status = Some(String::from("editing"));
-                        }
-                        KeyCode::Delete => {
-                            Self::apply_edit(editor, Buffer::delete_forward);
-                            next_status = Some(String::from("editing"));
-                        }
-                        KeyCode::Enter => {
-                            Self::apply_edit(editor, Buffer::insert_newline);
-                            next_status = Some(String::from("editing"));
-                        }
-                        KeyCode::Tab => {
-                            Self::apply_edit(editor, |buffer| buffer.insert_spaces(4));
-                            next_status = Some(String::from("editing"));
-                        }
-                        KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            next_status = Some(if editor.buffer.undo() {
-                                String::from("undo")
-                            } else {
-                                String::from("nothing to undo")
-                            });
-                        }
-                        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            next_status = Some(if editor.buffer.redo() {
-                                String::from("redo")
-                            } else {
-                                String::from("nothing to redo")
-                            });
-                        }
-                        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            match Self::save_editor(editor) {
-                                Ok(()) => next_status = Some(String::from("saved")),
-                                Err(error) => next_status = Some(error.to_string()),
+                    if key.code == KeyCode::Char('p')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                    {
+                        editor.mode = editor.mode.cycle();
+                        next_status = Some(String::from(editor.mode.help()));
+                    } else if editor.mode == EditorMode::Preview {
+                        match key.code {
+                            KeyCode::Left => editor.buffer.move_left(),
+                            KeyCode::Right => editor.buffer.move_right(),
+                            KeyCode::Up => editor.buffer.move_up(),
+                            KeyCode::Down => editor.buffer.move_down(),
+                            KeyCode::Home => editor.buffer.move_home(),
+                            KeyCode::End => editor.buffer.move_end(),
+                            KeyCode::PageUp => editor.buffer.page_up(editor.viewport_height),
+                            KeyCode::PageDown => editor.buffer.page_down(editor.viewport_height),
+                            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                match Self::save_editor(editor) {
+                                    Ok(()) => next_status = Some(String::from("saved")),
+                                    Err(error) => next_status = Some(error.to_string()),
+                                }
                             }
+                            KeyCode::Backspace
+                            | KeyCode::Delete
+                            | KeyCode::Enter
+                            | KeyCode::Tab
+                            | KeyCode::Char(_)
+                                if is_insertable(key.modifiers)
+                                    || key.modifiers.contains(KeyModifiers::CONTROL) =>
+                            {
+                                next_status = Some(String::from(PREVIEW_HELP));
+                            }
+                            _ => {}
                         }
-                        KeyCode::Char(ch) if is_insertable(key.modifiers) => {
-                            Self::apply_edit(editor, |buffer| buffer.insert_char(ch));
-                            next_status = Some(String::from("editing"));
+                    } else {
+                        match key.code {
+                            KeyCode::Left => editor.buffer.move_left(),
+                            KeyCode::Right => editor.buffer.move_right(),
+                            KeyCode::Up => editor.buffer.move_up(),
+                            KeyCode::Down => editor.buffer.move_down(),
+                            KeyCode::Home => editor.buffer.move_home(),
+                            KeyCode::End => editor.buffer.move_end(),
+                            KeyCode::PageUp => editor.buffer.page_up(editor.viewport_height),
+                            KeyCode::PageDown => editor.buffer.page_down(editor.viewport_height),
+                            KeyCode::Backspace => {
+                                Self::apply_edit(editor, Buffer::backspace);
+                                next_status = Some(String::from("editing"));
+                            }
+                            KeyCode::Delete => {
+                                Self::apply_edit(editor, Buffer::delete_forward);
+                                next_status = Some(String::from("editing"));
+                            }
+                            KeyCode::Enter => {
+                                Self::apply_edit(editor, Buffer::insert_newline);
+                                next_status = Some(String::from("editing"));
+                            }
+                            KeyCode::Tab => {
+                                Self::apply_edit(editor, |buffer| buffer.insert_spaces(4));
+                                next_status = Some(String::from("editing"));
+                            }
+                            KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                next_status = Some(if editor.buffer.undo() {
+                                    String::from("undo")
+                                } else {
+                                    String::from("nothing to undo")
+                                });
+                            }
+                            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                next_status = Some(if editor.buffer.redo() {
+                                    String::from("redo")
+                                } else {
+                                    String::from("nothing to redo")
+                                });
+                            }
+                            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                match Self::save_editor(editor) {
+                                    Ok(()) => next_status = Some(String::from("saved")),
+                                    Err(error) => next_status = Some(error.to_string()),
+                                }
+                            }
+                            KeyCode::Char(ch) if is_insertable(key.modifiers) => {
+                                Self::apply_edit(editor, |buffer| buffer.insert_char(ch));
+                                next_status = Some(String::from("editing"));
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
                 }
             }
@@ -299,11 +364,18 @@ impl App {
         }
     }
 
-    pub fn current_view(&self, list_height: usize, _list_width: usize) -> ViewModel {
+    pub fn current_view(&self, list_height: usize, list_width: usize) -> ViewModel {
         match &self.screen {
             Screen::Editor(editor) => ViewModel::Editor {
-                lines: markdown::style_document(editor.buffer.lines(), &self.theme),
-                cursor: if editor.quit_dialog_open {
+                lines: match editor.mode {
+                    EditorMode::SourceHints => {
+                        markdown::style_document(editor.buffer.lines(), &self.theme)
+                    }
+                    EditorMode::Preview => {
+                        preview::render_document(editor.buffer.lines(), &self.theme, list_width)
+                    }
+                },
+                cursor: if editor.quit_dialog_open || editor.mode == EditorMode::Preview {
                     None
                 } else {
                     editor.buffer.cursor_screen_position()
@@ -358,8 +430,9 @@ impl App {
                     "[ ]"
                 };
                 format!(
-                    " {} [Source+Hints] {}  Ln {}, Col {}  {} ",
+                    " {} [{}] {}  Ln {}, Col {}  {} ",
                     editor.file_name(),
+                    editor.mode.label(),
                     modified_flag,
                     row + 1,
                     col + 1,
@@ -472,6 +545,7 @@ pub struct EditorState {
     file_path: Option<PathBuf>,
     quit_dialog_open: bool,
     viewport_height: usize,
+    mode: EditorMode,
 }
 
 impl EditorState {
@@ -483,6 +557,7 @@ impl EditorState {
             file_path: Some(path),
             quit_dialog_open: false,
             viewport_height: 1,
+            mode: EditorMode::SourceHints,
         })
     }
 
@@ -492,6 +567,7 @@ impl EditorState {
             file_path: None,
             quit_dialog_open: false,
             viewport_height: 1,
+            mode: EditorMode::SourceHints,
         }
     }
 
@@ -538,6 +614,17 @@ pub enum ViewModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{Event, KeyEventState};
+
+    fn editor_app() -> App {
+        App {
+            screen: Screen::Editor(EditorState::empty()),
+            should_quit: false,
+            status_message: String::from(EDITOR_HELP),
+            search_mode: false,
+            theme: Theme::source_hints_default(),
+        }
+    }
 
     #[test]
     fn quits_on_ctrl_q() {
@@ -558,5 +645,44 @@ mod tests {
         assert!(is_insertable(KeyModifiers::NONE));
         assert!(is_insertable(KeyModifiers::SHIFT));
         assert!(!is_insertable(KeyModifiers::CONTROL));
+    }
+
+    #[test]
+    fn ctrl_p_cycles_editor_mode() {
+        let mut app = editor_app();
+
+        app.handle_event(Event::Key(KeyEvent {
+            code: KeyCode::Char('p'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }));
+
+        let Screen::Editor(editor) = app.screen else {
+            panic!("editor screen");
+        };
+        assert_eq!(editor.mode, EditorMode::Preview);
+    }
+
+    #[test]
+    fn preview_mode_is_read_only_for_text_input() {
+        let mut app = editor_app();
+        let Screen::Editor(editor) = &mut app.screen else {
+            panic!("editor screen");
+        };
+        editor.mode = EditorMode::Preview;
+
+        app.handle_event(Event::Key(KeyEvent {
+            code: KeyCode::Char('x'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }));
+
+        let Screen::Editor(editor) = app.screen else {
+            panic!("editor screen");
+        };
+        assert_eq!(editor.buffer.lines(), &[String::new()]);
+        assert_eq!(app.status_message, PREVIEW_HELP);
     }
 }

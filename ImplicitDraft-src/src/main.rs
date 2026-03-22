@@ -2,6 +2,7 @@ mod app;
 mod buffer;
 mod markdown;
 mod picker;
+mod preview;
 mod recents;
 mod render;
 mod terminal;
