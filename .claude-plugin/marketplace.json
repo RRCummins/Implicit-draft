@@ -1,0 +1,34 @@
+{
+  "name": "implicitdraft-shared-rust-skills",
+  "owner": "Ryan Cummins",
+  "metadata": {
+    "description": "Shared Rust specialist skills vendored for ImplicitDraft.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "Rust Core",
+      "description": "Implement idiomatic, safe, and performant Rust changes.",
+      "source": "local",
+      "path": ".agent-skills/rust-core"
+    },
+    {
+      "name": "Lint Hunter",
+      "description": "Debug compiler errors, borrow checker issues, and clippy findings.",
+      "source": "local",
+      "path": ".agent-skills/lint-hunter"
+    },
+    {
+      "name": "Debug Helper",
+      "description": "Systematically isolate runtime and logic bugs in Rust code.",
+      "source": "local",
+      "path": ".agent-skills/general-debug"
+    },
+    {
+      "name": "Security Specialist",
+      "description": "Review Rust code for unsafe usage, secrets, and security risks.",
+      "source": "local",
+      "path": ".agent-skills/general-security"
+    }
+  ]
+}
