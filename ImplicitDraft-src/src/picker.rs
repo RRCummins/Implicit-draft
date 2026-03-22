@@ -14,6 +14,7 @@ pub struct Picker {
     selected: usize,
     scroll: usize,
     show_all: bool,
+    query: String,
 }
 
 #[derive(Clone, Debug)]
@@ -39,6 +40,7 @@ impl Picker {
             selected: 0,
             scroll: 0,
             show_all: false,
+            query: String::new(),
         };
         picker.reload()?;
         Ok(picker)
@@ -69,6 +71,21 @@ impl Picker {
 
     pub fn toggle_show_all(&mut self) -> Result<()> {
         self.show_all = !self.show_all;
+        self.reload()
+    }
+
+    pub fn append_query(&mut self, ch: char) -> Result<()> {
+        self.query.push(ch);
+        self.reload()
+    }
+
+    pub fn pop_query(&mut self) -> Result<()> {
+        self.query.pop();
+        self.reload()
+    }
+
+    pub fn clear_query(&mut self) -> Result<()> {
+        self.query.clear();
         self.reload()
     }
 
@@ -132,6 +149,10 @@ impl Picker {
         }
     }
 
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
     pub fn selected_entry(&self) -> Option<&PickerEntry> {
         self.entries.get(self.selected)
     }
@@ -157,6 +178,10 @@ impl Picker {
                 label.push('/');
             }
 
+            if !self.query.is_empty() && !matches_query(&label, &self.query) {
+                continue;
+            }
+
             entries.push(PickerEntry {
                 path,
                 label,
@@ -169,7 +194,7 @@ impl Picker {
         entries.sort_by(compare_entries);
         self.entries = entries;
         self.selected = self.selected.min(self.entries.len().saturating_sub(1));
-        self.scroll = self.scroll.min(self.selected);
+        self.scroll = 0;
         Ok(())
     }
 }
@@ -236,6 +261,26 @@ fn format_modified(modified: Option<SystemTime>) -> String {
     }
 }
 
+fn matches_query(label: &str, query: &str) -> bool {
+    let mut query_chars = query.chars().flat_map(char::to_lowercase);
+    let mut current = query_chars.next();
+
+    if current.is_none() {
+        return true;
+    }
+
+    for ch in label.chars().flat_map(char::to_lowercase) {
+        if Some(ch) == current {
+            current = query_chars.next();
+            if current.is_none() {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,5 +310,12 @@ mod tests {
         assert!(is_text_candidate(Path::new("note.md")));
         assert!(is_text_candidate(Path::new("note.txt")));
         assert!(!is_text_candidate(Path::new("image.png")));
+    }
+
+    #[test]
+    fn query_filters_entries() {
+        assert!(matches_query("alpha.md", "ap"));
+        assert!(matches_query("project_notes.md", "pn"));
+        assert!(!matches_query("beta.md", "az"));
     }
 }

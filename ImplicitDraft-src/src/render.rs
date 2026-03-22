@@ -28,14 +28,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         ViewModel::Picker {
             cwd,
             filter,
+            query,
             entries,
             selected_row,
             metadata,
         } => draw_picker(
             frame,
             buffer_area,
-            &cwd,
-            &filter,
+            &format!(" {} ({filter}) /{} ", cwd, query),
             &entries,
             selected_row,
             metadata,
@@ -45,6 +45,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             shortcuts,
             recents,
             selected_row,
+            search_active,
         } => draw_welcome(
             frame,
             buffer_area,
@@ -52,6 +53,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             &shortcuts,
             &recents,
             selected_row,
+            search_active,
         ),
     }
 
@@ -96,14 +98,12 @@ fn draw_editor(
 fn draw_picker(
     frame: &mut Frame,
     area: Rect,
-    cwd: &str,
-    filter: &str,
+    title: &str,
     entries: &[PickerEntry],
     selected_row: Option<usize>,
     metadata: [String; 4],
 ) {
-    let [list_area, meta_area] =
-        Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)]).areas(area);
+    let [list_area, meta_area] = two_column(area);
 
     let list_lines = entries
         .iter()
@@ -117,11 +117,8 @@ fn draw_picker(
         })
         .collect::<Vec<_>>();
 
-    let list = Paragraph::new(list_lines).block(
-        Block::default()
-            .title(format!(" {} ({filter}) ", cwd))
-            .borders(Borders::ALL),
-    );
+    let list =
+        Paragraph::new(list_lines).block(Block::default().title(title).borders(Borders::ALL));
     frame.render_widget(list, list_area);
 
     let meta = Paragraph::new(metadata.into_iter().map(Line::raw).collect::<Vec<_>>())
@@ -137,6 +134,7 @@ fn draw_welcome(
     shortcuts: &[(String, String)],
     recents: &[(String, String)],
     selected_row: Option<usize>,
+    search_active: bool,
 ) {
     let [hero_area, body_area, hint_area] = Layout::vertical([
         Constraint::Length(8),
@@ -146,9 +144,7 @@ fn draw_welcome(
     .areas(area);
     let [logo_area, title_area] =
         Layout::horizontal([Constraint::Length(24), Constraint::Min(20)]).areas(hero_area);
-    let [shortcuts_area, recents_area] =
-        Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
-            .areas(body_area);
+    let [shortcuts_area, recents_area] = two_column(body_area);
 
     let logo_widget = Paragraph::new(logo.iter().cloned().map(Line::raw).collect::<Vec<_>>())
         .block(
@@ -202,11 +198,17 @@ fn draw_welcome(
         .wrap(Wrap { trim: false });
     frame.render_widget(recents_widget, recents_area);
 
-    let hint = Paragraph::new(vec![Line::raw(
-        "O open picker   N new buffer   Enter open recent   / search files   Q quit",
-    )])
+    let hint = Paragraph::new(vec![Line::raw(if search_active {
+        "/ search active in picker"
+    } else {
+        "O open picker   N new buffer   Enter open recent   / search files   Q quit"
+    })])
     .block(Block::default().borders(Borders::TOP));
     frame.render_widget(hint, hint_area);
+}
+
+fn two_column(area: Rect) -> [Rect; 2] {
+    Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).areas(area)
 }
 
 fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {

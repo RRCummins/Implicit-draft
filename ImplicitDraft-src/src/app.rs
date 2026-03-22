@@ -15,12 +15,14 @@ const FRAME_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const EDITOR_HELP: &str = "ctrl+z undo | ctrl+r redo | ctrl+s save | ctrl+q quit";
 const PICKER_HELP: &str = "enter open | a toggle filter | esc home";
 const HOME_HELP: &str = "o open | n new | enter recent | / search | q quit";
+const SEARCH_HELP: &str = "type to filter | backspace delete | enter keep | esc clear";
 
 #[derive(Debug)]
 pub struct App {
     screen: Screen,
     should_quit: bool,
     status_message: String,
+    search_mode: bool,
 }
 
 impl App {
@@ -41,6 +43,7 @@ impl App {
             screen,
             should_quit: false,
             status_message,
+            search_mode: false,
         })
     }
 
@@ -67,6 +70,11 @@ impl App {
 
         if should_quit(key) {
             self.request_quit();
+            return;
+        }
+
+        if self.search_mode {
+            self.handle_search_input(key);
             return;
         }
 
@@ -186,6 +194,11 @@ impl App {
                         next_status = Some(String::from("toggle filter"));
                         result
                     }
+                    KeyCode::Char('/') => {
+                        self.search_mode = true;
+                        next_status = Some(String::from(SEARCH_HELP));
+                        Ok(PickerAction::None)
+                    }
                     _ => Ok(PickerAction::None),
                 };
 
@@ -240,7 +253,14 @@ impl App {
                     next_status = Some(String::from("untitled buffer | ctrl+s save | ctrl+q quit"));
                 }
                 KeyCode::Char('/') => {
-                    next_status = Some(String::from("search coming in the next slice"));
+                    match Picker::new(env::current_dir().unwrap_or_else(|_| PathBuf::from("."))) {
+                        Ok(picker) => {
+                            next_screen = Some(Screen::Picker(picker));
+                            self.search_mode = true;
+                            next_status = Some(String::from(SEARCH_HELP));
+                        }
+                        Err(error) => next_status = Some(error.to_string()),
+                    }
                 }
                 KeyCode::Char('q') | KeyCode::Char('Q') => should_quit_now = true,
                 _ => {}
@@ -289,6 +309,7 @@ impl App {
             Screen::Picker(picker) => ViewModel::Picker {
                 cwd: picker.cwd_display(),
                 filter: picker.filter_label().to_owned(),
+                query: picker.query().to_owned(),
                 entries: picker.visible_entries(list_height),
                 selected_row: picker.selected_screen_row(),
                 metadata: picker
@@ -313,6 +334,7 @@ impl App {
                     .map(|entry| (entry.display_path(), entry.relative_age()))
                     .collect(),
                 selected_row: welcome.selected_index(),
+                search_active: self.search_mode,
             },
         }
     }
@@ -383,6 +405,48 @@ impl App {
             Err(_) => WelcomeState::default(),
         }
     }
+
+    fn handle_search_input(&mut self, key: KeyEvent) {
+        let Screen::Picker(picker) = &mut self.screen else {
+            self.search_mode = false;
+            return;
+        };
+
+        match key.code {
+            KeyCode::Esc => {
+                let _ = picker.clear_query();
+                self.search_mode = false;
+                self.status_message = String::from(PICKER_HELP);
+            }
+            KeyCode::Enter => {
+                self.search_mode = false;
+                self.status_message = if picker.query().is_empty() {
+                    String::from(PICKER_HELP)
+                } else {
+                    format!("filter: {}", picker.query())
+                };
+            }
+            KeyCode::Backspace => match picker.pop_query() {
+                Ok(()) => {
+                    self.status_message = format!("search: {}", picker.query());
+                }
+                Err(error) => {
+                    self.status_message = error.to_string();
+                    self.search_mode = false;
+                }
+            },
+            KeyCode::Char(ch) if is_insertable(key.modifiers) => match picker.append_query(ch) {
+                Ok(()) => {
+                    self.status_message = format!("search: {}", picker.query());
+                }
+                Err(error) => {
+                    self.status_message = error.to_string();
+                    self.search_mode = false;
+                }
+            },
+            _ => {}
+        }
+    }
 }
 
 fn is_insertable(modifiers: KeyModifiers) -> bool {
@@ -447,6 +511,7 @@ pub enum ViewModel {
     Picker {
         cwd: String,
         filter: String,
+        query: String,
         entries: Vec<PickerEntry>,
         selected_row: Option<usize>,
         metadata: [String; 4],
@@ -456,6 +521,7 @@ pub enum ViewModel {
         shortcuts: Vec<(String, String)>,
         recents: Vec<(String, String)>,
         selected_row: Option<usize>,
+        search_active: bool,
     },
 }
 
