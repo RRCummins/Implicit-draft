@@ -6,8 +6,10 @@ use ratatui::DefaultTerminal;
 
 use crate::{
     buffer::Buffer,
+    markdown,
     picker::{Picker, PickerAction, PickerEntry},
     recents, render,
+    theme::Theme,
     welcome::{BRAILLE_LOGO, SHORTCUTS, WelcomeState},
 };
 
@@ -23,6 +25,7 @@ pub struct App {
     should_quit: bool,
     status_message: String,
     search_mode: bool,
+    theme: Theme,
 }
 
 impl App {
@@ -44,6 +47,7 @@ impl App {
             should_quit: false,
             status_message,
             search_mode: false,
+            theme: Theme::source_hints_default(),
         })
     }
 
@@ -291,15 +295,16 @@ impl App {
         }
     }
 
-    pub fn current_view(&self, list_height: usize, list_width: usize) -> ViewModel {
+    pub fn current_view(&self, list_height: usize, _list_width: usize) -> ViewModel {
         match &self.screen {
             Screen::Editor(editor) => ViewModel::Editor {
-                lines: editor.buffer.visible_lines(list_height, list_width),
+                lines: markdown::style_document(editor.buffer.lines(), &self.theme),
                 cursor: if editor.quit_dialog_open {
                     None
                 } else {
                     editor.buffer.cursor_screen_position()
                 },
+                scroll: editor.buffer.scroll_offset(),
                 dialog: editor.quit_dialog_open.then_some([
                     String::from("Save before quitting?"),
                     String::from("Enter/y/ctrl+q: discard   ctrl+s: save and stay"),
@@ -349,7 +354,7 @@ impl App {
                     "[ ]"
                 };
                 format!(
-                    " {} [Source] {}  Ln {}, Col {}  {} ",
+                    " {} [Source+Hints] {}  Ln {}, Col {}  {} ",
                     editor.file_name(),
                     modified_flag,
                     row + 1,
@@ -504,8 +509,9 @@ enum Screen {
 #[derive(Debug)]
 pub enum ViewModel {
     Editor {
-        lines: Vec<String>,
+        lines: Vec<ratatui::text::Line<'static>>,
         cursor: Option<(usize, usize)>,
+        scroll: (usize, usize),
         dialog: Option<[String; 3]>,
     },
     Picker {

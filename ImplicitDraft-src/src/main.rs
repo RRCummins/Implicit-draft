@@ -1,9 +1,11 @@
 mod app;
 mod buffer;
+mod markdown;
 mod picker;
 mod recents;
 mod render;
 mod terminal;
+mod theme;
 mod welcome;
 
 use std::path::PathBuf;

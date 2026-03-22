@@ -23,8 +23,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         ViewModel::Editor {
             lines,
             cursor,
+            scroll,
             dialog,
-        } => draw_editor(frame, buffer_area, lines, cursor, dialog),
+        } => draw_editor(frame, buffer_area, lines, cursor, scroll, dialog),
         ViewModel::Picker {
             cwd,
             filter,
@@ -67,12 +68,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 fn draw_editor(
     frame: &mut Frame,
     area: Rect,
-    lines: Vec<String>,
+    lines: Vec<Line<'static>>,
     cursor: Option<(usize, usize)>,
+    scroll: (usize, usize),
     dialog: Option<[String; 3]>,
 ) {
-    let editor = Paragraph::new(lines.into_iter().map(Line::raw).collect::<Vec<_>>())
-        .block(Block::default());
+    let editor = Paragraph::new(lines).block(Block::default());
+    let editor = editor.scroll((scroll.0 as u16, scroll.1 as u16));
     frame.render_widget(editor, area);
 
     if let Some((column, row)) = cursor {

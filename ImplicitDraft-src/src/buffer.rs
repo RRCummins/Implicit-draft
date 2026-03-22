@@ -204,15 +204,6 @@ impl Buffer {
         true
     }
 
-    pub fn visible_lines(&self, height: usize, width: usize) -> Vec<String> {
-        let end = (self.scroll_row + height).min(self.lines.len());
-
-        self.lines[self.scroll_row..end]
-            .iter()
-            .map(|line| clip_line(line, self.scroll_col, width))
-            .collect()
-    }
-
     pub fn cursor_screen_position(&self) -> Option<(usize, usize)> {
         if self.cursor_row < self.scroll_row || self.cursor_col < self.scroll_col {
             return None;
@@ -230,6 +221,14 @@ impl Buffer {
 
     pub fn is_dirty(&self) -> bool {
         self.dirty
+    }
+
+    pub fn lines(&self) -> &[String] {
+        &self.lines
+    }
+
+    pub fn scroll_offset(&self) -> (usize, usize) {
+        (self.scroll_row, self.scroll_col)
     }
 
     fn current_line(&self) -> &str {
@@ -350,14 +349,6 @@ fn byte_index(line: &str, column: usize) -> usize {
         .nth(column)
         .map(|(index, _)| index)
         .unwrap_or(line.len())
-}
-
-fn clip_line(line: &str, start: usize, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-
-    line.chars().skip(start).take(width).collect()
 }
 
 #[cfg(test)]
