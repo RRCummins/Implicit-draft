@@ -1,38 +1,46 @@
-use std::{path::PathBuf, time::Duration};
+use std::{env, path::PathBuf, time::Duration};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::DefaultTerminal;
 
-use crate::{buffer::Buffer, render};
+use crate::{
+    buffer::Buffer,
+    picker::{Picker, PickerAction, PickerEntry},
+    recents, render,
+    welcome::{BRAILLE_LOGO, SHORTCUTS, WelcomeState},
+};
 
 const FRAME_POLL_INTERVAL: Duration = Duration::from_millis(250);
-const CURRENT_MODE: &str = "[Source]";
+const EDITOR_HELP: &str = "ctrl+z undo | ctrl+r redo | ctrl+s save | ctrl+q quit";
+const PICKER_HELP: &str = "enter open | a toggle filter | esc home";
+const HOME_HELP: &str = "o open | n new | enter recent | / search | q quit";
 
 #[derive(Debug)]
 pub struct App {
-    buffer: Buffer,
-    file_path: Option<PathBuf>,
+    screen: Screen,
     should_quit: bool,
-    quit_dialog_open: bool,
     status_message: String,
-    viewport_height: usize,
 }
 
 impl App {
     pub fn new(file_path: Option<PathBuf>) -> Result<Self> {
-        let buffer = match file_path.as_deref() {
-            Some(path) => Buffer::from_path(path)?,
-            None => Buffer::empty(),
+        let (screen, status_message) = match file_path {
+            Some(path) => {
+                let editor = EditorState::open(path.clone())?;
+                let _ = recents::remember(&path);
+                (Screen::Editor(editor), String::from(EDITOR_HELP))
+            }
+            None => (
+                Screen::Welcome(Self::load_welcome_state()),
+                String::from(HOME_HELP),
+            ),
         };
 
         Ok(Self {
-            buffer,
-            file_path,
+            screen,
             should_quit: false,
-            quit_dialog_open: false,
-            status_message: String::from("ctrl+z undo | ctrl+r redo | ctrl+s save | ctrl+q quit"),
-            viewport_height: 1,
+            status_message,
         })
     }
 
@@ -62,159 +70,317 @@ impl App {
             return;
         }
 
-        if self.is_confirming_quit() {
-            self.handle_quit_dialog(key);
-            return;
-        }
+        let mut next_status = None;
+        let mut next_screen = None;
+        let mut should_quit_now = false;
 
-        match key.code {
-            KeyCode::Left => self.buffer.move_left(),
-            KeyCode::Right => self.buffer.move_right(),
-            KeyCode::Up => self.buffer.move_up(),
-            KeyCode::Down => self.buffer.move_down(),
-            KeyCode::Home => self.buffer.move_home(),
-            KeyCode::End => self.buffer.move_end(),
-            KeyCode::PageUp => self.buffer.page_up(self.viewport_height),
-            KeyCode::PageDown => self.buffer.page_down(self.viewport_height),
-            KeyCode::Backspace => self.apply_edit(Buffer::backspace),
-            KeyCode::Delete => self.apply_edit(Buffer::delete_forward),
-            KeyCode::Enter => self.apply_edit(Buffer::insert_newline),
-            KeyCode::Tab => self.insert_tab(),
-            KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => self.undo(),
-            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => self.redo(),
-            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Err(error) = self.save() {
-                    self.status_message = error.to_string();
+        match &mut self.screen {
+            Screen::Editor(editor) => {
+                if editor.quit_dialog_open {
+                    match key.code {
+                        KeyCode::Enter | KeyCode::Char('y') => should_quit_now = true,
+                        KeyCode::Esc | KeyCode::Char('n') => {
+                            editor.quit_dialog_open = false;
+                            next_status = Some(String::from("quit canceled"));
+                        }
+                        KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            should_quit_now = true;
+                        }
+                        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            match Self::save_editor(editor) {
+                                Ok(()) => next_status = Some(String::from("saved")),
+                                Err(error) => next_status = Some(error.to_string()),
+                            }
+                        }
+                        _ => {}
+                    }
+                } else {
+                    match key.code {
+                        KeyCode::Left => editor.buffer.move_left(),
+                        KeyCode::Right => editor.buffer.move_right(),
+                        KeyCode::Up => editor.buffer.move_up(),
+                        KeyCode::Down => editor.buffer.move_down(),
+                        KeyCode::Home => editor.buffer.move_home(),
+                        KeyCode::End => editor.buffer.move_end(),
+                        KeyCode::PageUp => editor.buffer.page_up(editor.viewport_height),
+                        KeyCode::PageDown => editor.buffer.page_down(editor.viewport_height),
+                        KeyCode::Backspace => {
+                            Self::apply_edit(editor, Buffer::backspace);
+                            next_status = Some(String::from("editing"));
+                        }
+                        KeyCode::Delete => {
+                            Self::apply_edit(editor, Buffer::delete_forward);
+                            next_status = Some(String::from("editing"));
+                        }
+                        KeyCode::Enter => {
+                            Self::apply_edit(editor, Buffer::insert_newline);
+                            next_status = Some(String::from("editing"));
+                        }
+                        KeyCode::Tab => {
+                            Self::apply_edit(editor, |buffer| buffer.insert_spaces(4));
+                            next_status = Some(String::from("editing"));
+                        }
+                        KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            next_status = Some(if editor.buffer.undo() {
+                                String::from("undo")
+                            } else {
+                                String::from("nothing to undo")
+                            });
+                        }
+                        KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            next_status = Some(if editor.buffer.redo() {
+                                String::from("redo")
+                            } else {
+                                String::from("nothing to redo")
+                            });
+                        }
+                        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            match Self::save_editor(editor) {
+                                Ok(()) => next_status = Some(String::from("saved")),
+                                Err(error) => next_status = Some(error.to_string()),
+                            }
+                        }
+                        KeyCode::Char(ch) if is_insertable(key.modifiers) => {
+                            Self::apply_edit(editor, |buffer| buffer.insert_char(ch));
+                            next_status = Some(String::from("editing"));
+                        }
+                        _ => {}
+                    }
                 }
             }
-            KeyCode::Char(ch) if is_insertable(key.modifiers) => self.insert_char(ch),
-            _ => {}
+            Screen::Picker(picker) => {
+                let action = match key.code {
+                    KeyCode::Up => {
+                        picker.move_up();
+                        next_status = Some(String::from("browse"));
+                        Ok(PickerAction::None)
+                    }
+                    KeyCode::Down => {
+                        picker.move_down();
+                        next_status = Some(String::from("browse"));
+                        Ok(PickerAction::None)
+                    }
+                    KeyCode::PageUp => {
+                        picker.page_up(10);
+                        next_status = Some(String::from("browse"));
+                        Ok(PickerAction::None)
+                    }
+                    KeyCode::PageDown => {
+                        picker.page_down(10);
+                        next_status = Some(String::from("browse"));
+                        Ok(PickerAction::None)
+                    }
+                    KeyCode::Left | KeyCode::Backspace => {
+                        let result = picker.go_parent().map(|_| PickerAction::None);
+                        next_status = Some(String::from("parent"));
+                        result
+                    }
+                    KeyCode::Enter | KeyCode::Right => picker.open_selected(),
+                    KeyCode::Esc => {
+                        next_screen = Some(Screen::Welcome(Self::load_welcome_state()));
+                        next_status = Some(String::from(HOME_HELP));
+                        Ok(PickerAction::None)
+                    }
+                    KeyCode::Char('a') => {
+                        let result = picker.toggle_show_all().map(|_| PickerAction::None);
+                        next_status = Some(String::from("toggle filter"));
+                        result
+                    }
+                    _ => Ok(PickerAction::None),
+                };
+
+                match action {
+                    Ok(PickerAction::None) => {}
+                    Ok(PickerAction::OpenFile(path)) => match EditorState::open(path.clone()) {
+                        Ok(editor) => {
+                            let _ = recents::remember(&path);
+                            next_screen = Some(Screen::Editor(editor));
+                            next_status = Some(String::from(
+                                "opened from picker | ctrl+s save | ctrl+q quit",
+                            ));
+                        }
+                        Err(error) => next_status = Some(error.to_string()),
+                    },
+                    Err(error) => next_status = Some(error.to_string()),
+                }
+            }
+            Screen::Welcome(welcome) => match key.code {
+                KeyCode::Up => {
+                    welcome.move_up();
+                    next_status = Some(String::from("browse recents"));
+                }
+                KeyCode::Down => {
+                    welcome.move_down();
+                    next_status = Some(String::from("browse recents"));
+                }
+                KeyCode::Enter => {
+                    if let Some(path) = welcome.selected_path() {
+                        match EditorState::open(path.clone()) {
+                            Ok(editor) => {
+                                let _ = recents::remember(&path);
+                                next_screen = Some(Screen::Editor(editor));
+                                next_status =
+                                    Some(String::from("opened recent | ctrl+s save | ctrl+q quit"));
+                            }
+                            Err(error) => next_status = Some(error.to_string()),
+                        }
+                    }
+                }
+                KeyCode::Char('o') | KeyCode::Char('O') => {
+                    match Picker::new(env::current_dir().unwrap_or_else(|_| PathBuf::from("."))) {
+                        Ok(picker) => {
+                            next_screen = Some(Screen::Picker(picker));
+                            next_status = Some(String::from(PICKER_HELP));
+                        }
+                        Err(error) => next_status = Some(error.to_string()),
+                    }
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') => {
+                    next_screen = Some(Screen::Editor(EditorState::empty()));
+                    next_status = Some(String::from("untitled buffer | ctrl+s save | ctrl+q quit"));
+                }
+                KeyCode::Char('/') => {
+                    next_status = Some(String::from("search coming in the next slice"));
+                }
+                KeyCode::Char('q') | KeyCode::Char('Q') => should_quit_now = true,
+                _ => {}
+            },
+        }
+
+        if let Some(screen) = next_screen {
+            self.screen = screen;
+        }
+
+        if let Some(status_message) = next_status {
+            self.status_message = status_message;
+        }
+
+        if should_quit_now {
+            self.should_quit = true;
         }
     }
 
     pub fn sync_viewport(&mut self, height: usize, width: usize) {
-        self.viewport_height = height;
-        self.buffer.sync_viewport(height, width);
-    }
-
-    pub fn visible_lines(&self, height: usize, width: usize) -> Vec<String> {
-        self.buffer.visible_lines(height, width)
-    }
-
-    pub fn cursor_screen_position(&self) -> Option<(usize, usize)> {
-        if self.is_confirming_quit() {
-            return None;
+        match &mut self.screen {
+            Screen::Editor(editor) => {
+                editor.viewport_height = height;
+                editor.buffer.sync_viewport(height, width);
+            }
+            Screen::Picker(picker) => picker.sync_viewport(height),
+            Screen::Welcome(_) => {}
         }
-
-        self.buffer.cursor_screen_position()
     }
 
-    pub fn buffer_name(&self) -> &str {
-        match &self.file_path {
-            Some(path) => path.to_str().unwrap_or("[non-utf8 path]"),
-            None => "[picker pending]",
+    pub fn current_view(&self, list_height: usize, list_width: usize) -> ViewModel {
+        match &self.screen {
+            Screen::Editor(editor) => ViewModel::Editor {
+                lines: editor.buffer.visible_lines(list_height, list_width),
+                cursor: if editor.quit_dialog_open {
+                    None
+                } else {
+                    editor.buffer.cursor_screen_position()
+                },
+                dialog: editor.quit_dialog_open.then_some([
+                    String::from("Save before quitting?"),
+                    String::from("Enter/y/ctrl+q: discard   ctrl+s: save and stay"),
+                    String::from("Esc or n: cancel"),
+                ]),
+            },
+            Screen::Picker(picker) => ViewModel::Picker {
+                cwd: picker.cwd_display(),
+                filter: picker.filter_label().to_owned(),
+                entries: picker.visible_entries(list_height),
+                selected_row: picker.selected_screen_row(),
+                metadata: picker
+                    .selected_entry()
+                    .map(|entry| entry.metadata_lines())
+                    .unwrap_or([
+                        String::from("path: -"),
+                        String::from("type: -"),
+                        String::from("size: -"),
+                        String::from("modified: -"),
+                    ]),
+            },
+            Screen::Welcome(welcome) => ViewModel::Welcome {
+                logo: BRAILLE_LOGO.iter().map(|line| (*line).to_owned()).collect(),
+                shortcuts: SHORTCUTS
+                    .iter()
+                    .map(|(label, value)| ((*label).to_owned(), (*value).to_owned()))
+                    .collect(),
+                recents: welcome
+                    .recents()
+                    .iter()
+                    .map(|entry| (entry.display_path(), entry.relative_age()))
+                    .collect(),
+                selected_row: welcome.selected_index(),
+            },
         }
     }
 
     pub fn status_line(&self) -> String {
-        let (row, col) = self.buffer.cursor();
-        let modified_flag = if self.buffer.is_dirty() { "[+]" } else { "[ ]" };
-        format!(
-            " {} {} {}  Ln {}, Col {}  {} ",
-            self.buffer_name(),
-            CURRENT_MODE,
-            modified_flag,
-            row + 1,
-            col + 1,
-            self.status_message
-        )
-    }
-
-    pub fn quit_dialog_lines(&self) -> Option<[String; 3]> {
-        self.is_confirming_quit().then(|| {
-            [
-                String::from("Save before quitting?"),
-                String::from("Enter/y/ctrl+q: discard   ctrl+s: save and stay"),
-                String::from("Esc or n: cancel"),
-            ]
-        })
+        match &self.screen {
+            Screen::Editor(editor) => {
+                let (row, col) = editor.buffer.cursor();
+                let modified_flag = if editor.buffer.is_dirty() {
+                    "[+]"
+                } else {
+                    "[ ]"
+                };
+                format!(
+                    " {} [Source] {}  Ln {}, Col {}  {} ",
+                    editor.file_name(),
+                    modified_flag,
+                    row + 1,
+                    col + 1,
+                    self.status_message
+                )
+            }
+            Screen::Picker(picker) => format!(
+                " {} [Picker]  filter: {}  {} ",
+                picker.cwd_display(),
+                picker.filter_label(),
+                self.status_message
+            ),
+            Screen::Welcome(_) => format!(" welcome [Home]  {} ", self.status_message),
+        }
     }
 
     fn request_quit(&mut self) {
-        if self.buffer.is_dirty() {
-            self.quit_dialog_open = true;
-            self.status_message = String::from("unsaved changes");
-            return;
+        match &mut self.screen {
+            Screen::Editor(editor) => {
+                if editor.buffer.is_dirty() {
+                    editor.quit_dialog_open = true;
+                    self.status_message = String::from("unsaved changes");
+                    return;
+                }
+            }
+            Screen::Picker(_) | Screen::Welcome(_) => {}
         }
 
         self.should_quit = true;
     }
 
-    fn save(&mut self) -> Result<()> {
-        let Some(path) = self.file_path.as_deref() else {
-            self.status_message = String::from("save-as flow not implemented yet");
-            return Ok(());
+    fn save_editor(editor: &mut EditorState) -> Result<()> {
+        let Some(path) = editor.file_path.as_deref() else {
+            return Err(anyhow!("save-as flow not implemented yet"));
         };
 
-        self.buffer.save_to_path(path)?;
-        self.quit_dialog_open = false;
-        self.status_message = String::from("saved");
+        editor.buffer.save_to_path(path)?;
+        editor.quit_dialog_open = false;
         Ok(())
     }
 
-    fn insert_char(&mut self, ch: char) {
-        self.apply_edit(|buffer| buffer.insert_char(ch));
-    }
-
-    fn insert_tab(&mut self) {
-        self.apply_edit(|buffer| buffer.insert_spaces(4));
-    }
-
-    fn apply_edit<F>(&mut self, edit: F)
+    fn apply_edit<F>(editor: &mut EditorState, edit: F)
     where
         F: FnOnce(&mut Buffer),
     {
-        edit(&mut self.buffer);
-        self.status_message = String::from("editing");
+        edit(&mut editor.buffer);
     }
 
-    fn undo(&mut self) {
-        if self.buffer.undo() {
-            self.status_message = String::from("undo");
-        } else {
-            self.status_message = String::from("nothing to undo");
-        }
-    }
-
-    fn redo(&mut self) {
-        if self.buffer.redo() {
-            self.status_message = String::from("redo");
-        } else {
-            self.status_message = String::from("nothing to redo");
-        }
-    }
-
-    fn is_confirming_quit(&self) -> bool {
-        self.quit_dialog_open
-    }
-
-    fn handle_quit_dialog(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Enter => self.should_quit = true,
-            KeyCode::Esc | KeyCode::Char('n') => {
-                self.quit_dialog_open = false;
-                self.status_message = String::from("quit canceled");
-            }
-            KeyCode::Char('y') => self.should_quit = true,
-            KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.should_quit = true;
-            }
-            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Err(error) = self.save() {
-                    self.status_message = error.to_string();
-                }
-            }
-            _ => {}
+    fn load_welcome_state() -> WelcomeState {
+        match recents::load() {
+            Ok(recents) => WelcomeState::new(recents),
+            Err(_) => WelcomeState::default(),
         }
     }
 }
@@ -225,6 +391,72 @@ fn is_insertable(modifiers: KeyModifiers) -> bool {
 
 fn should_quit(key: KeyEvent) -> bool {
     key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+#[derive(Debug)]
+pub struct EditorState {
+    buffer: Buffer,
+    file_path: Option<PathBuf>,
+    quit_dialog_open: bool,
+    viewport_height: usize,
+}
+
+impl EditorState {
+    fn open(path: PathBuf) -> Result<Self> {
+        let buffer = Buffer::from_path(&path)?;
+
+        Ok(Self {
+            buffer,
+            file_path: Some(path),
+            quit_dialog_open: false,
+            viewport_height: 1,
+        })
+    }
+
+    fn empty() -> Self {
+        Self {
+            buffer: Buffer::empty(),
+            file_path: None,
+            quit_dialog_open: false,
+            viewport_height: 1,
+        }
+    }
+
+    fn file_name(&self) -> &str {
+        match &self.file_path {
+            Some(path) => path.to_str().unwrap_or("[non-utf8 path]"),
+            None => "[untitled]",
+        }
+    }
+}
+
+#[derive(Debug)]
+enum Screen {
+    Editor(EditorState),
+    Picker(Picker),
+    Welcome(WelcomeState),
+}
+
+#[derive(Debug)]
+pub enum ViewModel {
+    Editor {
+        lines: Vec<String>,
+        cursor: Option<(usize, usize)>,
+        dialog: Option<[String; 3]>,
+    },
+    Picker {
+        cwd: String,
+        filter: String,
+        entries: Vec<PickerEntry>,
+        selected_row: Option<usize>,
+        metadata: [String; 4],
+    },
+    Welcome {
+        logo: Vec<String>,
+        shortcuts: Vec<(String, String)>,
+        recents: Vec<(String, String)>,
+        selected_row: Option<usize>,
+    },
 }
 
 #[cfg(test)]
