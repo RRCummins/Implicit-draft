@@ -7,6 +7,7 @@ use ratatui::DefaultTerminal;
 use crate::{buffer::Buffer, render};
 
 const FRAME_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const CURRENT_MODE: &str = "[Source]";
 
 #[derive(Debug)]
 pub struct App {
@@ -119,8 +120,9 @@ impl App {
         let (row, col) = self.buffer.cursor();
         let modified_flag = if self.buffer.is_dirty() { "[+]" } else { "[ ]" };
         format!(
-            " {} {}  Ln {}, Col {}  {} ",
+            " {} {} {}  Ln {}, Col {}  {} ",
             self.buffer_name(),
+            CURRENT_MODE,
             modified_flag,
             row + 1,
             col + 1,
