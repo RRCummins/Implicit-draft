@@ -6,20 +6,24 @@ use ratatui::{
 use crate::theme::Theme;
 
 pub fn style_document(lines: &[String], theme: &Theme) -> Vec<Line<'static>> {
-    let mut in_code_block = false;
+    let mut fence_marker: Option<&str> = None;
     let mut rendered = Vec::with_capacity(lines.len());
 
     for line in lines {
         let trimmed = line.trim_start();
-        let is_fence = trimmed.starts_with("```");
+        let fence = fence_marker_for(trimmed);
 
-        if is_fence {
+        if fence.is_some() {
             rendered.push(Line::from(vec![Span::styled(line.clone(), theme.code)]));
-            in_code_block = !in_code_block;
+            match (fence_marker, fence) {
+                (None, Some(marker)) => fence_marker = Some(marker),
+                (Some(active), Some(marker)) if active == marker => fence_marker = None,
+                _ => {}
+            }
             continue;
         }
 
-        if in_code_block {
+        if fence_marker.is_some() {
             rendered.push(Line::from(vec![Span::styled(line.clone(), theme.code)]));
             continue;
         }
@@ -61,15 +65,6 @@ fn inline_spans(line: &str, theme: &Theme, base: Style) -> Vec<Span<'static>> {
     let mut remaining = line;
 
     while !remaining.is_empty() {
-        if let Some(link_end) = parse_link(remaining) {
-            spans.push(Span::styled(
-                remaining[..link_end].to_owned(),
-                base.patch(theme.link),
-            ));
-            remaining = &remaining[link_end..];
-            continue;
-        }
-
         if let Some((plain, special, style)) = next_inline_segment(remaining, theme) {
             if !plain.is_empty() {
                 spans.push(Span::styled(plain.to_owned(), base));
@@ -87,6 +82,16 @@ fn inline_spans(line: &str, theme: &Theme, base: Style) -> Vec<Span<'static>> {
 }
 
 fn next_inline_segment<'a>(line: &'a str, theme: &Theme) -> Option<(&'a str, &'a str, Style)> {
+    let mut best = parse_link(line).map(|(plain_end, segment_end)| {
+        (
+            &line[..plain_end],
+            &line[plain_end..segment_end],
+            theme.link,
+            plain_end,
+            segment_end,
+        )
+    });
+
     let patterns = [
         ("`", "`", theme.code),
         ("**", "**", theme.bold),
@@ -94,8 +99,6 @@ fn next_inline_segment<'a>(line: &'a str, theme: &Theme) -> Option<(&'a str, &'a
         ("*", "*", theme.italic),
         ("_", "_", theme.italic),
     ];
-
-    let mut best: Option<(&str, &str, Style, usize, usize)> = None;
 
     for (start, end, style) in patterns {
         if let Some((start_index, end_index)) = find_wrapped(line, start, end) {
@@ -129,15 +132,22 @@ fn find_wrapped(line: &str, start: &str, end: &str) -> Option<(usize, usize)> {
     Some((start_index, search_from + end_index + end.len()))
 }
 
-fn parse_link(line: &str) -> Option<usize> {
+fn parse_link(line: &str) -> Option<(usize, usize)> {
     let start = line.find('[')?;
-    if start != 0 {
-        return None;
-    }
+    let mid_relative = line[start..].find("](")?;
+    let mid = start + mid_relative;
+    let end_relative = line[mid + 2..].find(')')?;
+    Some((start, mid + 2 + end_relative + 1))
+}
 
-    let mid = line.find("](")?;
-    let end = line[mid + 2..].find(')')?;
-    Some(mid + 2 + end + 1)
+fn fence_marker_for(trimmed: &str) -> Option<&'static str> {
+    if trimmed.starts_with("```") {
+        Some("```")
+    } else if trimmed.starts_with("~~~") {
+        Some("~~~")
+    } else {
+        None
+    }
 }
 
 fn is_rule(line: &str) -> bool {
@@ -206,7 +216,38 @@ mod tests {
 
     #[test]
     fn detects_subsequence_link_queries() {
-        assert_eq!(parse_link("[OpenAI](https://openai.com) rest"), Some(28));
-        assert_eq!(parse_link("text [OpenAI](https://openai.com)"), None);
+        assert_eq!(
+            parse_link("[OpenAI](https://openai.com) rest"),
+            Some((0, 28))
+        );
+        assert_eq!(
+            parse_link("text [OpenAI](https://openai.com)"),
+            Some((5, 33))
+        );
+    }
+
+    #[test]
+    fn styles_links_after_plain_prefix() {
+        let theme = Theme::source_hints_default();
+        let line = style_document(&[String::from("see [docs](https://example.com)")], &theme);
+
+        assert_eq!(line[0].spans.len(), 2);
+        assert_eq!(line[0].spans[0].content.as_ref(), "see ");
+    }
+
+    #[test]
+    fn supports_tilde_fences() {
+        let theme = Theme::source_hints_default();
+        let rendered = style_document(
+            &[
+                String::from("~~~rust"),
+                String::from("fn main() {}"),
+                String::from("~~~"),
+            ],
+            &theme,
+        );
+
+        assert_eq!(rendered.len(), 3);
+        assert_eq!(rendered[1].spans.len(), 1);
     }
 }

@@ -47,7 +47,7 @@ impl App {
             should_quit: false,
             status_message,
             search_mode: false,
-            theme: Theme::source_hints_default(),
+            theme: Theme::load_named("dark").unwrap_or_else(|_| Theme::source_hints_default()),
         })
     }
 
