@@ -13,7 +13,7 @@ pub struct App {
     buffer: Buffer,
     file_path: Option<PathBuf>,
     should_quit: bool,
-    confirm_quit: bool,
+    quit_dialog_open: bool,
     status_message: String,
     viewport_height: usize,
 }
@@ -29,8 +29,8 @@ impl App {
             buffer,
             file_path,
             should_quit: false,
-            confirm_quit: false,
-            status_message: String::from("ctrl+s save | ctrl+q quit"),
+            quit_dialog_open: false,
+            status_message: String::from("ctrl+z undo | ctrl+r redo | ctrl+s save | ctrl+q quit"),
             viewport_height: 1,
         })
     }
@@ -61,9 +61,8 @@ impl App {
             return;
         }
 
-        if key.code == KeyCode::Esc {
-            self.confirm_quit = false;
-            self.status_message = String::from("quit canceled");
+        if self.is_confirming_quit() {
+            self.handle_quit_dialog(key);
             return;
         }
 
@@ -80,6 +79,8 @@ impl App {
             KeyCode::Delete => self.apply_edit(Buffer::delete_forward),
             KeyCode::Enter => self.apply_edit(Buffer::insert_newline),
             KeyCode::Tab => self.insert_tab(),
+            KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => self.undo(),
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => self.redo(),
             KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Err(error) = self.save() {
                     self.status_message = error.to_string();
@@ -100,6 +101,10 @@ impl App {
     }
 
     pub fn cursor_screen_position(&self) -> Option<(usize, usize)> {
+        if self.is_confirming_quit() {
+            return None;
+        }
+
         self.buffer.cursor_screen_position()
     }
 
@@ -113,25 +118,29 @@ impl App {
     pub fn status_line(&self) -> String {
         let (row, col) = self.buffer.cursor();
         let modified_flag = if self.buffer.is_dirty() { "[+]" } else { "[ ]" };
-        let base = format!(
+        format!(
             " {} {}  Ln {}, Col {}  {} ",
             self.buffer_name(),
             modified_flag,
             row + 1,
             col + 1,
             self.status_message
-        );
+        )
+    }
 
-        if self.confirm_quit {
-            format!("{base}| press ctrl+q again to discard changes")
-        } else {
-            base
-        }
+    pub fn quit_dialog_lines(&self) -> Option<[String; 3]> {
+        self.is_confirming_quit().then(|| {
+            [
+                String::from("Save before quitting?"),
+                String::from("Enter/y/ctrl+q: discard   ctrl+s: save and stay"),
+                String::from("Esc or n: cancel"),
+            ]
+        })
     }
 
     fn request_quit(&mut self) {
-        if self.buffer.is_dirty() && !self.confirm_quit {
-            self.confirm_quit = true;
+        if self.buffer.is_dirty() {
+            self.quit_dialog_open = true;
             self.status_message = String::from("unsaved changes");
             return;
         }
@@ -146,7 +155,7 @@ impl App {
         };
 
         self.buffer.save_to_path(path)?;
-        self.confirm_quit = false;
+        self.quit_dialog_open = false;
         self.status_message = String::from("saved");
         Ok(())
     }
@@ -156,11 +165,7 @@ impl App {
     }
 
     fn insert_tab(&mut self) {
-        self.apply_edit(|buffer| {
-            for _ in 0..4 {
-                buffer.insert_char(' ');
-            }
-        });
+        self.apply_edit(|buffer| buffer.insert_spaces(4));
     }
 
     fn apply_edit<F>(&mut self, edit: F)
@@ -168,8 +173,47 @@ impl App {
         F: FnOnce(&mut Buffer),
     {
         edit(&mut self.buffer);
-        self.confirm_quit = false;
         self.status_message = String::from("editing");
+    }
+
+    fn undo(&mut self) {
+        if self.buffer.undo() {
+            self.status_message = String::from("undo");
+        } else {
+            self.status_message = String::from("nothing to undo");
+        }
+    }
+
+    fn redo(&mut self) {
+        if self.buffer.redo() {
+            self.status_message = String::from("redo");
+        } else {
+            self.status_message = String::from("nothing to redo");
+        }
+    }
+
+    fn is_confirming_quit(&self) -> bool {
+        self.quit_dialog_open
+    }
+
+    fn handle_quit_dialog(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Enter => self.should_quit = true,
+            KeyCode::Esc | KeyCode::Char('n') => {
+                self.quit_dialog_open = false;
+                self.status_message = String::from("quit canceled");
+            }
+            KeyCode::Char('y') => self.should_quit = true,
+            KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.should_quit = true;
+            }
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Err(error) = self.save() {
+                    self.status_message = error.to_string();
+                }
+            }
+            _ => {}
+        }
     }
 }
 

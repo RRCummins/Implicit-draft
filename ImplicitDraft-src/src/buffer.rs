@@ -2,6 +2,17 @@ use std::{fs, path::Path};
 
 use anyhow::{Context, Result};
 
+#[derive(Clone, Debug)]
+struct Snapshot {
+    lines: Vec<String>,
+    cursor_row: usize,
+    cursor_col: usize,
+    desired_col: usize,
+    scroll_row: usize,
+    scroll_col: usize,
+    dirty: bool,
+}
+
 #[derive(Debug)]
 pub struct Buffer {
     lines: Vec<String>,
@@ -11,6 +22,8 @@ pub struct Buffer {
     scroll_row: usize,
     scroll_col: usize,
     dirty: bool,
+    undo_stack: Vec<Snapshot>,
+    redo_stack: Vec<Snapshot>,
 }
 
 impl Buffer {
@@ -23,6 +36,8 @@ impl Buffer {
             scroll_row: 0,
             scroll_col: 0,
             dirty: false,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
         }
     }
 
@@ -134,66 +149,59 @@ impl Buffer {
     }
 
     pub fn insert_char(&mut self, ch: char) {
-        let column = self.cursor_col;
-        let line = self.current_line_mut();
-        let index = byte_index(line, column);
-        line.insert(index, ch);
-        self.cursor_col += 1;
-        self.desired_col = self.cursor_col;
-        self.dirty = true;
+        self.record_edit(|buffer| {
+            buffer.insert_char_raw(ch);
+            true
+        });
+    }
+
+    pub fn insert_spaces(&mut self, count: usize) {
+        self.record_edit(|buffer| {
+            if count == 0 {
+                return false;
+            }
+
+            for _ in 0..count {
+                buffer.insert_char_raw(' ');
+            }
+
+            true
+        });
     }
 
     pub fn insert_newline(&mut self) {
-        let column = self.cursor_col;
-        let line = self.current_line_mut();
-        let split_index = byte_index(line, column);
-        let tail = line.split_off(split_index);
-
-        self.cursor_row += 1;
-        self.cursor_col = 0;
-        self.desired_col = 0;
-        self.lines.insert(self.cursor_row, tail);
-        self.dirty = true;
+        self.record_edit(|buffer| {
+            buffer.insert_newline_raw();
+            true
+        });
     }
 
     pub fn backspace(&mut self) {
-        if self.cursor_col > 0 {
-            let column = self.cursor_col;
-            let line = self.current_line_mut();
-            let start = byte_index(line, column - 1);
-            let end = byte_index(line, column);
-            line.replace_range(start..end, "");
-            self.cursor_col -= 1;
-        } else if self.cursor_row > 0 {
-            let current = self.lines.remove(self.cursor_row);
-            self.cursor_row -= 1;
-            self.cursor_col = self.current_line_len();
-            self.current_line_mut().push_str(&current);
-        } else {
-            return;
-        }
-
-        self.desired_col = self.cursor_col;
-        self.dirty = true;
+        self.record_edit(Self::backspace_raw);
     }
 
     pub fn delete_forward(&mut self) {
-        let line_len = self.current_line_len();
+        self.record_edit(Self::delete_forward_raw);
+    }
 
-        if self.cursor_col < line_len {
-            let column = self.cursor_col;
-            let line = self.current_line_mut();
-            let start = byte_index(line, column);
-            let end = byte_index(line, column + 1);
-            line.replace_range(start..end, "");
-        } else if self.cursor_row + 1 < self.lines.len() {
-            let next_line = self.lines.remove(self.cursor_row + 1);
-            self.current_line_mut().push_str(&next_line);
-        } else {
-            return;
-        }
+    pub fn undo(&mut self) -> bool {
+        let Some(snapshot) = self.undo_stack.pop() else {
+            return false;
+        };
 
-        self.dirty = true;
+        self.redo_stack.push(self.snapshot());
+        self.restore_snapshot(snapshot);
+        true
+    }
+
+    pub fn redo(&mut self) -> bool {
+        let Some(snapshot) = self.redo_stack.pop() else {
+            return false;
+        };
+
+        self.undo_stack.push(self.snapshot());
+        self.restore_snapshot(snapshot);
+        true
     }
 
     pub fn visible_lines(&self, height: usize, width: usize) -> Vec<String> {
@@ -234,6 +242,102 @@ impl Buffer {
 
     fn current_line_len(&self) -> usize {
         line_len(self.current_line())
+    }
+
+    fn insert_char_raw(&mut self, ch: char) {
+        let column = self.cursor_col;
+        let line = self.current_line_mut();
+        let index = byte_index(line, column);
+        line.insert(index, ch);
+        self.cursor_col += 1;
+        self.desired_col = self.cursor_col;
+    }
+
+    fn insert_newline_raw(&mut self) {
+        let column = self.cursor_col;
+        let line = self.current_line_mut();
+        let split_index = byte_index(line, column);
+        let tail = line.split_off(split_index);
+
+        self.cursor_row += 1;
+        self.cursor_col = 0;
+        self.desired_col = 0;
+        self.lines.insert(self.cursor_row, tail);
+    }
+
+    fn backspace_raw(&mut self) -> bool {
+        if self.cursor_col > 0 {
+            let column = self.cursor_col;
+            let line = self.current_line_mut();
+            let start = byte_index(line, column - 1);
+            let end = byte_index(line, column);
+            line.replace_range(start..end, "");
+            self.cursor_col -= 1;
+        } else if self.cursor_row > 0 {
+            let current = self.lines.remove(self.cursor_row);
+            self.cursor_row -= 1;
+            self.cursor_col = self.current_line_len();
+            self.current_line_mut().push_str(&current);
+        } else {
+            return false;
+        }
+
+        self.desired_col = self.cursor_col;
+        true
+    }
+
+    fn delete_forward_raw(&mut self) -> bool {
+        let line_len = self.current_line_len();
+
+        if self.cursor_col < line_len {
+            let column = self.cursor_col;
+            let line = self.current_line_mut();
+            let start = byte_index(line, column);
+            let end = byte_index(line, column + 1);
+            line.replace_range(start..end, "");
+        } else if self.cursor_row + 1 < self.lines.len() {
+            let next_line = self.lines.remove(self.cursor_row + 1);
+            self.current_line_mut().push_str(&next_line);
+        } else {
+            return false;
+        }
+
+        true
+    }
+
+    fn record_edit<F>(&mut self, edit: F)
+    where
+        F: FnOnce(&mut Self) -> bool,
+    {
+        let snapshot = self.snapshot();
+
+        if edit(self) {
+            self.undo_stack.push(snapshot);
+            self.redo_stack.clear();
+            self.dirty = true;
+        }
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            lines: self.lines.clone(),
+            cursor_row: self.cursor_row,
+            cursor_col: self.cursor_col,
+            desired_col: self.desired_col,
+            scroll_row: self.scroll_row,
+            scroll_col: self.scroll_col,
+            dirty: self.dirty,
+        }
+    }
+
+    fn restore_snapshot(&mut self, snapshot: Snapshot) {
+        self.lines = snapshot.lines;
+        self.cursor_row = snapshot.cursor_row;
+        self.cursor_col = snapshot.cursor_col;
+        self.desired_col = snapshot.desired_col;
+        self.scroll_row = snapshot.scroll_row;
+        self.scroll_col = snapshot.scroll_col;
+        self.dirty = snapshot.dirty;
     }
 }
 
@@ -289,5 +393,45 @@ mod tests {
 
         assert_eq!(buffer.lines, vec!["abcdef".to_owned()]);
         assert_eq!(buffer.cursor(), (0, 3));
+    }
+
+    #[test]
+    fn undo_restores_previous_content() {
+        let mut buffer = Buffer::from_text("ab");
+        buffer.cursor_col = 2;
+
+        buffer.insert_char('c');
+
+        assert!(buffer.undo());
+        assert_eq!(buffer.lines, vec!["ab".to_owned()]);
+        assert_eq!(buffer.cursor(), (0, 2));
+        assert!(!buffer.is_dirty());
+    }
+
+    #[test]
+    fn redo_reapplies_undone_edit() {
+        let mut buffer = Buffer::from_text("ab");
+        buffer.cursor_col = 2;
+
+        buffer.insert_char('c');
+        assert!(buffer.undo());
+        assert!(buffer.redo());
+
+        assert_eq!(buffer.lines, vec!["abc".to_owned()]);
+        assert_eq!(buffer.cursor(), (0, 3));
+        assert!(buffer.is_dirty());
+    }
+
+    #[test]
+    fn new_edit_clears_redo_history() {
+        let mut buffer = Buffer::from_text("ab");
+        buffer.cursor_col = 2;
+
+        buffer.insert_char('c');
+        assert!(buffer.undo());
+        buffer.insert_char('d');
+
+        assert!(!buffer.redo());
+        assert_eq!(buffer.lines, vec!["abd".to_owned()]);
     }
 }

@@ -1,9 +1,9 @@
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Flex, Layout, Rect},
     style::{Modifier, Style},
     text::Line,
-    widgets::{Block, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
 use crate::app::App;
@@ -33,4 +33,31 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Paragraph::new(status).style(Style::default().add_modifier(Modifier::REVERSED));
 
     frame.render_widget(status_bar, status_area);
+
+    if let Some(lines) = app.quit_dialog_lines() {
+        let dialog_area = centered_rect(frame.area(), 52, 7);
+        frame.render_widget(Clear, dialog_area);
+
+        let dialog = Paragraph::new(lines.into_iter().map(Line::raw).collect::<Vec<_>>())
+            .block(
+                Block::default()
+                    .title(" Unsaved Changes ")
+                    .borders(Borders::ALL),
+            )
+            .wrap(Wrap { trim: false });
+
+        frame.render_widget(dialog, dialog_area);
+    }
+}
+
+fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+    let [vertical] = Layout::vertical([Constraint::Length(height.min(area.height))])
+        .flex(Flex::Center)
+        .areas(area);
+
+    let [horizontal] = Layout::horizontal([Constraint::Length(width.min(area.width))])
+        .flex(Flex::Center)
+        .areas(vertical);
+
+    horizontal
 }
