@@ -1,4 +1,5 @@
 mod app;
+mod buffer;
 mod render;
 mod terminal;
 
@@ -19,7 +20,7 @@ struct Cli {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let mut terminal = terminal::init()?;
-    let mut app = App::new(cli.file);
+    let mut app = App::new(cli.file)?;
 
     let run_result = app.run(&mut terminal);
     let restore_result = terminal::restore();
