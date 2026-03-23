@@ -11,10 +11,13 @@ use crate::{
     theme::Theme,
 };
 
+const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
 #[derive(Clone, Copy)]
 struct WelcomeMeta {
     selected_row: Option<usize>,
     search_active: bool,
+    tick: u64,
 }
 
 struct WelcomeView<'a> {
@@ -64,6 +67,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             recents,
             selected_row,
             search_active,
+            tick,
         } => draw_welcome(
             frame,
             buffer_area,
@@ -75,6 +79,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 meta: WelcomeMeta {
                     selected_row,
                     search_active,
+                    tick,
                 },
             },
             theme,
@@ -219,22 +224,25 @@ fn draw_welcome(frame: &mut Frame, area: Rect, welcome: WelcomeView<'_>, theme: 
         Layout::horizontal([Constraint::Length(24), Constraint::Min(20)]).areas(hero_area);
     let [shortcuts_area, recents_area] = two_column(body_area);
 
-    let logo_widget = Paragraph::new(
-        welcome
-            .logo
-            .iter()
-            .cloned()
-            .map(Line::raw)
-            .collect::<Vec<_>>(),
-    )
-    .style(theme.background)
-    .block(
-        Block::default()
-            .title(" Braille Logo ")
-            .title_style(theme.ui_chrome)
-            .borders(Borders::ALL)
-            .border_style(theme.ui_chrome),
-    );
+    let spinner_char = SPINNER[(welcome.meta.tick as usize) % SPINNER.len()];
+    let mut logo_lines: Vec<Line> = welcome
+        .logo
+        .iter()
+        .cloned()
+        .map(Line::raw)
+        .collect();
+    logo_lines.push(Line::raw(""));
+    logo_lines.push(Line::raw(format!("  {spinner_char}")));
+
+    let logo_widget = Paragraph::new(logo_lines)
+        .style(theme.background)
+        .block(
+            Block::default()
+                .title(" implicit ")
+                .title_style(theme.ui_chrome)
+                .borders(Borders::ALL)
+                .border_style(theme.ui_chrome),
+        );
     frame.render_widget(logo_widget, logo_area);
 
     let title_lines = vec![

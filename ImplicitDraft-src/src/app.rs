@@ -13,7 +13,7 @@ use crate::{
     welcome::{BRAILLE_LOGO, SHORTCUTS, WelcomeState},
 };
 
-const FRAME_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const FRAME_POLL_INTERVAL: Duration = Duration::from_millis(80);
 const EDITOR_HELP: &str = "ctrl+z undo | ctrl+r redo | ctrl+s save | ctrl+w home | ? controls";
 const PREVIEW_HELP: &str = "ctrl+p source+hints | arrows/page move | preview is read-only";
 const PICKER_HELP: &str = "enter/right open | left/backspace parent | a filter | esc home";
@@ -57,6 +57,7 @@ pub struct App {
     search_mode: bool,
     theme: Theme,
     overlay: Option<Overlay>,
+    tick: u64,
 }
 
 #[derive(Debug)]
@@ -99,6 +100,7 @@ impl App {
             search_mode: false,
             theme: Theme::load_named("dark").unwrap_or_else(|_| Theme::source_hints_default()),
             overlay: None,
+            tick: 0,
         }
     }
 
@@ -109,6 +111,8 @@ impl App {
             if event::poll(FRAME_POLL_INTERVAL)? {
                 self.handle_event(event::read()?);
             }
+
+            self.tick = self.tick.wrapping_add(1);
         }
 
         Ok(())
@@ -519,6 +523,7 @@ impl App {
                     .collect(),
                 selected_row: welcome.selected_index(),
                 search_active: self.search_mode,
+                tick: self.tick,
             },
         }
     }
@@ -776,6 +781,7 @@ pub enum ViewModel {
         recents: Vec<(String, String)>,
         selected_row: Option<usize>,
         search_active: bool,
+        tick: u64,
     },
 }
 
@@ -792,6 +798,7 @@ mod tests {
             search_mode: false,
             theme: Theme::source_hints_default(),
             overlay: None,
+            tick: 0,
         }
     }
 
