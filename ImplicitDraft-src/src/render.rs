@@ -11,7 +11,6 @@ use crate::{
     theme::Theme,
 };
 
-
 #[derive(Clone, Copy)]
 struct WelcomeMeta {
     selected_row: Option<usize>,
@@ -227,7 +226,9 @@ fn draw_welcome(frame: &mut Frame, area: Rect, welcome: WelcomeView<'_>, theme: 
     // offset starts at LOGO_WIDTH and decreases by 2 per tick until 0.
     const LOGO_WIDTH: usize = 34;
     let tick = welcome.meta.tick as usize;
-    let offset = (LOGO_WIDTH).saturating_sub(tick.saturating_mul(2)).min(LOGO_WIDTH);
+    let offset = (LOGO_WIDTH)
+        .saturating_sub(tick.saturating_mul(2))
+        .min(LOGO_WIDTH);
 
     let logo_lines: Vec<Line> = welcome
         .logo

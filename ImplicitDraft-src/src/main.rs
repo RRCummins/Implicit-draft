@@ -1,5 +1,6 @@
 mod app;
 mod buffer;
+mod config;
 mod markdown;
 mod picker;
 mod preview;
@@ -15,7 +16,10 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Parser;
 
-use crate::app::{App, StartupTarget};
+use crate::{
+    app::{App, StartupTarget},
+    config::AppConfig,
+};
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "Terminal markdown editor", long_about = None)]
@@ -26,8 +30,15 @@ struct Cli {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let config = match AppConfig::load() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("implicit: {error}");
+            AppConfig::default()
+        }
+    };
     let mut terminal = terminal::init()?;
-    let mut app = App::new(resolve_startup_target(cli.file));
+    let mut app = App::new(resolve_startup_target(cli.file), config);
 
     let run_result = app.run(&mut terminal);
     let restore_result = terminal::restore();

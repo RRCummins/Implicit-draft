@@ -6,6 +6,7 @@ use ratatui::DefaultTerminal;
 
 use crate::{
     buffer::Buffer,
+    config::{AppConfig, DefaultMode},
     markdown,
     picker::{Picker, PickerAction, PickerEntry},
     preview, recents, render,
@@ -16,6 +17,7 @@ use crate::{
 const FRAME_POLL_INTERVAL: Duration = Duration::from_millis(80);
 const EDITOR_HELP: &str = "ctrl+z undo | ctrl+r redo | ctrl+s save | ctrl+w home | ? controls";
 const PREVIEW_HELP: &str = "ctrl+p source+hints | arrows/page move | preview is read-only";
+const SOURCE_HELP: &str = "ctrl+p source+hints | plain text editing | ctrl+w home | ? controls";
 const PICKER_HELP: &str = "enter/right open | left/backspace parent | a filter | esc home";
 const HOME_HELP: &str = "o open | n new | enter recent | / search | ? controls | q quit";
 const SEARCH_HELP: &str = "type to filter | backspace delete | enter keep | esc clear";
@@ -24,13 +26,15 @@ const SEARCH_HELP: &str = "type to filter | backspace delete | enter keep | esc 
 enum EditorMode {
     SourceHints,
     Preview,
+    Source,
 }
 
 impl EditorMode {
     fn cycle(self) -> Self {
         match self {
             Self::SourceHints => Self::Preview,
-            Self::Preview => Self::SourceHints,
+            Self::Preview => Self::Source,
+            Self::Source => Self::SourceHints,
         }
     }
 
@@ -38,6 +42,7 @@ impl EditorMode {
         match self {
             Self::SourceHints => "Source+Hints",
             Self::Preview => "Preview",
+            Self::Source => "Source",
         }
     }
 
@@ -45,6 +50,17 @@ impl EditorMode {
         match self {
             Self::SourceHints => EDITOR_HELP,
             Self::Preview => PREVIEW_HELP,
+            Self::Source => SOURCE_HELP,
+        }
+    }
+}
+
+impl From<DefaultMode> for EditorMode {
+    fn from(value: DefaultMode) -> Self {
+        match value {
+            DefaultMode::SourceHints => Self::SourceHints,
+            DefaultMode::Preview => Self::Preview,
+            DefaultMode::Source => Self::Source,
         }
     }
 }
@@ -56,6 +72,7 @@ pub struct App {
     status_message: String,
     search_mode: bool,
     theme: Theme,
+    default_mode: EditorMode,
     overlay: Option<Overlay>,
     tick: u64,
 }
@@ -68,7 +85,11 @@ pub enum StartupTarget {
 }
 
 impl App {
-    pub fn new(startup: StartupTarget) -> Self {
+    pub fn new(startup: StartupTarget, config: AppConfig) -> Self {
+        let default_mode = EditorMode::from(config.default_mode);
+        let theme = Theme::load_named(&config.theme).unwrap_or_else(|_| {
+            Theme::load_named("dark").unwrap_or_else(|_| Theme::source_hints_default())
+        });
         let (screen, status_message) = match startup {
             StartupTarget::Browse(path) => match Picker::new(path.clone()) {
                 Ok(picker) => (Screen::Picker(picker), String::from(PICKER_HELP)),
@@ -77,10 +98,10 @@ impl App {
                     format!("failed to browse {}: {error}", path.display()),
                 ),
             },
-            StartupTarget::Open(path) => match EditorState::open(path.clone()) {
+            StartupTarget::Open(path) => match EditorState::open(path.clone(), default_mode) {
                 Ok(editor) => {
                     let _ = recents::remember(&path);
-                    (Screen::Editor(editor), String::from(EDITOR_HELP))
+                    (Screen::Editor(editor), String::from(default_mode.help()))
                 }
                 Err(error) => (
                     Screen::Welcome(Self::load_welcome_state()),
@@ -98,7 +119,8 @@ impl App {
             should_quit: false,
             status_message,
             search_mode: false,
-            theme: Theme::load_named("dark").unwrap_or_else(|_| Theme::source_hints_default()),
+            theme,
+            default_mode,
             overlay: None,
             tick: 0,
         }
@@ -361,16 +383,16 @@ impl App {
 
                 match action {
                     Ok(PickerAction::None) => {}
-                    Ok(PickerAction::OpenFile(path)) => match EditorState::open(path.clone()) {
-                        Ok(editor) => {
-                            let _ = recents::remember(&path);
-                            next_screen = Some(Screen::Editor(editor));
-                            next_status = Some(String::from(
-                                "opened from picker | ctrl+s save | ctrl+q quit",
-                            ));
+                    Ok(PickerAction::OpenFile(path)) => {
+                        match EditorState::open(path.clone(), self.default_mode) {
+                            Ok(editor) => {
+                                let _ = recents::remember(&path);
+                                next_screen = Some(Screen::Editor(editor));
+                                next_status = Some(String::from(self.default_mode.help()));
+                            }
+                            Err(error) => next_status = Some(error.to_string()),
                         }
-                        Err(error) => next_status = Some(error.to_string()),
-                    },
+                    }
                     Err(error) => next_status = Some(error.to_string()),
                 }
             }
@@ -389,12 +411,11 @@ impl App {
                 }
                 KeyCode::Enter => {
                     if let Some(path) = welcome.selected_path() {
-                        match EditorState::open(path.clone()) {
+                        match EditorState::open(path.clone(), self.default_mode) {
                             Ok(editor) => {
                                 let _ = recents::remember(&path);
                                 next_screen = Some(Screen::Editor(editor));
-                                next_status =
-                                    Some(String::from("opened recent | ctrl+s save | ctrl+q quit"));
+                                next_status = Some(String::from(self.default_mode.help()));
                             }
                             Err(error) => next_status = Some(error.to_string()),
                         }
@@ -410,8 +431,8 @@ impl App {
                     }
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') => {
-                    next_screen = Some(Screen::Editor(EditorState::empty()));
-                    next_status = Some(String::from("untitled buffer | ctrl+s save | ctrl+q quit"));
+                    next_screen = Some(Screen::Editor(EditorState::empty(self.default_mode)));
+                    next_status = Some(String::from(self.default_mode.help()));
                 }
                 KeyCode::Char('/') => {
                     match Picker::new(env::current_dir().unwrap_or_else(|_| PathBuf::from("."))) {
@@ -467,6 +488,13 @@ impl App {
                     EditorMode::Preview => {
                         preview::render_document(editor.buffer.lines(), &self.theme, list_width)
                     }
+                    EditorMode::Source => editor
+                        .buffer
+                        .lines()
+                        .iter()
+                        .cloned()
+                        .map(ratatui::text::Line::raw)
+                        .collect(),
                 },
                 cursor: if editor.dialog.is_some() || editor.mode == EditorMode::Preview {
                     None
@@ -657,7 +685,7 @@ pub struct EditorState {
 }
 
 impl EditorState {
-    fn open(path: PathBuf) -> Result<Self> {
+    fn open(path: PathBuf, mode: EditorMode) -> Result<Self> {
         let buffer = Buffer::from_path(&path)?;
 
         Ok(Self {
@@ -665,17 +693,17 @@ impl EditorState {
             file_path: Some(path),
             dialog: None,
             viewport_height: 1,
-            mode: EditorMode::SourceHints,
+            mode,
         })
     }
 
-    fn empty() -> Self {
+    fn empty(mode: EditorMode) -> Self {
         Self {
             buffer: Buffer::empty(),
             file_path: None,
             dialog: None,
             viewport_height: 1,
-            mode: EditorMode::SourceHints,
+            mode,
         }
     }
 
@@ -726,9 +754,15 @@ impl Overlay {
             ],
             Self::Editor(EditorMode::Preview) => vec![
                 "Arrows/Home/End/Page: move cursor",
-                "Ctrl+P source+hints mode   Ctrl+W return home",
+                "Ctrl+P source mode   Ctrl+W return home",
                 "Ctrl+S save   Ctrl+Q quit app",
                 "? or Esc close this dialog",
+            ],
+            Self::Editor(EditorMode::Source) => vec![
+                "Arrows/Home/End/Page: move cursor",
+                "Ctrl+S save   Ctrl+Z undo   Ctrl+R redo",
+                "Ctrl+P source+hints mode   Ctrl+W return home",
+                "Ctrl+Q quit app   ? or Esc close this dialog",
             ],
             Self::Picker => vec![
                 "Enter or Right: open file or enter folder",
@@ -792,11 +826,12 @@ mod tests {
 
     fn editor_app() -> App {
         App {
-            screen: Screen::Editor(EditorState::empty()),
+            screen: Screen::Editor(EditorState::empty(EditorMode::SourceHints)),
             should_quit: false,
             status_message: String::from(EDITOR_HELP),
             search_mode: false,
             theme: Theme::source_hints_default(),
+            default_mode: EditorMode::SourceHints,
             overlay: None,
             tick: 0,
         }
@@ -838,6 +873,25 @@ mod tests {
             panic!("editor screen");
         };
         assert_eq!(editor.mode, EditorMode::Preview);
+
+        let mut app = editor_app();
+        app.handle_event(Event::Key(KeyEvent {
+            code: KeyCode::Char('p'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }));
+        app.handle_event(Event::Key(KeyEvent {
+            code: KeyCode::Char('p'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }));
+
+        let Screen::Editor(editor) = app.screen else {
+            panic!("editor screen");
+        };
+        assert_eq!(editor.mode, EditorMode::Source);
     }
 
     #[test]
@@ -914,8 +968,28 @@ mod tests {
     }
 
     #[test]
+    fn source_mode_renders_plain_text() {
+        let mut app = editor_app();
+        let Screen::Editor(editor) = &mut app.screen else {
+            panic!("editor screen");
+        };
+        editor.buffer = Buffer::from_text("# Title");
+        editor.mode = EditorMode::Source;
+
+        let ViewModel::Editor { lines, .. } = app.current_view(10, 40) else {
+            panic!("editor view");
+        };
+
+        assert_eq!(lines[0].spans.len(), 1);
+        assert_eq!(lines[0].spans[0].content.as_ref(), "# Title");
+    }
+
+    #[test]
     fn startup_open_failure_falls_back_to_welcome() {
-        let app = App::new(StartupTarget::Open(PathBuf::from("missing-file.md")));
+        let app = App::new(
+            StartupTarget::Open(PathBuf::from("missing-file.md")),
+            AppConfig::default(),
+        );
 
         let Screen::Welcome(_) = app.screen else {
             panic!("welcome screen");
@@ -926,7 +1000,10 @@ mod tests {
 
     #[test]
     fn startup_browse_failure_falls_back_to_welcome() {
-        let app = App::new(StartupTarget::Browse(PathBuf::from("missing-folder")));
+        let app = App::new(
+            StartupTarget::Browse(PathBuf::from("missing-folder")),
+            AppConfig::default(),
+        );
 
         let Screen::Welcome(_) = app.screen else {
             panic!("welcome screen");
@@ -937,7 +1014,7 @@ mod tests {
 
     #[test]
     fn startup_welcome_uses_home_status() {
-        let app = App::new(StartupTarget::Welcome);
+        let app = App::new(StartupTarget::Welcome, AppConfig::default());
 
         let Screen::Welcome(_) = app.screen else {
             panic!("welcome screen");
