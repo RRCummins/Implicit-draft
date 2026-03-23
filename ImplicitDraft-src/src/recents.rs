@@ -41,14 +41,19 @@ impl RecentFile {
     }
 
     pub fn display_path(&self) -> String {
-        let parts: Vec<&str> = self.path
+        let parts: Vec<&str> = self
+            .path
             .components()
             .filter_map(|c| match c {
                 std::path::Component::Normal(s) => s.to_str(),
                 _ => None,
             })
             .collect();
-        let tail = if parts.len() > 3 { &parts[parts.len() - 3..] } else { &parts[..] };
+        let tail = if parts.len() > 3 {
+            &parts[parts.len() - 3..]
+        } else {
+            &parts[..]
+        };
         tail.join(" ❯ ")
     }
 

@@ -135,6 +135,18 @@ impl Buffer {
         self.desired_col = self.cursor_col;
     }
 
+    pub fn move_doc_start(&mut self) {
+        self.cursor_row = 0;
+        self.cursor_col = 0;
+        self.desired_col = 0;
+    }
+
+    pub fn move_doc_end(&mut self) {
+        self.cursor_row = self.lines.len().saturating_sub(1);
+        self.cursor_col = self.current_line_len();
+        self.desired_col = self.cursor_col;
+    }
+
     pub fn page_up(&mut self, height: usize) {
         let step = height.max(1);
         self.cursor_row = self.cursor_row.saturating_sub(step);
@@ -229,6 +241,14 @@ impl Buffer {
 
     pub fn line_count(&self) -> usize {
         self.lines.len()
+    }
+
+    pub fn total_char_count(&self) -> usize {
+        self.lines.iter().map(|line| line.chars().count()).sum()
+    }
+
+    pub fn current_line_char_count(&self) -> usize {
+        self.current_line_len()
     }
 
     pub fn scroll_offset(&self) -> (usize, usize) {
@@ -428,5 +448,26 @@ mod tests {
 
         assert!(!buffer.redo());
         assert_eq!(buffer.lines, vec!["abd".to_owned()]);
+    }
+
+    #[test]
+    fn document_jumps_move_to_start_and_end() {
+        let mut buffer = Buffer::from_text("alpha\nbeta");
+        buffer.move_doc_end();
+
+        assert_eq!(buffer.cursor(), (1, 4));
+
+        buffer.move_doc_start();
+        assert_eq!(buffer.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn reports_total_and_line_char_counts() {
+        let mut buffer = Buffer::from_text("alpha\nbeta");
+        buffer.move_down();
+
+        assert_eq!(buffer.line_count(), 2);
+        assert_eq!(buffer.current_line_char_count(), 4);
+        assert_eq!(buffer.total_char_count(), 9);
     }
 }

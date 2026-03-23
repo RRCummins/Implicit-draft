@@ -22,9 +22,9 @@ use crate::{
 const FRAME_POLL_INTERVAL: Duration = Duration::from_millis(80);
 const EDITOR_HELP: &str =
     "ctrl+e sidebar | ctrl+z undo | ctrl+s save | ctrl+, settings | ctrl+w home";
-const PREVIEW_HELP: &str =
-    "ctrl+e sidebar | ctrl+p source | ctrl+, settings | preview is read-only";
-const SOURCE_HELP: &str = "ctrl+e sidebar | ctrl+p source+hints | ctrl+, settings | ctrl+w home";
+const PREVIEW_HELP: &str = "home/end line | ctrl+home/end doc | ctrl+e sidebar | ctrl+p source";
+const SOURCE_HELP: &str =
+    "home/end line | ctrl+home/end doc | ctrl+e sidebar | ctrl+p source+hints";
 const PICKER_HELP: &str = "enter/right open | left/backspace parent | a filter | esc home";
 const HOME_HELP: &str = "o open | n new | c settings | enter recent | / search | q quit";
 const SEARCH_HELP: &str = "type to filter | backspace delete | enter keep | esc clear";
@@ -394,6 +394,12 @@ impl App {
                             KeyCode::Right => editor.buffer.move_right(),
                             KeyCode::Up => editor.buffer.move_up(),
                             KeyCode::Down => editor.buffer.move_down(),
+                            KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                editor.buffer.move_doc_start()
+                            }
+                            KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                editor.buffer.move_doc_end()
+                            }
                             KeyCode::Home => editor.buffer.move_home(),
                             KeyCode::End => editor.buffer.move_end(),
                             KeyCode::PageUp => editor.buffer.page_up(editor.viewport_height),
@@ -422,6 +428,12 @@ impl App {
                             KeyCode::Right => editor.buffer.move_right(),
                             KeyCode::Up => editor.buffer.move_up(),
                             KeyCode::Down => editor.buffer.move_down(),
+                            KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                editor.buffer.move_doc_start()
+                            }
+                            KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                editor.buffer.move_doc_end()
+                            }
                             KeyCode::Home => editor.buffer.move_home(),
                             KeyCode::End => editor.buffer.move_end(),
                             KeyCode::PageUp => editor.buffer.page_up(editor.viewport_height),
@@ -873,13 +885,19 @@ impl App {
                 } else {
                     "[ ]"
                 };
+                let total_lines = editor.buffer.line_count();
+                let total_chars = editor.buffer.total_char_count();
+                let line_chars = editor.buffer.current_line_char_count();
                 format!(
-                    " {} [{}] {}  Ln {}, Col {}  {} ",
+                    " {} [{}] {}  Ln {}/{}, Col {}  Line {} ch  Doc {} ch  {} ",
                     editor.file_name(),
                     editor.mode.label(),
                     modified_flag,
                     row + 1,
+                    total_lines,
                     col + 1,
+                    line_chars,
+                    total_chars,
                     self.status_message
                 )
             }
@@ -1109,7 +1127,11 @@ fn short_path(path: &std::path::Path) -> String {
             _ => None,
         })
         .collect();
-    let tail = if parts.len() > 3 { &parts[parts.len() - 3..] } else { &parts[..] };
+    let tail = if parts.len() > 3 {
+        &parts[parts.len() - 3..]
+    } else {
+        &parts[..]
+    };
     tail.join(" ❯ ")
 }
 
@@ -1223,7 +1245,7 @@ impl Overlay {
     fn lines(self) -> Vec<&'static str> {
         match self {
             Self::Editor(EditorMode::SourceHints) => vec![
-                "Arrows/Home/End/Page: move cursor",
+                "Arrows move   Home/End line start/end   Ctrl+Home/End doc start/end",
                 "Ctrl+S save   Ctrl+Z undo   Ctrl+R redo   Ctrl+E sidebar",
                 "Ctrl+P preview mode   Ctrl+, settings   Ctrl+W return home",
                 "When sidebar is open: Tab focus   Enter open file   Space/Right toggle dir",
@@ -1231,7 +1253,7 @@ impl Overlay {
                 "Ctrl+Q quit app   ? or Esc close this dialog",
             ],
             Self::Editor(EditorMode::Preview) => vec![
-                "Arrows/Home/End/Page: move cursor",
+                "Arrows move   Home/End line start/end   Ctrl+Home/End doc start/end",
                 "Ctrl+P source mode   Ctrl+E sidebar   Ctrl+, settings   Ctrl+W return home",
                 "When sidebar is open: Tab focus   Enter open file   Space/Right toggle dir",
                 "Ctrl+[ narrower   Ctrl+] wider",
@@ -1239,7 +1261,7 @@ impl Overlay {
                 "? or Esc close this dialog",
             ],
             Self::Editor(EditorMode::Source) => vec![
-                "Arrows/Home/End/Page: move cursor",
+                "Arrows move   Home/End line start/end   Ctrl+Home/End doc start/end",
                 "Ctrl+S save   Ctrl+Z undo   Ctrl+R redo   Ctrl+E sidebar",
                 "Ctrl+P source+hints mode   Ctrl+, settings   Ctrl+W return home",
                 "When sidebar is open: Tab focus   Enter open file   Space/Right toggle dir",
@@ -1878,6 +1900,42 @@ mod tests {
 
         assert_eq!(lines[0].spans.len(), 1);
         assert_eq!(lines[0].spans[0].content.as_ref(), "# Title");
+    }
+
+    #[test]
+    fn ctrl_end_jumps_to_document_end() {
+        let mut app = editor_app();
+        let Screen::Editor(editor) = &mut app.screen else {
+            panic!("editor screen");
+        };
+        editor.buffer = Buffer::from_text("alpha\nbeta");
+
+        app.handle_event(Event::Key(KeyEvent {
+            code: KeyCode::End,
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }));
+
+        let Screen::Editor(editor) = app.screen else {
+            panic!("editor screen");
+        };
+        assert_eq!(editor.buffer.cursor(), (1, 4));
+    }
+
+    #[test]
+    fn status_line_shows_document_stats() {
+        let mut app = editor_app();
+        let Screen::Editor(editor) = &mut app.screen else {
+            panic!("editor screen");
+        };
+        editor.buffer = Buffer::from_text("alpha\nbeta");
+        editor.buffer.move_down();
+
+        let status = app.status_line();
+        assert!(status.contains("Ln 2/2"));
+        assert!(status.contains("Line 4 ch"));
+        assert!(status.contains("Doc 9 ch"));
     }
 
     #[test]

@@ -230,11 +230,8 @@ fn draw_editor(frame: &mut Frame, area: Rect, editor: EditorView, theme: Theme) 
     let [title_area, editor_area] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(editor_area);
     frame.render_widget(
-        Paragraph::new(Line::styled(
-            format!(" {} ", editor.title),
-            theme.ui_chrome,
-        ))
-        .style(theme.background),
+        Paragraph::new(Line::styled(format!(" {} ", editor.title), theme.ui_chrome))
+            .style(theme.background),
         title_area,
     );
 
