@@ -408,7 +408,7 @@ fn render_spans(
             };
             spans.push(Span::styled(
                 line[byte_index..end].to_owned(),
-                theme.blockquote,
+                theme.code_comment,
             ));
             index = char_position_at_or_after(&chars, end);
             continue;
@@ -419,7 +419,7 @@ fn render_spans(
         {
             spans.push(Span::styled(
                 line[byte_index..].to_owned(),
-                theme.blockquote,
+                theme.code_comment,
             ));
             break;
         }
@@ -436,7 +436,7 @@ fn render_spans(
             };
             spans.push(Span::styled(
                 line[byte_index..end].to_owned(),
-                theme.blockquote,
+                theme.code_comment,
             ));
             index = char_position_at_or_after(&chars, end);
             continue;
@@ -444,14 +444,20 @@ fn render_spans(
 
         if grammar.string_delimiters.contains(&ch) {
             let end = find_string_end(line, &chars, index + 1, ch);
-            spans.push(Span::styled(line[byte_index..end].to_owned(), theme.code));
+            spans.push(Span::styled(
+                line[byte_index..end].to_owned(),
+                theme.code_string,
+            ));
             index = char_position_at_or_after(&chars, end);
             continue;
         }
 
         if ch.is_ascii_digit() {
             let end = find_number_end(line, &chars, index + 1);
-            spans.push(Span::styled(line[byte_index..end].to_owned(), theme.rule));
+            spans.push(Span::styled(
+                line[byte_index..end].to_owned(),
+                theme.code_number,
+            ));
             index = char_position_at_or_after(&chars, end);
             continue;
         }
@@ -460,9 +466,9 @@ fn render_spans(
             let end = find_ident_end(line, &chars, index + 1);
             let token = &line[byte_index..end];
             let style = if grammar.keywords.contains(&token) {
-                theme.link
+                theme.code_keyword
             } else if is_type_like(token, language) {
-                theme.bold
+                theme.code_type
             } else {
                 Style::default()
             };
@@ -472,7 +478,7 @@ fn render_spans(
         }
 
         let style = if is_punctuation(ch) {
-            theme.ui_chrome
+            theme.code_punctuation
         } else {
             Style::default()
         };
@@ -683,6 +689,19 @@ mod tests {
         );
 
         assert_eq!(rendered[0].spans[0].content.as_ref(), "1 │ ");
+    }
+
+    #[test]
+    fn keyword_tokens_use_code_keyword_style() {
+        let theme = Theme::source_hints_default();
+        let rendered = render_document(
+            &[String::from("fn main() {}")],
+            &theme,
+            Some(Path::new("main.rs")),
+            FileType::Code,
+        );
+
+        assert_eq!(rendered[0].spans[0].style, theme.code_keyword);
     }
 
     #[test]

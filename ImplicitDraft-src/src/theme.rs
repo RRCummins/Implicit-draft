@@ -17,6 +17,12 @@ pub struct Theme {
     pub bold: Style,
     pub italic: Style,
     pub code: Style,
+    pub code_keyword: Style,
+    pub code_string: Style,
+    pub code_comment: Style,
+    pub code_number: Style,
+    pub code_type: Style,
+    pub code_punctuation: Style,
     pub blockquote: Style,
     pub link: Style,
     pub rule: Style,
@@ -42,6 +48,12 @@ struct ThemeFile {
     italic: Option<String>,
     code: Option<String>,
     code_bg: Option<String>,
+    code_keyword: Option<String>,
+    code_string: Option<String>,
+    code_comment: Option<String>,
+    code_number: Option<String>,
+    code_type: Option<String>,
+    code_punctuation: Option<String>,
     blockquote: Option<String>,
     link: Option<String>,
     rule: Option<String>,
@@ -405,6 +417,18 @@ impl Theme {
             bold: Style::default().add_modifier(Modifier::BOLD),
             italic: Style::default().add_modifier(Modifier::ITALIC),
             code: Style::default().fg(palette.code_fg).bg(palette.code_bg),
+            code_keyword: Style::default()
+                .fg(palette.link)
+                .add_modifier(Modifier::BOLD),
+            code_string: Style::default().fg(palette.code_fg),
+            code_comment: Style::default()
+                .fg(palette.blockquote)
+                .add_modifier(Modifier::ITALIC),
+            code_number: Style::default().fg(palette.headings[3]),
+            code_type: Style::default()
+                .fg(palette.headings[1])
+                .add_modifier(Modifier::BOLD),
+            code_punctuation: Style::default().fg(palette.ui_chrome),
             blockquote: Style::default()
                 .fg(palette.blockquote)
                 .add_modifier(Modifier::ITALIC),
@@ -442,6 +466,12 @@ impl Theme {
         apply_fg(&mut self.italic, file.italic)?;
         apply_fg(&mut self.code, file.code)?;
         apply_bg(&mut self.code, file.code_bg)?;
+        apply_fg(&mut self.code_keyword, file.code_keyword)?;
+        apply_fg(&mut self.code_string, file.code_string)?;
+        apply_fg(&mut self.code_comment, file.code_comment)?;
+        apply_fg(&mut self.code_number, file.code_number)?;
+        apply_fg(&mut self.code_type, file.code_type)?;
+        apply_fg(&mut self.code_punctuation, file.code_punctuation)?;
         apply_fg(&mut self.blockquote, file.blockquote)?;
         apply_fg(&mut self.link, file.link)?;
         apply_fg(&mut self.rule, file.rule)?;
