@@ -13,6 +13,7 @@ pub const BRAILLE_LOGO: &[&str] = &[
 pub const SHORTCUTS: &[(&str, &str)] = &[
     ("O", "Open file picker"),
     ("N", "New untitled buffer"),
+    ("C", "Open settings"),
     ("Enter", "Open highlighted recent file"),
     ("/", "Search files (next)"),
     ("?", "Show controls"),

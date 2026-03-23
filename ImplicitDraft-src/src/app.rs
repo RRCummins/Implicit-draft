@@ -16,11 +16,14 @@ use crate::{
 };
 
 const FRAME_POLL_INTERVAL: Duration = Duration::from_millis(80);
-const EDITOR_HELP: &str = "ctrl+z undo | ctrl+r redo | ctrl+s save | ctrl+w home | ? controls";
-const PREVIEW_HELP: &str = "ctrl+p source+hints | arrows/page move | preview is read-only";
-const SOURCE_HELP: &str = "ctrl+p source+hints | plain text editing | ctrl+w home | ? controls";
+const EDITOR_HELP: &str =
+    "ctrl+z undo | ctrl+r redo | ctrl+s save | ctrl+, settings | ctrl+w home";
+const PREVIEW_HELP: &str =
+    "ctrl+p source | ctrl+, settings | arrows/page move | preview is read-only";
+const SOURCE_HELP: &str =
+    "ctrl+p source+hints | ctrl+, settings | plain text editing | ctrl+w home";
 const PICKER_HELP: &str = "enter/right open | left/backspace parent | a filter | esc home";
-const HOME_HELP: &str = "o open | n new | enter recent | / search | ? controls | q quit";
+const HOME_HELP: &str = "o open | n new | c settings | enter recent | / search | q quit";
 const SEARCH_HELP: &str = "type to filter | backspace delete | enter keep | esc clear";
 const CONFIG_HELP: &str = "tab switch pane | enter apply | ctrl+, close | s save | esc cancel";
 
@@ -458,6 +461,10 @@ impl App {
                 _ if keybindings.home.new_buffer.matches(key) => {
                     next_screen = Some(Screen::Editor(EditorState::empty(self.default_mode())));
                     next_status = Some(String::from(self.default_mode().help()));
+                }
+                _ if keybindings.home.settings.matches(key) => {
+                    self.open_config();
+                    return;
                 }
                 _ if keybindings.home.search.matches(key) => {
                     match Picker::new(env::current_dir().unwrap_or_else(|_| PathBuf::from("."))) {
@@ -951,19 +958,19 @@ impl Overlay {
             Self::Editor(EditorMode::SourceHints) => vec![
                 "Arrows/Home/End/Page: move cursor",
                 "Ctrl+S save   Ctrl+Z undo   Ctrl+R redo",
-                "Ctrl+P preview mode   Ctrl+W return home",
+                "Ctrl+P preview mode   Ctrl+, settings   Ctrl+W return home",
                 "Ctrl+Q quit app   ? or Esc close this dialog",
             ],
             Self::Editor(EditorMode::Preview) => vec![
                 "Arrows/Home/End/Page: move cursor",
-                "Ctrl+P source mode   Ctrl+W return home",
+                "Ctrl+P source mode   Ctrl+, settings   Ctrl+W return home",
                 "Ctrl+S save   Ctrl+Q quit app",
                 "? or Esc close this dialog",
             ],
             Self::Editor(EditorMode::Source) => vec![
                 "Arrows/Home/End/Page: move cursor",
                 "Ctrl+S save   Ctrl+Z undo   Ctrl+R redo",
-                "Ctrl+P source+hints mode   Ctrl+W return home",
+                "Ctrl+P source+hints mode   Ctrl+, settings   Ctrl+W return home",
                 "Ctrl+Q quit app   ? or Esc close this dialog",
             ],
             Self::Picker => vec![
@@ -980,7 +987,7 @@ impl Overlay {
                 "? or Esc close this dialog",
             ],
             Self::Home => vec![
-                "O open file picker   N new untitled buffer",
+                "O open file picker   N new untitled buffer   C settings",
                 "Enter open selected recent   Up/Down move",
                 "/ search files   Q quit",
                 "? or Esc close this dialog",
@@ -1050,6 +1057,21 @@ mod tests {
             screen: Screen::Editor(EditorState::empty(EditorMode::SourceHints)),
             should_quit: false,
             status_message: String::from(EDITOR_HELP),
+            search_mode: false,
+            theme: Theme::source_hints_default(),
+            config: AppConfig::default(),
+            keybindings: KeyBindings::default(),
+            config_return: None,
+            overlay: None,
+            tick: 0,
+        }
+    }
+
+    fn home_app() -> App {
+        App {
+            screen: Screen::Welcome(WelcomeState::default()),
+            should_quit: false,
+            status_message: String::from(HOME_HELP),
             search_mode: false,
             theme: Theme::source_hints_default(),
             config: AppConfig::default(),
@@ -1215,6 +1237,20 @@ mod tests {
         app.handle_event(Event::Key(KeyEvent {
             code: KeyCode::Char('g'),
             modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }));
+
+        assert!(matches!(app.screen, Screen::Config(_)));
+    }
+
+    #[test]
+    fn home_settings_binding_opens_config_screen() {
+        let mut app = home_app();
+
+        app.handle_event(Event::Key(KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::NONE,
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         }));

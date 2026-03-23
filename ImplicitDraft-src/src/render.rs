@@ -426,6 +426,7 @@ fn draw_welcome(frame: &mut Frame, area: Rect, welcome: WelcomeView<'_>, theme: 
         Line::raw(""),
         Line::raw("Press O to open a file"),
         Line::raw("Press N for a new untitled buffer"),
+        Line::raw("Press C for settings"),
     ];
     let title = Paragraph::new(title_lines)
         .style(theme.background)
@@ -486,7 +487,7 @@ fn draw_welcome(frame: &mut Frame, area: Rect, welcome: WelcomeView<'_>, theme: 
     let hint = Paragraph::new(vec![Line::raw(if welcome.meta.search_active {
         "/ search active in picker"
     } else {
-        "O open picker   N new buffer   Enter open recent   / search files   Q quit"
+        "O open picker   N new buffer   C settings   Enter open recent   / search files   Q quit"
     })])
     .style(theme.background.patch(theme.ui_chrome))
     .block(
