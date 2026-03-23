@@ -28,19 +28,22 @@ struct WelcomeView<'a> {
 }
 
 struct EditorView {
+    line_numbers: bool,
+    wrap: bool,
     lines: Vec<Line<'static>>,
     cursor: Option<(usize, usize)>,
     scroll: (usize, usize),
     dialog: Option<DialogView>,
-    line_numbers: bool,
 }
 
 struct ConfigView {
     themes: Vec<String>,
     selected_theme: usize,
+    applied_theme: String,
     active_pane: ConfigPane,
     options: Vec<(String, String)>,
     selected_option: usize,
+    preview_theme: Theme,
     preview_lines: Vec<Line<'static>>,
 }
 
@@ -55,6 +58,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     match app.current_view(buffer_area.height as usize, buffer_area.width as usize) {
         ViewModel::Editor {
+            line_numbers,
+            wrap,
             lines,
             cursor,
             scroll,
@@ -63,11 +68,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             frame,
             buffer_area,
             EditorView {
+                line_numbers,
+                wrap,
                 lines,
                 cursor,
                 scroll,
                 dialog,
-                line_numbers: app.line_numbers_enabled(),
             },
             theme,
         ),
@@ -90,9 +96,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         ViewModel::Config {
             themes,
             selected_theme,
+            applied_theme,
             active_pane,
             options,
             selected_option,
+            preview_theme,
             preview_lines,
         } => draw_config(
             frame,
@@ -100,9 +108,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             ConfigView {
                 themes,
                 selected_theme,
+                applied_theme,
                 active_pane,
                 options,
                 selected_option,
+                preview_theme,
                 preview_lines,
             },
             theme,
@@ -203,7 +213,13 @@ fn draw_editor(frame: &mut Frame, area: Rect, editor: EditorView, theme: Theme) 
     let editor_widget = Paragraph::new(lines)
         .block(Block::default())
         .style(theme.background);
-    let editor_widget = editor_widget.scroll((editor.scroll.0 as u16, editor.scroll.1 as u16));
+    let editor_widget = if editor.wrap {
+        editor_widget
+            .wrap(Wrap { trim: false })
+            .scroll((editor.scroll.0 as u16, 0))
+    } else {
+        editor_widget.scroll((editor.scroll.0 as u16, editor.scroll.1 as u16))
+    };
     frame.render_widget(editor_widget, editor_area);
 
     if let Some((column, row)) = editor.cursor {
@@ -287,7 +303,7 @@ fn draw_config(frame: &mut Frame, area: Rect, config: ConfigView, theme: Theme) 
         .iter()
         .enumerate()
         .map(|(index, name)| {
-            let prefix = if index == config.selected_theme {
+            let prefix = if *name == config.applied_theme {
                 "> "
             } else {
                 "  "
@@ -295,6 +311,8 @@ fn draw_config(frame: &mut Frame, area: Rect, config: ConfigView, theme: Theme) 
             let style = if config.active_pane == ConfigPane::Theme && index == config.selected_theme
             {
                 theme.selection.patch(theme.ui_chrome)
+            } else if *name == config.applied_theme {
+                theme.ui_chrome
             } else {
                 theme.background
             };
@@ -303,7 +321,11 @@ fn draw_config(frame: &mut Frame, area: Rect, config: ConfigView, theme: Theme) 
         .collect::<Vec<_>>();
     let theme_widget = Paragraph::new(theme_lines).style(theme.background).block(
         Block::default()
-            .title(" Theme ")
+            .title(if config.active_pane == ConfigPane::Theme {
+                " Theme * "
+            } else {
+                " Theme "
+            })
             .title_style(theme.ui_chrome)
             .borders(Borders::ALL)
             .border_style(theme.ui_chrome),
@@ -326,7 +348,11 @@ fn draw_config(frame: &mut Frame, area: Rect, config: ConfigView, theme: Theme) 
         .collect::<Vec<_>>();
     let options_widget = Paragraph::new(option_lines).style(theme.background).block(
         Block::default()
-            .title(" Options ")
+            .title(if config.active_pane == ConfigPane::Options {
+                " Options * "
+            } else {
+                " Options "
+            })
             .title_style(theme.ui_chrome)
             .borders(Borders::ALL)
             .border_style(theme.ui_chrome),
@@ -334,19 +360,19 @@ fn draw_config(frame: &mut Frame, area: Rect, config: ConfigView, theme: Theme) 
     frame.render_widget(options_widget, options_area);
 
     let preview_widget = Paragraph::new(config.preview_lines)
-        .style(theme.background)
+        .style(config.preview_theme.background)
         .block(
             Block::default()
                 .title(" Preview ")
-                .title_style(theme.ui_chrome)
+                .title_style(config.preview_theme.ui_chrome)
                 .borders(Borders::ALL)
-                .border_style(theme.ui_chrome),
+                .border_style(config.preview_theme.ui_chrome),
         )
         .wrap(Wrap { trim: false });
     frame.render_widget(preview_widget, preview_area);
 
     let hint = Paragraph::new(vec![Line::raw(
-        "Tab switch pane   Enter apply   S save   Esc cancel",
+        "Tab switch pane   Enter apply   Ctrl+, close   S save   Esc cancel",
     )])
     .style(theme.background.patch(theme.ui_chrome))
     .block(

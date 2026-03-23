@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::Deserialize;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -18,6 +19,146 @@ pub struct AppConfig {
     pub wrap: bool,
     pub vim_keys: bool,
     pub auto_save: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeConfig {
+    pub app: AppConfig,
+    pub keybindings: KeyBindings,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KeyBindings {
+    pub global: GlobalKeys,
+    pub editor: EditorKeys,
+    pub home: HomeKeys,
+    pub picker: PickerKeys,
+    pub config: ConfigKeys,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GlobalKeys {
+    pub settings: Shortcut,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EditorKeys {
+    pub save: Shortcut,
+    pub quit: Shortcut,
+    pub home: Shortcut,
+    pub cycle_mode: Shortcut,
+    pub undo: Shortcut,
+    pub redo: Shortcut,
+    pub controls: Shortcut,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HomeKeys {
+    pub open_picker: Shortcut,
+    pub new_buffer: Shortcut,
+    pub search: Shortcut,
+    pub quit: Shortcut,
+    pub controls: Shortcut,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PickerKeys {
+    pub search: Shortcut,
+    pub toggle_filter: Shortcut,
+    pub back_home: Shortcut,
+    pub controls: Shortcut,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfigKeys {
+    pub close: Shortcut,
+    pub save: Shortcut,
+    pub cancel: Shortcut,
+    pub controls: Shortcut,
+    pub switch_pane: Shortcut,
+    pub apply: Shortcut,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Shortcut {
+    code: ShortcutCode,
+    modifiers: KeyModifiers,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ShortcutCode {
+    Char(char),
+    Enter,
+    Esc,
+    Tab,
+    Backspace,
+    Delete,
+    Home,
+    End,
+    Left,
+    Right,
+    Up,
+    Down,
+    PageUp,
+    PageDown,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+struct KeyBindingsFile {
+    global: GlobalKeysFile,
+    editor: EditorKeysFile,
+    home: HomeKeysFile,
+    picker: PickerKeysFile,
+    config: ConfigKeysFile,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+struct GlobalKeysFile {
+    settings: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+struct EditorKeysFile {
+    save: Option<String>,
+    quit: Option<String>,
+    home: Option<String>,
+    cycle_mode: Option<String>,
+    undo: Option<String>,
+    redo: Option<String>,
+    controls: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+struct HomeKeysFile {
+    open_picker: Option<String>,
+    new_buffer: Option<String>,
+    search: Option<String>,
+    quit: Option<String>,
+    controls: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+struct PickerKeysFile {
+    search: Option<String>,
+    toggle_filter: Option<String>,
+    back_home: Option<String>,
+    controls: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+struct ConfigKeysFile {
+    close: Option<String>,
+    save: Option<String>,
+    cancel: Option<String>,
+    controls: Option<String>,
+    switch_pane: Option<String>,
+    apply: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
@@ -70,8 +211,13 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    pub fn load() -> Result<Self> {
-        Self::load_from_dir(&config_dir())
+    pub fn load_runtime() -> Result<RuntimeConfig> {
+        let dir = config_dir();
+        ensure_default_files(&dir)?;
+        Ok(RuntimeConfig {
+            app: Self::load_from_dir(&dir)?,
+            keybindings: KeyBindings::load_from_dir(&dir)?,
+        })
     }
 
     pub fn save(&self) -> Result<()> {
@@ -131,6 +277,190 @@ impl AppConfig {
     }
 }
 
+impl Default for KeyBindings {
+    fn default() -> Self {
+        Self {
+            global: GlobalKeys {
+                settings: Shortcut::parse("ctrl+,").expect("default shortcut"),
+            },
+            editor: EditorKeys {
+                save: Shortcut::parse("ctrl+s").expect("default shortcut"),
+                quit: Shortcut::parse("ctrl+q").expect("default shortcut"),
+                home: Shortcut::parse("ctrl+w").expect("default shortcut"),
+                cycle_mode: Shortcut::parse("ctrl+p").expect("default shortcut"),
+                undo: Shortcut::parse("ctrl+z").expect("default shortcut"),
+                redo: Shortcut::parse("ctrl+r").expect("default shortcut"),
+                controls: Shortcut::parse("?").expect("default shortcut"),
+            },
+            home: HomeKeys {
+                open_picker: Shortcut::parse("o").expect("default shortcut"),
+                new_buffer: Shortcut::parse("n").expect("default shortcut"),
+                search: Shortcut::parse("/").expect("default shortcut"),
+                quit: Shortcut::parse("q").expect("default shortcut"),
+                controls: Shortcut::parse("?").expect("default shortcut"),
+            },
+            picker: PickerKeys {
+                search: Shortcut::parse("/").expect("default shortcut"),
+                toggle_filter: Shortcut::parse("a").expect("default shortcut"),
+                back_home: Shortcut::parse("esc").expect("default shortcut"),
+                controls: Shortcut::parse("?").expect("default shortcut"),
+            },
+            config: ConfigKeys {
+                close: Shortcut::parse("ctrl+,").expect("default shortcut"),
+                save: Shortcut::parse("s").expect("default shortcut"),
+                cancel: Shortcut::parse("esc").expect("default shortcut"),
+                controls: Shortcut::parse("?").expect("default shortcut"),
+                switch_pane: Shortcut::parse("tab").expect("default shortcut"),
+                apply: Shortcut::parse("enter").expect("default shortcut"),
+            },
+        }
+    }
+}
+
+impl KeyBindings {
+    fn load_from_dir(dir: &Path) -> Result<Self> {
+        let path = dir.join("keybindings.toml");
+        let text = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        let parsed: KeyBindingsFile =
+            toml::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))?;
+        Self::merge(parsed)
+    }
+
+    fn merge(file: KeyBindingsFile) -> Result<Self> {
+        let defaults = Self::default();
+
+        Ok(Self {
+            global: GlobalKeys {
+                settings: parse_or_default(file.global.settings, defaults.global.settings)?,
+            },
+            editor: EditorKeys {
+                save: parse_or_default(file.editor.save, defaults.editor.save)?,
+                quit: parse_or_default(file.editor.quit, defaults.editor.quit)?,
+                home: parse_or_default(file.editor.home, defaults.editor.home)?,
+                cycle_mode: parse_or_default(file.editor.cycle_mode, defaults.editor.cycle_mode)?,
+                undo: parse_or_default(file.editor.undo, defaults.editor.undo)?,
+                redo: parse_or_default(file.editor.redo, defaults.editor.redo)?,
+                controls: parse_or_default(file.editor.controls, defaults.editor.controls)?,
+            },
+            home: HomeKeys {
+                open_picker: parse_or_default(file.home.open_picker, defaults.home.open_picker)?,
+                new_buffer: parse_or_default(file.home.new_buffer, defaults.home.new_buffer)?,
+                search: parse_or_default(file.home.search, defaults.home.search)?,
+                quit: parse_or_default(file.home.quit, defaults.home.quit)?,
+                controls: parse_or_default(file.home.controls, defaults.home.controls)?,
+            },
+            picker: PickerKeys {
+                search: parse_or_default(file.picker.search, defaults.picker.search)?,
+                toggle_filter: parse_or_default(
+                    file.picker.toggle_filter,
+                    defaults.picker.toggle_filter,
+                )?,
+                back_home: parse_or_default(file.picker.back_home, defaults.picker.back_home)?,
+                controls: parse_or_default(file.picker.controls, defaults.picker.controls)?,
+            },
+            config: ConfigKeys {
+                close: parse_or_default(file.config.close, defaults.config.close)?,
+                save: parse_or_default(file.config.save, defaults.config.save)?,
+                cancel: parse_or_default(file.config.cancel, defaults.config.cancel)?,
+                controls: parse_or_default(file.config.controls, defaults.config.controls)?,
+                switch_pane: parse_or_default(
+                    file.config.switch_pane,
+                    defaults.config.switch_pane,
+                )?,
+                apply: parse_or_default(file.config.apply, defaults.config.apply)?,
+            },
+        })
+    }
+}
+
+impl Shortcut {
+    pub fn parse(value: &str) -> Result<Self> {
+        let mut modifiers = KeyModifiers::NONE;
+        let mut key = None;
+
+        for part in value.split('+') {
+            let token = part.trim().to_lowercase();
+            match token.as_str() {
+                "ctrl" | "control" => modifiers.insert(KeyModifiers::CONTROL),
+                "alt" => modifiers.insert(KeyModifiers::ALT),
+                "shift" => modifiers.insert(KeyModifiers::SHIFT),
+                "enter" => key = Some(ShortcutCode::Enter),
+                "esc" | "escape" => key = Some(ShortcutCode::Esc),
+                "tab" => key = Some(ShortcutCode::Tab),
+                "backspace" => key = Some(ShortcutCode::Backspace),
+                "delete" | "del" => key = Some(ShortcutCode::Delete),
+                "home" => key = Some(ShortcutCode::Home),
+                "end" => key = Some(ShortcutCode::End),
+                "left" => key = Some(ShortcutCode::Left),
+                "right" => key = Some(ShortcutCode::Right),
+                "up" => key = Some(ShortcutCode::Up),
+                "down" => key = Some(ShortcutCode::Down),
+                "pageup" | "page_up" => key = Some(ShortcutCode::PageUp),
+                "pagedown" | "page_down" => key = Some(ShortcutCode::PageDown),
+                _ => {
+                    let mut chars = token.chars();
+                    let Some(ch) = chars.next() else {
+                        continue;
+                    };
+                    if chars.next().is_some() {
+                        anyhow::bail!("unsupported shortcut token: {token}");
+                    }
+                    key = Some(ShortcutCode::Char(ch));
+                }
+            }
+        }
+
+        let Some(code) = key else {
+            anyhow::bail!("shortcut is missing a key: {value}");
+        };
+
+        Ok(Self { code, modifiers })
+    }
+
+    pub fn matches(&self, key: KeyEvent) -> bool {
+        let modifiers = normalize_modifiers(key);
+        if modifiers != self.modifiers {
+            return false;
+        }
+
+        match (&self.code, key.code) {
+            (ShortcutCode::Char(expected), KeyCode::Char(actual)) => {
+                expected.eq_ignore_ascii_case(&actual)
+            }
+            (ShortcutCode::Enter, KeyCode::Enter)
+            | (ShortcutCode::Esc, KeyCode::Esc)
+            | (ShortcutCode::Tab, KeyCode::Tab)
+            | (ShortcutCode::Backspace, KeyCode::Backspace)
+            | (ShortcutCode::Delete, KeyCode::Delete)
+            | (ShortcutCode::Home, KeyCode::Home)
+            | (ShortcutCode::End, KeyCode::End)
+            | (ShortcutCode::Left, KeyCode::Left)
+            | (ShortcutCode::Right, KeyCode::Right)
+            | (ShortcutCode::Up, KeyCode::Up)
+            | (ShortcutCode::Down, KeyCode::Down)
+            | (ShortcutCode::PageUp, KeyCode::PageUp)
+            | (ShortcutCode::PageDown, KeyCode::PageDown) => true,
+            _ => false,
+        }
+    }
+}
+
+fn parse_or_default(value: Option<String>, default: Shortcut) -> Result<Shortcut> {
+    match value {
+        Some(value) => Shortcut::parse(&value),
+        None => Ok(default),
+    }
+}
+
+fn normalize_modifiers(key: KeyEvent) -> KeyModifiers {
+    let mut modifiers = key.modifiers;
+    if matches!(key.code, KeyCode::Char(_)) {
+        modifiers.remove(KeyModifiers::SHIFT);
+    }
+    modifiers
+}
+
 fn ensure_default_files(dir: &Path) -> Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
 
@@ -182,7 +512,39 @@ auto_save = false
 }
 
 fn default_keybindings_toml() -> &'static str {
-    "# key overrides land here in a later phase\n"
+    r#"[global]
+settings = "ctrl+,"
+
+[editor]
+save = "ctrl+s"
+quit = "ctrl+q"
+home = "ctrl+w"
+cycle_mode = "ctrl+p"
+undo = "ctrl+z"
+redo = "ctrl+r"
+controls = "?"
+
+[home]
+open_picker = "o"
+new_buffer = "n"
+search = "/"
+quit = "q"
+controls = "?"
+
+[picker]
+search = "/"
+toggle_filter = "a"
+back_home = "esc"
+controls = "?"
+
+[config]
+close = "ctrl+,"
+save = "s"
+cancel = "esc"
+controls = "?"
+switch_pane = "tab"
+apply = "enter"
+"#
 }
 
 #[cfg(test)]
@@ -257,6 +619,55 @@ line_numbers = true
         assert_eq!(
             config.to_toml(),
             "theme = \"gruvbox\"\nline_numbers = true\n"
+        );
+    }
+
+    #[test]
+    fn parses_ctrl_shortcut_strings() {
+        let shortcut = Shortcut::parse("ctrl+s").expect("shortcut");
+
+        assert!(shortcut.matches(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)));
+        assert!(!shortcut.matches(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn question_mark_shortcut_matches_shifted_char() {
+        let shortcut = Shortcut::parse("?").expect("shortcut");
+
+        assert!(shortcut.matches(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT)));
+    }
+
+    #[test]
+    fn keybindings_merge_overrides_defaults() {
+        let parsed: KeyBindingsFile = toml::from_str(
+            r#"
+[global]
+settings = "ctrl+g"
+
+[editor]
+save = "ctrl+x"
+"#,
+        )
+        .expect("keybindings");
+        let merged = KeyBindings::merge(parsed).expect("merge");
+
+        assert!(
+            merged
+                .global
+                .settings
+                .matches(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL,))
+        );
+        assert!(
+            merged
+                .editor
+                .save
+                .matches(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL,))
+        );
+        assert!(
+            merged
+                .editor
+                .quit
+                .matches(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL,))
         );
     }
 }

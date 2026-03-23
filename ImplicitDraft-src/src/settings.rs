@@ -1,11 +1,12 @@
 //! Holds config editor state and option navigation.
 
 use anyhow::Result;
+use ratatui::text::Line;
 
 use crate::{config::AppConfig, preview, theme::Theme};
 
 const TAB_WIDTH_OPTIONS: [usize; 3] = [2, 4, 8];
-const PREVIEW_SAMPLE: &str = "# Heading\n**bold** and *italic*\n`inline code`\n\n> blockquote\n\n- list item one\n- list item two\n\n[implicit.dev](https://implicit.dev)\n\n```rust\nfn main() {}\n```";
+const PREVIEW_SAMPLE: &str = "# Heading\n## Secondary Heading\n**bold** and *italic*\n`inline code`\n\n> blockquote\n\n- list item one\n- list item two\n- [x] done item\n\n[implicit.dev](https://implicit.dev)\n\n```rust\nfn main() {}\n```";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConfigPane {
@@ -63,6 +64,8 @@ pub struct ConfigOptionRow {
 #[derive(Debug)]
 pub struct ConfigState {
     original_config: AppConfig,
+    applied_config: AppConfig,
+    draft_config: AppConfig,
     theme_names: Vec<String>,
     selected_theme: usize,
     active_pane: ConfigPane,
@@ -84,15 +87,13 @@ impl ConfigState {
 
         Ok(Self {
             original_config: config.clone(),
+            applied_config: config.clone(),
+            draft_config: config.clone(),
             theme_names,
             selected_theme,
             active_pane: ConfigPane::Theme,
             selected_option: 0,
         })
-    }
-
-    pub fn original_config(&self) -> &AppConfig {
-        &self.original_config
     }
 
     pub fn active_pane(&self) -> ConfigPane {
@@ -115,7 +116,17 @@ impl ConfigState {
         &self.theme_names[self.selected_theme]
     }
 
-    pub fn preview_lines(&self, theme: &Theme, width: usize) -> Vec<ratatui::text::Line<'static>> {
+    pub fn applied_theme_name(&self) -> &str {
+        &self.applied_config.theme
+    }
+
+    pub fn preview_theme(&self) -> Theme {
+        Theme::load_named(&self.draft_config.theme).unwrap_or_else(|_| {
+            Theme::load_named("dark").unwrap_or_else(|_| Theme::source_hints_default())
+        })
+    }
+
+    pub fn preview_lines(&self, theme: &Theme, width: usize) -> Vec<Line<'static>> {
         let lines = PREVIEW_SAMPLE
             .lines()
             .map(str::to_owned)
@@ -123,18 +134,22 @@ impl ConfigState {
         preview::render_document(&lines, theme, width)
     }
 
-    pub fn option_rows(&self, config: &AppConfig) -> Vec<ConfigOptionRow> {
+    pub fn option_rows(&self) -> Vec<ConfigOptionRow> {
         ConfigOption::ALL
             .iter()
             .map(|option| ConfigOptionRow {
                 label: option.label().to_owned(),
                 value: match option {
-                    ConfigOption::DefaultMode => config.default_mode.label().to_owned(),
-                    ConfigOption::TabWidth => config.tab_width().to_string(),
-                    ConfigOption::LineNumbers => on_off(config.line_numbers).to_owned(),
-                    ConfigOption::Wrap => on_off(config.wrap).to_owned(),
-                    ConfigOption::VimKeys => on_off(config.vim_keys).to_owned(),
-                    ConfigOption::AutoSave => on_off(config.auto_save).to_owned(),
+                    ConfigOption::DefaultMode => {
+                        format!("[{} v]", display_mode(self.draft_config.default_mode))
+                    }
+                    ConfigOption::TabWidth => format!("[{}]", self.draft_config.tab_width()),
+                    ConfigOption::LineNumbers => {
+                        checkbox(self.draft_config.line_numbers).to_owned()
+                    }
+                    ConfigOption::Wrap => checkbox(self.draft_config.wrap).to_owned(),
+                    ConfigOption::VimKeys => checkbox(self.draft_config.vim_keys).to_owned(),
+                    ConfigOption::AutoSave => checkbox(self.draft_config.auto_save).to_owned(),
                 },
             })
             .collect()
@@ -148,6 +163,7 @@ impl ConfigState {
         match self.active_pane {
             ConfigPane::Theme => {
                 self.selected_theme = self.selected_theme.saturating_sub(1);
+                self.sync_selected_theme();
             }
             ConfigPane::Options => {
                 self.selected_option = self.selected_option.saturating_sub(1);
@@ -160,6 +176,7 @@ impl ConfigState {
             ConfigPane::Theme => {
                 let max_index = self.theme_names.len().saturating_sub(1);
                 self.selected_theme = (self.selected_theme + 1).min(max_index);
+                self.sync_selected_theme();
             }
             ConfigPane::Options => {
                 let max_index = ConfigOption::ALL.len().saturating_sub(1);
@@ -168,30 +185,45 @@ impl ConfigState {
         }
     }
 
-    pub fn sync_theme(&self, config: &mut AppConfig) {
-        config.theme = self.selected_theme_name().to_owned();
+    pub fn apply_draft(&mut self, config: &mut AppConfig) {
+        self.applied_config = self.draft_config.clone();
+        *config = self.applied_config.clone();
     }
 
-    pub fn cycle_option_forward(&self, config: &mut AppConfig) {
-        self.cycle_option(config, 1);
+    pub fn keep_applied(&self, config: &mut AppConfig) {
+        *config = self.applied_config.clone();
     }
 
-    pub fn cycle_option_backward(&self, config: &mut AppConfig) {
-        self.cycle_option(config, -1);
+    pub fn revert_to_original(&self, config: &mut AppConfig) {
+        *config = self.original_config.clone();
     }
 
-    fn cycle_option(&self, config: &mut AppConfig, direction: i8) {
+    pub fn mark_saved(&mut self) {
+        self.original_config = self.applied_config.clone();
+        self.draft_config = self.applied_config.clone();
+        self.align_selected_theme();
+    }
+
+    pub fn cycle_option_forward(&mut self) {
+        self.cycle_option(1);
+    }
+
+    pub fn cycle_option_backward(&mut self) {
+        self.cycle_option(-1);
+    }
+
+    fn cycle_option(&mut self, direction: i8) {
         let option = ConfigOption::ALL[self.selected_option];
         match option {
             ConfigOption::DefaultMode => {
-                config.default_mode = if direction >= 0 {
-                    config.default_mode.next()
+                self.draft_config.default_mode = if direction >= 0 {
+                    self.draft_config.default_mode.next()
                 } else {
-                    config.default_mode.previous()
+                    self.draft_config.default_mode.previous()
                 };
             }
             ConfigOption::TabWidth => {
-                let current = config.tab_width();
+                let current = self.draft_config.tab_width();
                 let index = TAB_WIDTH_OPTIONS
                     .iter()
                     .position(|value| *value == current)
@@ -203,18 +235,42 @@ impl ConfigState {
                 } else {
                     index - 1
                 };
-                config.tab_width = TAB_WIDTH_OPTIONS[next];
+                self.draft_config.tab_width = TAB_WIDTH_OPTIONS[next];
             }
-            ConfigOption::LineNumbers => config.line_numbers = !config.line_numbers,
-            ConfigOption::Wrap => config.wrap = !config.wrap,
-            ConfigOption::VimKeys => config.vim_keys = !config.vim_keys,
-            ConfigOption::AutoSave => config.auto_save = !config.auto_save,
+            ConfigOption::LineNumbers => {
+                self.draft_config.line_numbers = !self.draft_config.line_numbers;
+            }
+            ConfigOption::Wrap => self.draft_config.wrap = !self.draft_config.wrap,
+            ConfigOption::VimKeys => self.draft_config.vim_keys = !self.draft_config.vim_keys,
+            ConfigOption::AutoSave => self.draft_config.auto_save = !self.draft_config.auto_save,
+        }
+    }
+
+    fn sync_selected_theme(&mut self) {
+        self.draft_config.theme = self.selected_theme_name().to_owned();
+    }
+
+    fn align_selected_theme(&mut self) {
+        if let Some(index) = self
+            .theme_names
+            .iter()
+            .position(|name| name == &self.draft_config.theme)
+        {
+            self.selected_theme = index;
         }
     }
 }
 
-fn on_off(enabled: bool) -> &'static str {
-    if enabled { "on" } else { "off" }
+fn checkbox(enabled: bool) -> &'static str {
+    if enabled { "[x] on" } else { "[ ] off" }
+}
+
+fn display_mode(mode: crate::config::DefaultMode) -> &'static str {
+    match mode {
+        crate::config::DefaultMode::SourceHints => "source+hints",
+        crate::config::DefaultMode::Preview => "preview",
+        crate::config::DefaultMode::Source => "source",
+    }
 }
 
 #[cfg(test)]
@@ -224,11 +280,11 @@ mod tests {
     #[test]
     fn config_options_render_current_values() {
         let state = ConfigState::new(&AppConfig::default()).expect("config state");
-        let rows = state.option_rows(&AppConfig::default());
+        let rows = state.option_rows();
 
         assert_eq!(rows[0].label, "default_mode");
-        assert_eq!(rows[0].value, "source_hints");
-        assert_eq!(rows[1].value, "4");
+        assert_eq!(rows[0].value, "[source+hints v]");
+        assert_eq!(rows[1].value, "[4]");
     }
 
     #[test]
@@ -236,9 +292,38 @@ mod tests {
         let mut state = ConfigState::new(&AppConfig::default()).expect("config state");
         state.toggle_pane();
         state.move_down();
+
+        state.cycle_option_forward();
+        let mut applied = AppConfig::default();
+        state.apply_draft(&mut applied);
+
+        assert_eq!(applied.tab_width, 8);
+    }
+
+    #[test]
+    fn moving_theme_selection_only_changes_preview_until_applied() {
+        let mut state = ConfigState::new(&AppConfig::default()).expect("config state");
+
+        state.move_down();
+
+        assert_ne!(state.selected_theme_name(), "dark");
+        assert_eq!(state.applied_theme_name(), "dark");
+        assert_eq!(state.draft_config.theme, state.selected_theme_name());
+    }
+
+    #[test]
+    fn cancel_restores_original_config() {
+        let mut state = ConfigState::new(&AppConfig::default()).expect("config state");
         let mut config = AppConfig::default();
 
-        state.cycle_option_forward(&mut config);
-        assert_eq!(config.tab_width, 8);
+        state.toggle_pane();
+        state.move_down();
+        state.move_down();
+        state.cycle_option_forward();
+        state.apply_draft(&mut config);
+        state.revert_to_original(&mut config);
+
+        assert!(!config.line_numbers);
+        assert_eq!(config.theme, "dark");
     }
 }

@@ -19,7 +19,7 @@ use clap::Parser;
 
 use crate::{
     app::{App, StartupTarget},
-    config::AppConfig,
+    config::{AppConfig, RuntimeConfig},
 };
 
 #[derive(Debug, Parser)]
@@ -35,15 +35,22 @@ struct Cli {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let config = match AppConfig::load() {
+    let runtime = match AppConfig::load_runtime() {
         Ok(config) => config,
         Err(error) => {
             eprintln!("implicit: {error}");
-            AppConfig::default()
+            RuntimeConfig {
+                app: AppConfig::default(),
+                keybindings: crate::config::KeyBindings::default(),
+            }
         }
     };
     let mut terminal = terminal::init()?;
-    let mut app = App::new(resolve_startup_target(cli.file, cli.config), config);
+    let mut app = App::new(
+        resolve_startup_target(cli.file, cli.config),
+        runtime.app,
+        runtime.keybindings,
+    );
 
     let run_result = app.run(&mut terminal);
     let restore_result = terminal::restore();
