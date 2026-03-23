@@ -24,7 +24,8 @@ const EDITOR_HELP: &str = "ctrl+f find | alt+n next | alt+p prev | ctrl+g goto |
 const PREVIEW_HELP: &str = "ctrl+f find | alt+n next | alt+p prev | ctrl+g goto | ctrl+p source";
 const SOURCE_HELP: &str =
     "ctrl+f find | alt+n next | alt+p prev | ctrl+g goto | ctrl+p source+hints";
-const PICKER_HELP: &str = "enter/right open | left/backspace parent | a filter | esc home";
+const PICKER_HELP: &str =
+    "enter/right open | left/backspace parent | a notes/code filter | esc home";
 const HOME_HELP: &str = "o open | n new | c settings | enter recent | / search | q quit";
 const SEARCH_HELP: &str = "type to filter | backspace delete | enter keep | esc clear";
 const CONFIG_HELP: &str = "tab switch pane | enter apply | ctrl+, close | s save | esc cancel";

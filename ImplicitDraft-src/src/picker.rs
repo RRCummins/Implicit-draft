@@ -7,6 +7,8 @@ use std::{
 
 use anyhow::{Context, Result};
 
+use crate::filetype;
+
 #[derive(Debug)]
 pub struct Picker {
     cwd: PathBuf,
@@ -145,7 +147,7 @@ impl Picker {
         if self.show_all {
             "all files"
         } else {
-            "markdown/text"
+            "notes/code"
         }
     }
 
@@ -168,7 +170,7 @@ impl Picker {
             let metadata = item.metadata()?;
             let is_dir = metadata.is_dir();
 
-            if !is_dir && !self.show_all && !is_text_candidate(&path) {
+            if !is_dir && !self.show_all && !is_supported_candidate(&path) {
                 continue;
             }
 
@@ -214,11 +216,8 @@ impl PickerEntry {
     }
 }
 
-fn is_text_candidate(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|ext| ext.to_str()),
-        Some("md" | "txt")
-    )
+fn is_supported_candidate(path: &Path) -> bool {
+    filetype::is_supported(path)
 }
 
 fn compare_entries(left: &PickerEntry, right: &PickerEntry) -> Ordering {
@@ -306,10 +305,13 @@ mod tests {
     }
 
     #[test]
-    fn filters_markdown_and_text_extensions() {
-        assert!(is_text_candidate(Path::new("note.md")));
-        assert!(is_text_candidate(Path::new("note.txt")));
-        assert!(!is_text_candidate(Path::new("image.png")));
+    fn filters_supported_editable_extensions() {
+        assert!(is_supported_candidate(Path::new("note.md")));
+        assert!(is_supported_candidate(Path::new("note.txt")));
+        assert!(is_supported_candidate(Path::new("main.swift")));
+        assert!(is_supported_candidate(Path::new("Program.cs")));
+        assert!(is_supported_candidate(Path::new("Dockerfile")));
+        assert!(!is_supported_candidate(Path::new("image.png")));
     }
 
     #[test]
