@@ -8,36 +8,26 @@ use ratatui::{
 use crate::{code, theme::Theme};
 
 pub fn render_document(lines: &[String], theme: &Theme, width: usize) -> Vec<Line<'static>> {
-    let mut code_block: Option<CodeBlock> = None;
     let mut rendered = Vec::with_capacity(lines.len());
+    let mut index = 0usize;
 
-    for line in lines {
-        let trimmed = line.trim_start();
-        if code_block
-            .as_ref()
-            .is_some_and(|block| trimmed.starts_with(block.marker))
-        {
-            if let Some(block) = code_block.take() {
-                rendered.extend(render_code_block(&block, width, theme));
-            }
+    while index < lines.len() {
+        let line = &lines[index];
+
+        if let Some((block, next_index)) = parse_code_block(lines, index) {
+            rendered.extend(render_code_block(&block, width, theme));
+            index = next_index;
             continue;
         }
 
-        if let Some(block) = &mut code_block {
-            block.lines.push(line.clone());
-            continue;
-        }
-
-        if let Some((marker, info)) = parse_fence_start(trimmed) {
-            code_block = Some(CodeBlock::new(marker, info));
+        if let Some((table, next_index)) = parse_table_block(lines, index) {
+            rendered.extend(render_table_block(&table, width, theme));
+            index = next_index;
             continue;
         }
 
         rendered.push(render_line(line, theme, width));
-    }
-
-    if let Some(block) = code_block.as_ref() {
-        rendered.extend(render_code_block(block, width, theme));
+        index += 1;
     }
 
     rendered
@@ -103,21 +93,18 @@ fn render_code_border(
 ) -> Line<'static> {
     let min_width = width.max(8);
     if opening {
-        let label = if let Some(info) = block.info.as_deref() {
-            format!(" code {info} ")
-        } else {
-            " code ".to_owned()
-        };
+        let label = block.info.as_deref().unwrap_or("code");
+        let label = format!("─ {label} ");
         let line = format!(
             "┌{}{}",
             label,
             "─".repeat(min_width.saturating_sub(label.chars().count() + 1))
         );
-        Line::from(vec![Span::styled(line, theme.code)])
+        Line::from(vec![Span::styled(line, theme.ui_chrome)])
     } else {
         Line::from(vec![Span::styled(
             format!("└{}", "─".repeat(min_width.saturating_sub(1))),
-            theme.code,
+            theme.ui_chrome,
         )])
     }
 }
@@ -152,15 +139,208 @@ fn render_preview_code_line(
         .map(|span| span.content.chars().count())
         .sum::<usize>();
     let padding = content_width.saturating_sub(content_chars);
-    let mut spans = vec![Span::styled(String::from("│ "), theme.code)];
+    let mut spans = vec![Span::styled(String::from("│ "), theme.ui_chrome)];
     spans.extend(line.spans);
     if padding > 0 {
-        spans.push(Span::styled(" ".repeat(padding), theme.code));
+        spans.push(Span::styled(" ".repeat(padding), theme.background));
     }
     if width >= 4 {
-        spans.push(Span::styled(String::from(" │"), theme.code));
+        spans.push(Span::styled(String::from(" │"), theme.ui_chrome));
     }
     Line::from(spans)
+}
+
+fn parse_code_block(lines: &[String], start_index: usize) -> Option<(CodeBlock, usize)> {
+    let trimmed = lines.get(start_index)?.trim_start();
+    let (marker, info) = parse_fence_start(trimmed)?;
+    let mut block = CodeBlock::new(info);
+    let mut index = start_index + 1;
+
+    while index < lines.len() {
+        let trimmed = lines[index].trim_start();
+        if trimmed.starts_with(marker) {
+            return Some((block, index + 1));
+        }
+        block.lines.push(lines[index].clone());
+        index += 1;
+    }
+
+    Some((block, lines.len()))
+}
+
+fn parse_table_block(lines: &[String], start_index: usize) -> Option<(TableBlock, usize)> {
+    let header = parse_table_row(lines.get(start_index)?)?;
+    let separator = parse_table_separator(lines.get(start_index + 1)?)?;
+    if header.len() != separator.len() || header.len() < 2 {
+        return None;
+    }
+
+    let mut rows = Vec::new();
+    let mut index = start_index + 2;
+    while index < lines.len() {
+        let Some(row) = parse_table_row(&lines[index]) else {
+            break;
+        };
+        rows.push(row);
+        index += 1;
+    }
+
+    Some((TableBlock { header, rows }, index))
+}
+
+fn render_table_block(table: &TableBlock, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let widths = fit_table_widths(table, width.max(8));
+    let mut rendered = Vec::with_capacity(table.rows.len() + 4);
+
+    rendered.push(render_table_border(&widths, '┌', '┬', '┐', theme));
+    rendered.push(render_table_row(&table.header, &widths, theme, true));
+    rendered.push(render_table_border(&widths, '├', '┼', '┤', theme));
+    for row in &table.rows {
+        rendered.push(render_table_row(row, &widths, theme, false));
+    }
+    rendered.push(render_table_border(&widths, '└', '┴', '┘', theme));
+
+    rendered
+}
+
+fn render_table_border(
+    widths: &[usize],
+    left: char,
+    middle: char,
+    right: char,
+    theme: &Theme,
+) -> Line<'static> {
+    let mut line = String::new();
+    line.push(left);
+    for (index, width) in widths.iter().enumerate() {
+        if index > 0 {
+            line.push(middle);
+        }
+        line.push_str(&"─".repeat(*width + 2));
+    }
+    line.push(right);
+    Line::from(vec![Span::styled(line, theme.ui_chrome)])
+}
+
+fn render_table_row(
+    cells: &[String],
+    widths: &[usize],
+    theme: &Theme,
+    header: bool,
+) -> Line<'static> {
+    let mut spans = vec![Span::styled("│".to_owned(), theme.ui_chrome)];
+
+    for (index, width) in widths.iter().enumerate() {
+        let cell = cells.get(index).map(String::as_str).unwrap_or("");
+        let fitted = fit_cell_content(cell, *width);
+        let style = if header {
+            theme.ui_chrome.patch(theme.bold)
+        } else {
+            theme.background
+        };
+        let padding = width.saturating_sub(fitted.chars().count());
+
+        spans.push(Span::styled(" ".to_owned(), theme.background));
+        spans.push(Span::styled(fitted, style));
+        if padding > 0 {
+            spans.push(Span::styled(" ".repeat(padding), style));
+        }
+        spans.push(Span::styled(" ".to_owned(), theme.background));
+        spans.push(Span::styled("│".to_owned(), theme.ui_chrome));
+    }
+
+    Line::from(spans)
+}
+
+fn fit_table_widths(table: &TableBlock, width: usize) -> Vec<usize> {
+    let column_count = table.header.len();
+    let mut widths = vec![1; column_count];
+
+    for (index, cell) in table.header.iter().enumerate() {
+        widths[index] = widths[index].max(cell.chars().count());
+    }
+    for row in &table.rows {
+        for (index, cell) in row.iter().enumerate().take(column_count) {
+            widths[index] = widths[index].max(cell.chars().count());
+        }
+    }
+
+    let mut total_width = table_render_width(&widths);
+    while total_width > width {
+        let Some((widest_index, widest_width)) = widths
+            .iter()
+            .copied()
+            .enumerate()
+            .max_by_key(|(_, width)| *width)
+        else {
+            break;
+        };
+        if widest_width <= 3 {
+            break;
+        }
+        widths[widest_index] -= 1;
+        total_width -= 1;
+    }
+
+    widths
+}
+
+fn table_render_width(widths: &[usize]) -> usize {
+    widths.iter().sum::<usize>() + (widths.len() * 3) + 1
+}
+
+fn fit_cell_content(cell: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let count = cell.chars().count();
+    if count <= width {
+        return cell.to_owned();
+    }
+
+    if width == 1 {
+        return "…".to_owned();
+    }
+
+    let head = cell.chars().take(width - 1).collect::<String>();
+    format!("{head}…")
+}
+
+fn parse_table_row(line: &str) -> Option<Vec<String>> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || !trimmed.contains('|') {
+        return None;
+    }
+
+    let inner = trimmed.trim_matches('|');
+    if inner.is_empty() {
+        return None;
+    }
+
+    let cells = inner
+        .split('|')
+        .map(|cell| cell.trim().to_owned())
+        .collect::<Vec<_>>();
+    if cells.len() < 2 {
+        return None;
+    }
+
+    Some(cells)
+}
+
+fn parse_table_separator(line: &str) -> Option<Vec<()>> {
+    let cells = parse_table_row(line)?;
+    if cells.iter().any(|cell| {
+        let compact = cell.replace(' ', "");
+        compact.is_empty()
+            || !compact.contains('-')
+            || !compact.chars().all(|ch| matches!(ch, '-' | ':'))
+    }) {
+        return None;
+    }
+
+    Some(vec![(); cells.len()])
 }
 
 fn inline_preview_spans(line: &str, theme: &Theme, base: Style) -> Vec<Span<'static>> {
@@ -418,19 +598,22 @@ struct InlineSegment {
 
 #[derive(Clone)]
 struct CodeBlock {
-    marker: &'static str,
     info: Option<String>,
     lines: Vec<String>,
 }
 
 impl CodeBlock {
-    fn new(marker: &'static str, info: Option<&str>) -> Self {
+    fn new(info: Option<&str>) -> Self {
         Self {
-            marker,
             info: info.map(str::to_owned),
             lines: Vec::new(),
         }
     }
+}
+
+struct TableBlock {
+    header: Vec<String>,
+    rows: Vec<Vec<String>>,
 }
 
 #[cfg(test)]
@@ -517,7 +700,7 @@ mod tests {
             24,
         );
 
-        assert!(rendered[0].spans[0].content.starts_with("┌ code rust "));
+        assert!(rendered[0].spans[0].content.starts_with("┌─ rust "));
         assert_eq!(rendered[1].spans[0].content.as_ref(), "│ ");
         assert!(
             rendered[1]
@@ -560,6 +743,57 @@ mod tests {
                 .spans
                 .iter()
                 .any(|span| span.content.as_ref() == "def" && span.style == theme.code_keyword)
+        );
+    }
+
+    #[test]
+    fn renders_markdown_tables_as_aligned_blocks() {
+        let theme = Theme::source_hints_default();
+        let rendered = render_document(
+            &[
+                String::from("| API | Purpose |"),
+                String::from("| --- | --- |"),
+                String::from("| auth | Authenticate session |"),
+                String::from("| ping | Connectivity test |"),
+            ],
+            &theme,
+            40,
+        );
+
+        assert_eq!(
+            rendered[0].spans[0].content.as_ref(),
+            "┌──────┬──────────────────────┐"
+        );
+        assert_eq!(rendered[1].spans[0].content.as_ref(), "│");
+        assert_eq!(rendered[1].spans[2].content.as_ref(), "API");
+        assert_eq!(rendered[1].spans[7].content.as_ref(), "Purpose");
+        assert_eq!(
+            rendered[2].spans[0].content.as_ref(),
+            "├──────┼──────────────────────┤"
+        );
+        assert_eq!(rendered[3].spans[2].content.as_ref(), "auth");
+        assert_eq!(rendered[4].spans[2].content.as_ref(), "ping");
+    }
+
+    #[test]
+    fn compacts_code_block_chrome() {
+        let theme = Theme::source_hints_default();
+        let rendered = render_document(
+            &[
+                String::from("```json"),
+                String::from("{\"type\": \"auth\"}"),
+                String::from("```"),
+            ],
+            &theme,
+            28,
+        );
+
+        assert!(rendered[0].spans[0].content.starts_with("┌─ json "));
+        assert_eq!(rendered[0].spans[0].style, theme.ui_chrome);
+        assert_eq!(rendered[1].spans[0].style, theme.ui_chrome);
+        assert_eq!(
+            rendered[1].spans.last().expect("right border").style,
+            theme.ui_chrome
         );
     }
 }
