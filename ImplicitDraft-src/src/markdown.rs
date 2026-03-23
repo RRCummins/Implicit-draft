@@ -5,35 +5,68 @@ use ratatui::{
     text::{Line, Span},
 };
 
-use crate::theme::Theme;
+use crate::{code, theme::Theme};
 
 pub fn style_document(lines: &[String], theme: &Theme) -> Vec<Line<'static>> {
-    let mut fence_marker: Option<&str> = None;
+    let mut fence_block: Option<FenceBlock> = None;
     let mut rendered = Vec::with_capacity(lines.len());
 
     for line in lines {
         let trimmed = line.trim_start();
-        let fence = fence_marker_for(trimmed);
-
-        if fence.is_some() {
-            rendered.push(Line::from(vec![Span::styled(line.clone(), theme.code)]));
-            match (fence_marker, fence) {
-                (None, Some(marker)) => fence_marker = Some(marker),
-                (Some(active), Some(marker)) if active == marker => fence_marker = None,
-                _ => {}
+        if fence_block
+            .as_ref()
+            .is_some_and(|block| trimmed.starts_with(block.marker))
+        {
+            if let Some(block) = fence_block.take() {
+                rendered.extend(code::render_fenced_document(
+                    &block.lines,
+                    theme,
+                    block.info.as_deref(),
+                ));
+                rendered.push(Line::from(vec![Span::styled(line.clone(), theme.code)]));
             }
             continue;
         }
 
-        if fence_marker.is_some() {
+        if let Some(block) = &mut fence_block {
+            block.lines.push(line.clone());
+            continue;
+        }
+
+        if let Some((marker, info)) = parse_fence_start(trimmed) {
             rendered.push(Line::from(vec![Span::styled(line.clone(), theme.code)]));
+            fence_block = Some(FenceBlock::new(marker, info));
             continue;
         }
 
         rendered.push(style_line(line, theme));
     }
 
+    if let Some(block) = fence_block {
+        rendered.extend(code::render_fenced_document(
+            &block.lines,
+            theme,
+            block.info.as_deref(),
+        ));
+    }
+
     rendered
+}
+
+struct FenceBlock {
+    marker: &'static str,
+    info: Option<String>,
+    lines: Vec<String>,
+}
+
+impl FenceBlock {
+    fn new(marker: &'static str, info: Option<&str>) -> Self {
+        Self {
+            marker,
+            info: info.map(str::to_owned),
+            lines: Vec::new(),
+        }
+    }
 }
 
 fn style_line(line: &str, theme: &Theme) -> Line<'static> {
@@ -155,6 +188,15 @@ fn fence_marker_for(trimmed: &str) -> Option<&'static str> {
     }
 }
 
+fn parse_fence_start(trimmed: &str) -> Option<(&'static str, Option<&str>)> {
+    let marker = fence_marker_for(trimmed)?;
+    let info = trimmed[marker.len()..]
+        .split_whitespace()
+        .next()
+        .filter(|token| !token.is_empty());
+    Some((marker, info))
+}
+
 fn is_rule(line: &str) -> bool {
     let trimmed = line.trim();
     if trimmed.len() < 3 {
@@ -268,7 +310,12 @@ mod tests {
         );
 
         assert_eq!(rendered.len(), 3);
-        assert_eq!(rendered[1].spans.len(), 1);
+        assert!(
+            rendered[1]
+                .spans
+                .iter()
+                .any(|span| span.content.as_ref() == "fn" && span.style == theme.code_keyword)
+        );
     }
 
     #[test]
@@ -286,5 +333,28 @@ mod tests {
         assert!(is_rule("* * *"));
         assert!(is_rule("_ _ _"));
         assert!(!is_rule("- - x"));
+    }
+
+    #[test]
+    fn fenced_python_blocks_use_code_highlighting() {
+        let theme = Theme::source_hints_default();
+        let rendered = style_document(
+            &[
+                String::from("```python"),
+                String::from("def greet(name):"),
+                String::from("    return name"),
+                String::from("```"),
+            ],
+            &theme,
+        );
+
+        assert_eq!(rendered[1].spans[0].content.as_ref(), "def");
+        assert_eq!(rendered[1].spans[0].style, theme.code_keyword);
+        assert!(
+            rendered[2]
+                .spans
+                .iter()
+                .any(|span| span.content.as_ref() == "return" && span.style == theme.code_keyword)
+        );
     }
 }

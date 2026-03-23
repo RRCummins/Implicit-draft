@@ -5,7 +5,7 @@ use ratatui::{
     text::{Line, Span},
 };
 
-use crate::theme::Theme;
+use crate::{code, theme::Theme};
 
 pub fn render_document(lines: &[String], theme: &Theme, width: usize) -> Vec<Line<'static>> {
     let mut code_block: Option<CodeBlock> = None;
@@ -13,30 +13,31 @@ pub fn render_document(lines: &[String], theme: &Theme, width: usize) -> Vec<Lin
 
     for line in lines {
         let trimmed = line.trim_start();
-        let fence = fence_marker_for(trimmed);
-
-        if fence.is_some() {
-            match (code_block, fence) {
-                (None, Some(marker)) => {
-                    let block = CodeBlock::new(marker, trimmed);
-                    rendered.push(render_code_border(&block, width, theme, true));
-                    code_block = Some(block);
-                }
-                (Some(active), Some(marker)) if active.marker == marker => {
-                    rendered.push(render_code_border(&active, width, theme, false));
-                    code_block = None;
-                }
-                _ => rendered.push(Line::from(vec![Span::styled(line.clone(), theme.code)])),
+        if code_block
+            .as_ref()
+            .is_some_and(|block| trimmed.starts_with(block.marker))
+        {
+            if let Some(block) = code_block.take() {
+                rendered.extend(render_code_block(&block, width, theme));
             }
             continue;
         }
 
-        if code_block.is_some() {
-            rendered.push(render_code_line(line, width, theme));
+        if let Some(block) = &mut code_block {
+            block.lines.push(line.clone());
+            continue;
+        }
+
+        if let Some((marker, info)) = parse_fence_start(trimmed) {
+            code_block = Some(CodeBlock::new(marker, info));
             continue;
         }
 
         rendered.push(render_line(line, theme, width));
+    }
+
+    if let Some(block) = code_block.as_ref() {
+        rendered.extend(render_code_block(block, width, theme));
     }
 
     rendered
@@ -102,10 +103,10 @@ fn render_code_border(
 ) -> Line<'static> {
     let min_width = width.max(8);
     if opening {
-        let label = if block.info.is_empty() {
-            " code ".to_owned()
+        let label = if let Some(info) = block.info.as_deref() {
+            format!(" code {info} ")
         } else {
-            format!(" code {} ", block.info)
+            " code ".to_owned()
         };
         let line = format!(
             "┌{}{}",
@@ -121,17 +122,45 @@ fn render_code_border(
     }
 }
 
-fn render_code_line(line: &str, width: usize, theme: &Theme) -> Line<'static> {
+fn render_code_block(block: &CodeBlock, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    let mut rendered = Vec::with_capacity(block.lines.len() + 2);
+    rendered.push(render_code_border(block, width, theme, true));
+
     let content_width = width.saturating_sub(4);
-    let visible = truncate_chars(line, content_width);
-    let padding = content_width.saturating_sub(visible.chars().count());
-    let mut content = String::from("│ ");
-    content.push_str(&visible);
-    content.push_str(&" ".repeat(padding));
-    if width >= 4 {
-        content.push_str(" │");
+    for line in code::render_fenced_preview_document(
+        &block.lines,
+        theme,
+        block.info.as_deref(),
+        content_width,
+    ) {
+        rendered.push(render_preview_code_line(line, content_width, width, theme));
     }
-    Line::from(vec![Span::styled(content, theme.code)])
+
+    rendered.push(render_code_border(block, width, theme, false));
+    rendered
+}
+
+fn render_preview_code_line(
+    line: Line<'static>,
+    content_width: usize,
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let content_chars = line
+        .spans
+        .iter()
+        .map(|span| span.content.chars().count())
+        .sum::<usize>();
+    let padding = content_width.saturating_sub(content_chars);
+    let mut spans = vec![Span::styled(String::from("│ "), theme.code)];
+    spans.extend(line.spans);
+    if padding > 0 {
+        spans.push(Span::styled(" ".repeat(padding), theme.code));
+    }
+    if width >= 4 {
+        spans.push(Span::styled(String::from(" │"), theme.code));
+    }
+    Line::from(spans)
 }
 
 fn inline_preview_spans(line: &str, theme: &Theme, base: Style) -> Vec<Span<'static>> {
@@ -325,6 +354,15 @@ fn fence_marker_for(trimmed: &str) -> Option<&'static str> {
     }
 }
 
+fn parse_fence_start(trimmed: &str) -> Option<(&'static str, Option<&str>)> {
+    let marker = fence_marker_for(trimmed)?;
+    let info = trimmed[marker.len()..]
+        .split_whitespace()
+        .next()
+        .filter(|token| !token.is_empty());
+    Some((marker, info))
+}
+
 fn is_rule(line: &str) -> bool {
     let trimmed = line.trim();
     if trimmed.len() < 3 {
@@ -378,23 +416,21 @@ struct InlineSegment {
     kind: InlineKind,
 }
 
-#[derive(Clone, Copy)]
-struct CodeBlock<'a> {
-    marker: &'a str,
-    info: &'a str,
+#[derive(Clone)]
+struct CodeBlock {
+    marker: &'static str,
+    info: Option<String>,
+    lines: Vec<String>,
 }
 
-impl<'a> CodeBlock<'a> {
-    fn new(marker: &'a str, line: &'a str) -> Self {
+impl CodeBlock {
+    fn new(marker: &'static str, info: Option<&str>) -> Self {
         Self {
             marker,
-            info: line[marker.len()..].trim(),
+            info: info.map(str::to_owned),
+            lines: Vec::new(),
         }
     }
-}
-
-fn truncate_chars(line: &str, max_chars: usize) -> String {
-    line.chars().take(max_chars).collect()
 }
 
 #[cfg(test)]
@@ -482,9 +518,12 @@ mod tests {
         );
 
         assert!(rendered[0].spans[0].content.starts_with("┌ code rust "));
-        assert_eq!(
-            rendered[1].spans[0].content.as_ref(),
-            "│ fn main() {}         │"
+        assert_eq!(rendered[1].spans[0].content.as_ref(), "│ ");
+        assert!(
+            rendered[1]
+                .spans
+                .iter()
+                .any(|span| span.content.as_ref() == "fn" && span.style == theme.code_keyword)
         );
         assert_eq!(
             rendered[2].spans[0].content.as_ref(),
@@ -501,5 +540,26 @@ mod tests {
         assert_eq!(rendered[0].spans[0].content.as_ref(), "Title");
         assert_eq!(rendered[0].spans[1].content.as_ref(), " ");
         assert_eq!(rendered[0].spans[2].content.as_ref(), "─────");
+    }
+
+    #[test]
+    fn preview_code_blocks_use_fence_language_highlighting() {
+        let theme = Theme::source_hints_default();
+        let rendered = render_document(
+            &[
+                String::from("```python"),
+                String::from("def greet(name):"),
+                String::from("```"),
+            ],
+            &theme,
+            28,
+        );
+
+        assert!(
+            rendered[1]
+                .spans
+                .iter()
+                .any(|span| span.content.as_ref() == "def" && span.style == theme.code_keyword)
+        );
     }
 }

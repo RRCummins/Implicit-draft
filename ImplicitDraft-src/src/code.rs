@@ -125,6 +125,56 @@ const SWIFT_KEYWORDS: &[&str] = &[
     "where",
     "while",
 ];
+const KOTLIN_KEYWORDS: &[&str] = &[
+    "actual",
+    "annotation",
+    "as",
+    "break",
+    "by",
+    "class",
+    "companion",
+    "const",
+    "constructor",
+    "continue",
+    "data",
+    "do",
+    "else",
+    "enum",
+    "expect",
+    "false",
+    "for",
+    "fun",
+    "if",
+    "import",
+    "in",
+    "init",
+    "interface",
+    "internal",
+    "is",
+    "lateinit",
+    "null",
+    "object",
+    "open",
+    "operator",
+    "override",
+    "package",
+    "private",
+    "protected",
+    "public",
+    "return",
+    "sealed",
+    "super",
+    "suspend",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typealias",
+    "val",
+    "var",
+    "when",
+    "while",
+];
 const C_LIKE_KEYWORDS: &[&str] = &[
     "auto",
     "bool",
@@ -225,12 +275,15 @@ pub fn render_document(
     path: Option<&Path>,
     file_type: FileType,
 ) -> Vec<Line<'static>> {
-    let language = Language::for_document(path, file_type);
-    let mut state = RenderState::default();
-    lines
-        .iter()
-        .map(|line| render_source_line(line, theme, language, &mut state))
-        .collect()
+    render_lines(lines, theme, Language::for_document(path, file_type))
+}
+
+pub fn render_fenced_document(
+    lines: &[String],
+    theme: &Theme,
+    fence_info: Option<&str>,
+) -> Vec<Line<'static>> {
+    render_lines(lines, theme, Language::for_fence(fence_info))
 }
 
 pub fn render_preview_document(
@@ -260,6 +313,24 @@ pub fn render_preview_document(
         .collect()
 }
 
+pub fn render_fenced_preview_document(
+    lines: &[String],
+    theme: &Theme,
+    fence_info: Option<&str>,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let mut state = RenderState::default();
+    let language = Language::for_fence(fence_info);
+
+    lines
+        .iter()
+        .map(|line| {
+            let spans = render_spans(line, theme, language, &mut state);
+            Line::from(truncate_spans(spans, width, theme.code))
+        })
+        .collect()
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct RenderState {
     block_comment_end: Option<&'static str>,
@@ -274,6 +345,7 @@ enum Language {
     Shell,
     Go,
     Swift,
+    Kotlin,
     CLike,
     Web,
     Data,
@@ -286,20 +358,32 @@ impl Language {
             return Self::Generic;
         }
 
-        match path
-            .and_then(|path| path.extension())
+        path.and_then(|path| path.extension())
             .and_then(|ext| ext.to_str())
-            .unwrap_or_default()
-        {
-            "rs" => Self::Rust,
-            "js" | "jsx" | "ts" | "tsx" => Self::JavaScript,
-            "py" | "rb" => Self::Python,
-            "sh" | "bash" | "zsh" => Self::Shell,
-            "go" => Self::Go,
-            "swift" => Self::Swift,
-            "c" | "h" | "cpp" | "hpp" | "java" | "kt" | "php" => Self::CLike,
-            "css" | "html" => Self::Web,
-            "json" | "toml" | "yaml" | "yml" => Self::Data,
+            .map(Self::for_alias)
+            .unwrap_or(Self::Generic)
+    }
+
+    fn for_fence(fence_info: Option<&str>) -> Self {
+        fence_info
+            .and_then(|info| info.split_whitespace().next())
+            .map(Self::for_alias)
+            .unwrap_or(Self::Generic)
+    }
+
+    fn for_alias(alias: &str) -> Self {
+        match alias.trim().to_ascii_lowercase().as_str() {
+            "rust" | "rs" => Self::Rust,
+            "javascript" | "js" | "jsx" | "typescript" | "ts" | "tsx" | "node" => Self::JavaScript,
+            "python" | "py" | "pyi" | "pyw" | "rb" | "ruby" => Self::Python,
+            "shell" | "sh" | "bash" | "zsh" | "console" => Self::Shell,
+            "go" | "golang" => Self::Go,
+            "swift" | "swiftinterface" => Self::Swift,
+            "kotlin" | "kt" | "kts" => Self::Kotlin,
+            "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "hxx" | "c++" | "objc" | "objective-c"
+            | "objectivec" | "m" | "mm" | "java" | "php" => Self::CLike,
+            "css" | "html" | "xml" => Self::Web,
+            "json" | "toml" | "yaml" | "yml" | "ini" | "conf" => Self::Data,
             _ => Self::Generic,
         }
     }
@@ -341,6 +425,12 @@ impl Language {
                 block_comment: Some(("/*", "*/")),
                 string_delimiters: DEFAULT_STRING_DELIMITERS,
                 keywords: SWIFT_KEYWORDS,
+            },
+            Self::Kotlin => Grammar {
+                line_comment: Some("//"),
+                block_comment: Some(("/*", "*/")),
+                string_delimiters: DEFAULT_STRING_DELIMITERS,
+                keywords: KOTLIN_KEYWORDS,
             },
             Self::CLike => Grammar {
                 line_comment: Some("//"),
@@ -385,6 +475,14 @@ fn render_source_line(
     state: &mut RenderState,
 ) -> Line<'static> {
     Line::from(render_spans(line, theme, language, state))
+}
+
+fn render_lines(lines: &[String], theme: &Theme, language: Language) -> Vec<Line<'static>> {
+    let mut state = RenderState::default();
+    lines
+        .iter()
+        .map(|line| render_source_line(line, theme, language, &mut state))
+        .collect()
 }
 
 fn render_spans(
@@ -625,6 +723,9 @@ fn multiline_string_token(line: &str, index: usize, language: Language) -> Optio
         Language::JavaScript if start.starts_with(BACKTICK_MARKER) => BACKTICK_MARKER,
         Language::Python if start.starts_with(TRIPLE_DOUBLE_QUOTE) => TRIPLE_DOUBLE_QUOTE,
         Language::Python if start.starts_with(TRIPLE_SINGLE_QUOTE) => TRIPLE_SINGLE_QUOTE,
+        Language::Swift | Language::Kotlin if start.starts_with(TRIPLE_DOUBLE_QUOTE) => {
+            TRIPLE_DOUBLE_QUOTE
+        }
         _ => return None,
     };
 
@@ -905,12 +1006,60 @@ fn is_identifier_start(ch: char) -> bool {
 
 fn is_type_like(token: &str, language: Language) -> bool {
     match language {
-        Language::Rust | Language::Go | Language::Swift | Language::CLike => token
-            .chars()
-            .next()
-            .is_some_and(|first| first.is_ascii_uppercase()),
+        Language::Rust | Language::Go | Language::Swift | Language::Kotlin | Language::CLike => {
+            token
+                .chars()
+                .next()
+                .is_some_and(|first| first.is_ascii_uppercase())
+        }
         _ => false,
     }
+}
+
+fn truncate_spans(
+    spans: Vec<Span<'static>>,
+    width: usize,
+    ellipsis_style: Style,
+) -> Vec<Span<'static>> {
+    if width == 0 {
+        return vec![Span::raw(String::new())];
+    }
+
+    let total_chars = spans
+        .iter()
+        .map(|span| span.content.chars().count())
+        .sum::<usize>();
+    if total_chars <= width {
+        return spans;
+    }
+
+    let keep = width.saturating_sub(1);
+    let mut truncated = Vec::new();
+    let mut used = 0usize;
+
+    for span in spans {
+        if used >= keep {
+            break;
+        }
+
+        let remaining = keep - used;
+        let content = span.content.as_ref();
+        let char_count = content.chars().count();
+        if char_count <= remaining {
+            used += char_count;
+            truncated.push(span);
+            continue;
+        }
+
+        let segment = content.chars().take(remaining).collect::<String>();
+        if !segment.is_empty() {
+            truncated.push(Span::styled(segment, span.style));
+        }
+        break;
+    }
+
+    truncated.push(Span::styled(String::from("…"), ellipsis_style));
+    truncated
 }
 
 fn is_punctuation(ch: char) -> bool {
@@ -1284,5 +1433,77 @@ mod tests {
                 .iter()
                 .any(|span| span.content.as_ref() == "42")
         );
+    }
+
+    #[test]
+    fn fence_info_uses_python_highlighting() {
+        let theme = Theme::source_hints_default();
+        let rendered = render_fenced_document(
+            &[String::from("def render_frame(theme):")],
+            &theme,
+            Some("python"),
+        );
+
+        assert_eq!(rendered[0].spans[0].content.as_ref(), "def");
+        assert_eq!(rendered[0].spans[0].style, theme.code_keyword);
+    }
+
+    #[test]
+    fn kotlin_blocks_use_kotlin_keywords() {
+        let theme = Theme::source_hints_default();
+        let rendered = render_fenced_document(
+            &[String::from(
+                "fun renderFrame(theme: Theme) = println(theme)",
+            )],
+            &theme,
+            Some("kotlin"),
+        );
+
+        assert!(
+            rendered[0]
+                .spans
+                .iter()
+                .any(|span| span.content.as_ref() == "fun" && span.style == theme.code_keyword)
+        );
+    }
+
+    #[test]
+    fn fenced_preview_uses_language_aliases() {
+        let theme = Theme::source_hints_default();
+        let rendered = render_fenced_preview_document(
+            &[String::from("std::vector<int> values;")],
+            &theme,
+            Some("cpp"),
+            40,
+        );
+
+        assert!(
+            rendered[0]
+                .spans
+                .iter()
+                .any(|span| span.content.as_ref() == "std" && span.style == theme.code_type)
+        );
+    }
+
+    #[test]
+    fn swift_triple_quotes_span_multiple_lines() {
+        let theme = Theme::source_hints_default();
+        let rendered = render_fenced_document(
+            &[
+                String::from("let body = \"\"\"hello"),
+                String::from("world\"\"\""),
+            ],
+            &theme,
+            Some("swift"),
+        );
+
+        assert!(
+            rendered[0]
+                .spans
+                .iter()
+                .any(|span| span.content.as_ref() == "\"\"\"hello"
+                    && span.style == theme.code_string)
+        );
+        assert_eq!(rendered[1].spans[0].style, theme.code_string);
     }
 }

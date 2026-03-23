@@ -2,6 +2,13 @@ use std::{fs, path::Path};
 
 use anyhow::{Context, Result};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SearchMatch {
+    pub row: usize,
+    pub col: usize,
+    pub len: usize,
+}
+
 #[derive(Clone, Debug)]
 struct Snapshot {
     lines: Vec<String>,
@@ -147,6 +154,17 @@ impl Buffer {
         self.desired_col = self.cursor_col;
     }
 
+    pub fn goto_line(&mut self, line_number: usize) -> bool {
+        if line_number == 0 || line_number > self.lines.len() {
+            return false;
+        }
+
+        self.cursor_row = line_number - 1;
+        self.cursor_col = 0;
+        self.desired_col = 0;
+        true
+    }
+
     pub fn page_up(&mut self, height: usize) {
         let step = height.max(1);
         self.cursor_row = self.cursor_row.saturating_sub(step);
@@ -253,6 +271,31 @@ impl Buffer {
 
     pub fn scroll_offset(&self) -> (usize, usize) {
         (self.scroll_row, self.scroll_col)
+    }
+
+    pub fn search_matches(&self, query: &str) -> Vec<SearchMatch> {
+        if query.is_empty() {
+            return Vec::new();
+        }
+
+        let mut matches = Vec::new();
+        for (row, line) in self.lines.iter().enumerate() {
+            for (byte_index, _) in line.match_indices(query) {
+                matches.push(SearchMatch {
+                    row,
+                    col: line[..byte_index].chars().count(),
+                    len: query.chars().count(),
+                });
+            }
+        }
+
+        matches
+    }
+
+    pub fn move_to_search_match(&mut self, search_match: SearchMatch) {
+        self.cursor_row = search_match.row.min(self.lines.len().saturating_sub(1));
+        self.cursor_col = search_match.col.min(self.current_line_len());
+        self.desired_col = self.cursor_col;
     }
 
     fn current_line(&self) -> &str {
@@ -469,5 +512,37 @@ mod tests {
         assert_eq!(buffer.line_count(), 2);
         assert_eq!(buffer.current_line_char_count(), 4);
         assert_eq!(buffer.total_char_count(), 9);
+    }
+
+    #[test]
+    fn goto_line_moves_to_requested_line() {
+        let mut buffer = Buffer::from_text("alpha\nbeta\ngamma");
+
+        assert!(buffer.goto_line(3));
+        assert_eq!(buffer.cursor(), (2, 0));
+        assert!(!buffer.goto_line(0));
+        assert!(!buffer.goto_line(4));
+    }
+
+    #[test]
+    fn search_matches_reports_document_hits() {
+        let buffer = Buffer::from_text("alpha beta\nbeta gamma\nalphabet");
+        let matches = buffer.search_matches("beta");
+
+        assert_eq!(
+            matches,
+            vec![
+                SearchMatch {
+                    row: 0,
+                    col: 6,
+                    len: 4
+                },
+                SearchMatch {
+                    row: 1,
+                    col: 0,
+                    len: 4
+                },
+            ]
+        );
     }
 }

@@ -13,9 +13,10 @@ pub fn detect(path: &Path) -> FileType {
         Some("md" | "markdown") => FileType::Markdown,
         Some("txt") => FileType::Text,
         Some(
-            "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "go" | "swift" | "toml" | "yaml" | "yml"
-            | "sh" | "bash" | "zsh" | "json" | "css" | "html" | "c" | "h" | "cpp" | "hpp" | "java"
-            | "kt" | "rb" | "php",
+            "rs" | "py" | "pyi" | "pyw" | "js" | "ts" | "tsx" | "jsx" | "go" | "swift"
+            | "swiftinterface" | "toml" | "yaml" | "yml" | "sh" | "bash" | "zsh" | "json" | "css"
+            | "html" | "xml" | "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "hxx" | "java" | "kt"
+            | "kts" | "rb" | "php" | "m" | "mm",
         ) => FileType::Code,
         Some(_) | None => FileType::Unknown,
     }
@@ -35,6 +36,8 @@ mod tests {
     fn detects_code_files() {
         assert_eq!(detect(&PathBuf::from("main.rs")), FileType::Code);
         assert_eq!(detect(&PathBuf::from("config.toml")), FileType::Code);
+        assert_eq!(detect(&PathBuf::from("main.kts")), FileType::Code);
+        assert_eq!(detect(&PathBuf::from("main.hxx")), FileType::Code);
     }
 
     #[test]

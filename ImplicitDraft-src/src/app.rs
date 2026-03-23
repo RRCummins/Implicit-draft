@@ -5,7 +5,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use ratatui::DefaultTerminal;
 
 use crate::{
-    buffer::Buffer,
+    buffer::{Buffer, SearchMatch},
     code,
     config::{AppConfig, DefaultMode, KeyBindings},
     filetype::FileType,
@@ -21,10 +21,11 @@ use crate::{
 
 const FRAME_POLL_INTERVAL: Duration = Duration::from_millis(80);
 const EDITOR_HELP: &str =
-    "ctrl+e sidebar | ctrl+z undo | ctrl+s save | ctrl+, settings | ctrl+w home";
-const PREVIEW_HELP: &str = "home/end line | ctrl+home/end doc | ctrl+e sidebar | ctrl+p source";
+    "ctrl+f find | ctrl+g goto | ctrl+e sidebar | ctrl+s save | ctrl+, settings";
+const PREVIEW_HELP: &str =
+    "ctrl+f find | ctrl+g goto | home/end line | ctrl+home/end doc | ctrl+p source";
 const SOURCE_HELP: &str =
-    "home/end line | ctrl+home/end doc | ctrl+e sidebar | ctrl+p source+hints";
+    "ctrl+f find | ctrl+g goto | home/end line | ctrl+home/end doc | ctrl+p source+hints";
 const PICKER_HELP: &str = "enter/right open | left/backspace parent | a filter | esc home";
 const HOME_HELP: &str = "o open | n new | c settings | enter recent | / search | q quit";
 const SEARCH_HELP: &str = "type to filter | backspace delete | enter keep | esc clear";
@@ -237,8 +238,8 @@ impl App {
         match &mut self.screen {
             Screen::Editor(editor) => {
                 if let Some(dialog) = editor.dialog.clone() {
-                    if matches!(dialog, EditorDialog::SaveAs(_)) {
-                        match Self::handle_save_as_input(editor, key) {
+                    match dialog {
+                        EditorDialog::SaveAs(_) => match Self::handle_save_as_input(editor, key) {
                             SaveDialogOutcome::None => {}
                             SaveDialogOutcome::Saved(after_save) => match after_save {
                                 SaveAfterAction::Stay => {
@@ -256,16 +257,41 @@ impl App {
                             SaveDialogOutcome::Error(error) => {
                                 next_status = Some(error.to_string());
                             }
+                        },
+                        EditorDialog::Find(_) => match Self::handle_find_input(editor, key) {
+                            FindDialogOutcome::None => {}
+                            FindDialogOutcome::Moved { current, total } => {
+                                next_status = Some(format!("find {current}/{total}"));
+                            }
+                            FindDialogOutcome::NoMatches => {
+                                next_status = Some(String::from("no matches"));
+                            }
+                            FindDialogOutcome::Closed => {
+                                next_status = Some(String::from(editor.mode.help()));
+                            }
+                        },
+                        EditorDialog::GotoLine(_) => {
+                            match Self::handle_goto_line_input(editor, key) {
+                                GotoLineOutcome::None => {}
+                                GotoLineOutcome::Moved(line) => {
+                                    next_status = Some(format!("line {line}"));
+                                }
+                                GotoLineOutcome::Canceled => {
+                                    next_status = Some(String::from(editor.mode.help()));
+                                }
+                                GotoLineOutcome::Error(error) => {
+                                    next_status = Some(error.to_string());
+                                }
+                            }
                         }
-                    } else {
-                        match key.code {
+                        EditorDialog::Quit | EditorDialog::ReturnHome => match key.code {
                             KeyCode::Enter | KeyCode::Char('y') => match dialog {
                                 EditorDialog::Quit => should_quit_now = true,
                                 EditorDialog::ReturnHome => {
                                     next_screen = Some(Screen::Welcome(Self::load_welcome_state()));
                                     next_status = Some(String::from(HOME_HELP));
                                 }
-                                EditorDialog::SaveAs(_) => {}
+                                _ => {}
                             },
                             KeyCode::Esc | KeyCode::Char('n') => {
                                 editor.dialog = None;
@@ -288,7 +314,7 @@ impl App {
                                                 ));
                                                 next_status = Some(String::from(HOME_HELP));
                                             }
-                                            EditorDialog::SaveAs(_) => {}
+                                            _ => {}
                                         }
                                     }
                                     Ok(SaveOutcome::NeedsPath) => {
@@ -298,7 +324,7 @@ impl App {
                                                 EditorDialog::ReturnHome => {
                                                     SaveAfterAction::ReturnHome
                                                 }
-                                                EditorDialog::SaveAs(_) => SaveAfterAction::Stay,
+                                                _ => SaveAfterAction::Stay,
                                             }),
                                         ));
                                         next_status = Some(String::from("save as"));
@@ -307,7 +333,7 @@ impl App {
                                 }
                             }
                             _ => {}
-                        }
+                        },
                     }
                 } else {
                     if keybindings.editor.quit.matches(key) {
@@ -316,6 +342,14 @@ impl App {
                     } else if keybindings.editor.controls.matches(key) {
                         self.overlay = Some(Overlay::Editor(editor.mode));
                         next_status = Some(String::from("controls"));
+                    } else if keybindings.editor.find.matches(key) {
+                        editor.dialog = Some(EditorDialog::Find(FindState::new(editor)));
+                        next_status = Some(String::from("find"));
+                    } else if keybindings.editor.goto_line.matches(key) {
+                        editor.dialog = Some(EditorDialog::GotoLine(GotoLineState::new(
+                            editor.buffer.cursor().0 + 1,
+                        )));
+                        next_status = Some(String::from("goto line"));
                     } else if keybindings.editor.home.matches(key) {
                         if editor.buffer.is_dirty() {
                             editor.dialog = Some(EditorDialog::ReturnHome);
@@ -882,6 +916,28 @@ impl App {
                                 String::from("Esc cancels"),
                             ],
                         },
+                        EditorDialog::Find(state) => DialogView {
+                            title: String::from(" Find "),
+                            lines: vec![
+                                format!("query: {}", state.query),
+                                match state.current_index {
+                                    Some(index) => {
+                                        format!("matches: {}/{}", index + 1, state.matches.len())
+                                    }
+                                    None => format!("matches: 0/{}", state.matches.len()),
+                                },
+                                String::from("Enter/Down next   Shift+Enter/Up prev"),
+                                String::from("Esc closes"),
+                            ],
+                        },
+                        EditorDialog::GotoLine(state) => DialogView {
+                            title: String::from(" Goto Line "),
+                            lines: vec![
+                                format!("line: {}", state.line),
+                                String::from("Enter jumps to line"),
+                                String::from("Esc cancels"),
+                            ],
+                        },
                     }),
                 }
             }
@@ -1041,6 +1097,72 @@ impl App {
         editor.buffer.save_to_path(path)?;
         editor.dialog = None;
         Ok(SaveOutcome::Saved)
+    }
+
+    fn handle_find_input(editor: &mut EditorState, key: KeyEvent) -> FindDialogOutcome {
+        let Some(EditorDialog::Find(state)) = editor.dialog.as_mut() else {
+            return FindDialogOutcome::None;
+        };
+
+        match key.code {
+            KeyCode::Esc => {
+                editor.dialog = None;
+                FindDialogOutcome::Closed
+            }
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                state.step(&mut editor.buffer, false)
+            }
+            KeyCode::Enter | KeyCode::Down => state.step(&mut editor.buffer, true),
+            KeyCode::Up => state.step(&mut editor.buffer, false),
+            KeyCode::Backspace => {
+                state.query.pop();
+                state.refresh(&mut editor.buffer);
+                state.outcome()
+            }
+            KeyCode::Char(ch) if is_insertable(key.modifiers) => {
+                state.query.push(ch);
+                state.refresh(&mut editor.buffer);
+                state.outcome()
+            }
+            _ => FindDialogOutcome::None,
+        }
+    }
+
+    fn handle_goto_line_input(editor: &mut EditorState, key: KeyEvent) -> GotoLineOutcome {
+        let Some(EditorDialog::GotoLine(state)) = editor.dialog.as_mut() else {
+            return GotoLineOutcome::None;
+        };
+
+        match key.code {
+            KeyCode::Esc => {
+                editor.dialog = None;
+                GotoLineOutcome::Canceled
+            }
+            KeyCode::Enter => {
+                let Some(line_number) = state.line.trim().parse::<usize>().ok() else {
+                    return GotoLineOutcome::Error(anyhow!("line must be a positive number"));
+                };
+
+                if !editor.buffer.goto_line(line_number) {
+                    return GotoLineOutcome::Error(anyhow!("line out of range"));
+                }
+
+                editor.dialog = None;
+                GotoLineOutcome::Moved(line_number)
+            }
+            KeyCode::Backspace => {
+                state.line.pop();
+                GotoLineOutcome::None
+            }
+            KeyCode::Char(ch) if ch.is_ascii_digit() && is_insertable(key.modifiers) => {
+                if state.line == "0" {
+                    state.line.clear();
+                }
+                state.line.push(ch);
+                GotoLineOutcome::None
+            }
+            _ => GotoLineOutcome::None,
+        }
     }
 
     fn handle_save_as_input(editor: &mut EditorState, key: KeyEvent) -> SaveDialogOutcome {
@@ -1335,6 +1457,8 @@ enum EditorDialog {
     Quit,
     ReturnHome,
     SaveAs(SaveAsState),
+    Find(FindState),
+    GotoLine(GotoLineState),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1373,6 +1497,92 @@ enum SaveDialogOutcome {
     Error(anyhow::Error),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FindState {
+    query: String,
+    matches: Vec<SearchMatch>,
+    current_index: Option<usize>,
+    anchor: (usize, usize),
+}
+
+impl FindState {
+    fn new(editor: &EditorState) -> Self {
+        Self {
+            query: String::new(),
+            matches: Vec::new(),
+            current_index: None,
+            anchor: editor.buffer.cursor(),
+        }
+    }
+
+    fn refresh(&mut self, buffer: &mut Buffer) {
+        self.matches = buffer.search_matches(&self.query);
+        self.current_index = self
+            .matches
+            .iter()
+            .position(|search_match| (search_match.row, search_match.col) >= self.anchor)
+            .or_else(|| (!self.matches.is_empty()).then_some(0));
+
+        if let Some(index) = self.current_index {
+            buffer.move_to_search_match(self.matches[index]);
+        }
+    }
+
+    fn step(&mut self, buffer: &mut Buffer, forward: bool) -> FindDialogOutcome {
+        if self.query.is_empty() || self.matches.is_empty() {
+            return FindDialogOutcome::NoMatches;
+        }
+
+        let next_index = match self.current_index {
+            Some(index) if forward => (index + 1) % self.matches.len(),
+            Some(index) => (index + self.matches.len() - 1) % self.matches.len(),
+            None => 0,
+        };
+        self.current_index = Some(next_index);
+        buffer.move_to_search_match(self.matches[next_index]);
+        self.outcome()
+    }
+
+    fn outcome(&self) -> FindDialogOutcome {
+        match self.current_index {
+            Some(index) => FindDialogOutcome::Moved {
+                current: index + 1,
+                total: self.matches.len(),
+            },
+            None => FindDialogOutcome::NoMatches,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GotoLineState {
+    line: String,
+}
+
+impl GotoLineState {
+    fn new(current_line: usize) -> Self {
+        Self {
+            line: current_line.to_string(),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum FindDialogOutcome {
+    None,
+    Moved { current: usize, total: usize },
+    NoMatches,
+    Closed,
+}
+
+#[derive(Debug)]
+enum GotoLineOutcome {
+    None,
+    Moved(usize),
+    Canceled,
+    Error(anyhow::Error),
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Overlay {
     Editor(EditorMode),
@@ -1395,7 +1605,8 @@ impl Overlay {
         match self {
             Self::Editor(EditorMode::SourceHints) => vec![
                 "Arrows move   Home/End line start/end   Ctrl+Home/End doc start/end",
-                "Ctrl+S save or save-as   Ctrl+Z undo   Ctrl+R redo   Ctrl+E sidebar",
+                "Ctrl+S save or save-as   Ctrl+F find   Ctrl+G goto line   Ctrl+E sidebar",
+                "Ctrl+Z undo   Ctrl+R redo",
                 "Ctrl+P preview mode   Ctrl+, settings   Ctrl+W return home",
                 "When sidebar is open: Tab focus   Enter open file   Space/Right toggle dir",
                 "Ctrl+[ narrower   Ctrl+] wider",
@@ -1403,7 +1614,8 @@ impl Overlay {
             ],
             Self::Editor(EditorMode::Preview) => vec![
                 "Arrows move   Home/End line start/end   Ctrl+Home/End doc start/end",
-                "Ctrl+P source mode   Ctrl+E sidebar   Ctrl+, settings   Ctrl+W return home",
+                "Ctrl+F find   Ctrl+G goto line   Ctrl+P source mode",
+                "Ctrl+E sidebar   Ctrl+, settings   Ctrl+W return home",
                 "When sidebar is open: Tab focus   Enter open file   Space/Right toggle dir",
                 "Ctrl+[ narrower   Ctrl+] wider",
                 "Ctrl+S save   Ctrl+Q quit app",
@@ -1411,7 +1623,8 @@ impl Overlay {
             ],
             Self::Editor(EditorMode::Source) => vec![
                 "Arrows move   Home/End line start/end   Ctrl+Home/End doc start/end",
-                "Ctrl+S save or save-as   Ctrl+Z undo   Ctrl+R redo   Ctrl+E sidebar",
+                "Ctrl+S save or save-as   Ctrl+F find   Ctrl+G goto line   Ctrl+E sidebar",
+                "Ctrl+Z undo   Ctrl+R redo",
                 "Ctrl+P source+hints mode   Ctrl+, settings   Ctrl+W return home",
                 "When sidebar is open: Tab focus   Enter open file   Space/Right toggle dir",
                 "Ctrl+[ narrower   Ctrl+] wider",
@@ -2085,6 +2298,112 @@ mod tests {
         assert!(status.contains("Ln 2/2"));
         assert!(status.contains("Line 4 ch"));
         assert!(status.contains("Doc 9 ch"));
+    }
+
+    #[test]
+    fn ctrl_f_opens_find_dialog() {
+        let mut app = editor_app();
+
+        app.handle_event(Event::Key(KeyEvent {
+            code: KeyCode::Char('f'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }));
+
+        let Screen::Editor(editor) = app.screen else {
+            panic!("editor screen");
+        };
+        assert!(matches!(editor.dialog, Some(EditorDialog::Find(_))));
+    }
+
+    #[test]
+    fn find_query_moves_to_first_match() {
+        let mut app = editor_app();
+        let Screen::Editor(editor) = &mut app.screen else {
+            panic!("editor screen");
+        };
+        editor.buffer = Buffer::from_text("alpha\nbeta\ngamma");
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        )));
+        for ch in ['b', 'e', 't', 'a'] {
+            app.handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+
+        let Screen::Editor(editor) = app.screen else {
+            panic!("editor screen");
+        };
+        assert_eq!(editor.buffer.cursor(), (1, 0));
+        assert_eq!(app.status_message, "find 1/1");
+    }
+
+    #[test]
+    fn find_enter_cycles_to_next_match() {
+        let mut app = editor_app();
+        let Screen::Editor(editor) = &mut app.screen else {
+            panic!("editor screen");
+        };
+        editor.buffer = Buffer::from_text("beta one\nbeta two\nbeta three");
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        )));
+        for ch in ['b', 'e', 't', 'a'] {
+            app.handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+
+        let Screen::Editor(editor) = app.screen else {
+            panic!("editor screen");
+        };
+        assert_eq!(editor.buffer.cursor(), (1, 0));
+        assert_eq!(app.status_message, "find 2/3");
+    }
+
+    #[test]
+    fn ctrl_g_jumps_to_requested_line() {
+        let mut app = editor_app();
+        let Screen::Editor(editor) = &mut app.screen else {
+            panic!("editor screen");
+        };
+        editor.buffer = Buffer::from_text("alpha\nbeta\ngamma");
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('g'),
+            KeyModifiers::CONTROL,
+        )));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Backspace,
+            KeyModifiers::NONE,
+        )));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('3'),
+            KeyModifiers::NONE,
+        )));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+
+        let Screen::Editor(editor) = app.screen else {
+            panic!("editor screen");
+        };
+        assert_eq!(editor.buffer.cursor(), (2, 0));
+        assert!(editor.dialog.is_none());
+        assert_eq!(app.status_message, "line 3");
     }
 
     #[test]
