@@ -459,8 +459,25 @@ fn render_spans(
             continue;
         }
 
-        if grammar.string_delimiters.contains(&ch) {
-            let end = find_string_end(line, &chars, index + 1, ch);
+        if let Some(end) = attribute_token_end(line, &chars, index, language) {
+            spans.push(Span::styled(
+                line[byte_index..end].to_owned(),
+                theme.code_keyword,
+            ));
+            index = char_position_at_or_after(&chars, end);
+            continue;
+        }
+
+        if let Some(end) = lifetime_token_end(line, &chars, index, language) {
+            spans.push(Span::styled(
+                line[byte_index..end].to_owned(),
+                theme.code_type,
+            ));
+            index = char_position_at_or_after(&chars, end);
+            continue;
+        }
+
+        if let Some(end) = string_token_end(line, &chars, index, ch, language, &grammar) {
             spans.push(Span::styled(
                 line[byte_index..end].to_owned(),
                 theme.code_string,
@@ -491,7 +508,7 @@ fn render_spans(
         if is_identifier_start(ch) {
             let end = find_ident_end(line, &chars, index + 1);
             let token = &line[byte_index..end];
-            let style = if grammar.keywords.contains(&token) {
+            let style = if is_macro_call(line, end, language) || grammar.keywords.contains(&token) {
                 theme.code_keyword
             } else if is_type_like(token, language) {
                 theme.code_type
@@ -538,6 +555,25 @@ fn find_string_end(
         index += 1;
     }
     line.len()
+}
+
+fn string_token_end(
+    line: &str,
+    chars: &[(usize, char)],
+    index: usize,
+    delimiter: char,
+    language: Language,
+    grammar: &Grammar,
+) -> Option<usize> {
+    if !grammar.string_delimiters.contains(&delimiter) {
+        return None;
+    }
+
+    if delimiter == '\'' && language == Language::Rust {
+        return rust_char_literal_end(chars, index);
+    }
+
+    Some(find_string_end(line, chars, index + 1, delimiter))
 }
 
 fn find_number_end(line: &str, chars: &[(usize, char)], mut index: usize) -> usize {
@@ -614,6 +650,64 @@ fn data_key_start(line: &str) -> Option<usize> {
     }
 }
 
+fn attribute_token_end(
+    line: &str,
+    chars: &[(usize, char)],
+    index: usize,
+    language: Language,
+) -> Option<usize> {
+    let (byte_index, ch) = chars.get(index).copied()?;
+    match (language, ch) {
+        (Language::Rust, '#') if chars.get(index + 1).is_some_and(|(_, next)| *next == '[') => line
+            [byte_index..]
+            .find(']')
+            .map(|offset| byte_index + offset + 1),
+        (Language::Python | Language::JavaScript, '@') => {
+            let next = chars.get(index + 1)?.0;
+            let end = find_ident_end(line, chars, index + 2);
+            (end > next).then_some(end)
+        }
+        _ => None,
+    }
+}
+
+fn lifetime_token_end(
+    line: &str,
+    chars: &[(usize, char)],
+    index: usize,
+    language: Language,
+) -> Option<usize> {
+    if language != Language::Rust || chars.get(index)?.1 != '\'' {
+        return None;
+    }
+
+    let next = chars.get(index + 1)?;
+    if !is_identifier_start(next.1) {
+        return None;
+    }
+
+    Some(find_ident_end(line, chars, index + 2))
+}
+
+fn rust_char_literal_end(chars: &[(usize, char)], index: usize) -> Option<usize> {
+    let (_, quote) = chars.get(index).copied()?;
+    if quote != '\'' {
+        return None;
+    }
+
+    let first = chars.get(index + 1).copied()?;
+    let candidate_end = if first.1 == '\\' {
+        let escaped = chars.get(index + 2).copied()?;
+        escaped.0 + escaped.1.len_utf8()
+    } else {
+        first.0 + first.1.len_utf8()
+    };
+
+    let closing_index = char_position_at_or_after(chars, candidate_end);
+    let closing = chars.get(closing_index).copied()?;
+    (closing.1 == '\'').then_some(closing.0 + closing.1.len_utf8())
+}
+
 fn find_quoted_key_end(text: &str, delimiter: char) -> Option<usize> {
     let mut escaped = false;
     for (offset, ch) in text.char_indices().skip(1) {
@@ -665,6 +759,10 @@ fn shell_variable_end(
 
     let end = find_ident_end(line, chars, index + 2);
     Some(end.max(start + 1))
+}
+
+fn is_macro_call(line: &str, ident_end: usize, language: Language) -> bool {
+    language == Language::Rust && line[ident_end..].starts_with('!')
 }
 
 fn char_position_at_or_after(chars: &[(usize, char)], byte_index: usize) -> usize {
@@ -766,7 +864,8 @@ mod tests {
             FileType::Code,
         );
 
-        assert_eq!(rendered[0].spans[0].content.as_ref(), "#");
+        assert_eq!(rendered[0].spans[0].content.as_ref(), "#[derive(Debug)]");
+        assert_eq!(rendered[0].spans[0].style, theme.code_keyword);
     }
 
     #[test]
@@ -871,6 +970,58 @@ mod tests {
                 .iter()
                 .any(|span| span.content.as_ref() == "${USER}" && span.style == theme.code_type)
         );
+    }
+
+    #[test]
+    fn rust_lifetimes_use_code_type_style() {
+        let theme = Theme::source_hints_default();
+        let rendered = render_document(
+            &[String::from(
+                "fn borrow<'a>(value: &'a str) -> &'a str { value }",
+            )],
+            &theme,
+            Some(Path::new("main.rs")),
+            FileType::Code,
+        );
+
+        assert!(
+            rendered[0]
+                .spans
+                .iter()
+                .any(|span| span.content.as_ref() == "'a" && span.style == theme.code_type)
+        );
+    }
+
+    #[test]
+    fn rust_macros_use_code_keyword_style() {
+        let theme = Theme::source_hints_default();
+        let rendered = render_document(
+            &[String::from("println!(\"implicit\");")],
+            &theme,
+            Some(Path::new("main.rs")),
+            FileType::Code,
+        );
+
+        assert!(
+            rendered[0]
+                .spans
+                .iter()
+                .any(|span| span.content.as_ref() == "println" && span.style == theme.code_keyword)
+        );
+    }
+
+    #[test]
+    fn python_decorators_use_code_keyword_style() {
+        let theme = Theme::source_hints_default();
+        let rendered = render_document(
+            &[String::from("@dataclass"), String::from("class User:")],
+            &theme,
+            Some(Path::new("main.py")),
+            FileType::Code,
+        );
+
+        assert_eq!(rendered[0].spans[0].content.as_ref(), "@dataclass");
+        assert_eq!(rendered[0].spans[0].style, theme.code_keyword);
     }
 
     #[test]
