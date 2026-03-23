@@ -11,7 +11,6 @@ use crate::{
     theme::Theme,
 };
 
-const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 #[derive(Clone, Copy)]
 struct WelcomeMeta {
@@ -221,28 +220,30 @@ fn draw_welcome(frame: &mut Frame, area: Rect, welcome: WelcomeView<'_>, theme: 
     ])
     .areas(area);
     let [logo_area, title_area] =
-        Layout::horizontal([Constraint::Length(24), Constraint::Min(20)]).areas(hero_area);
+        Layout::horizontal([Constraint::Length(36), Constraint::Min(20)]).areas(hero_area);
     let [shortcuts_area, recents_area] = two_column(body_area);
 
-    let spinner_char = SPINNER[(welcome.meta.tick as usize) % SPINNER.len()];
-    let mut logo_lines: Vec<Line> = welcome
+    // Slide the logo in from the right over ~1.4 seconds (17 ticks × 80ms).
+    // offset starts at LOGO_WIDTH and decreases by 2 per tick until 0.
+    const LOGO_WIDTH: usize = 34;
+    let tick = welcome.meta.tick as usize;
+    let offset = (LOGO_WIDTH).saturating_sub(tick.saturating_mul(2)).min(LOGO_WIDTH);
+
+    let logo_lines: Vec<Line> = welcome
         .logo
         .iter()
-        .cloned()
-        .map(Line::raw)
+        .map(|row| {
+            let visible: String = row.chars().skip(offset).collect();
+            let spaces = " ".repeat(offset);
+            Line::raw(format!("{spaces}{visible}"))
+        })
         .collect();
-    logo_lines.push(Line::raw(""));
-    logo_lines.push(Line::raw(format!("  {spinner_char}")));
 
-    let logo_widget = Paragraph::new(logo_lines)
-        .style(theme.background)
-        .block(
-            Block::default()
-                .title(" implicit ")
-                .title_style(theme.ui_chrome)
-                .borders(Borders::ALL)
-                .border_style(theme.ui_chrome),
-        );
+    let logo_widget = Paragraph::new(logo_lines).style(theme.background).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.ui_chrome),
+    );
     frame.render_widget(logo_widget, logo_area);
 
     let title_lines = vec![
