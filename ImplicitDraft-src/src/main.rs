@@ -7,6 +7,7 @@ mod preview;
 mod recents;
 mod render;
 mod settings;
+mod sidebar;
 mod terminal;
 mod theme;
 mod welcome;

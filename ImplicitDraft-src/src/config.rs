@@ -47,6 +47,7 @@ pub struct EditorKeys {
     pub quit: Shortcut,
     pub home: Shortcut,
     pub cycle_mode: Shortcut,
+    pub toggle_sidebar: Shortcut,
     pub undo: Shortcut,
     pub redo: Shortcut,
     pub controls: Shortcut,
@@ -127,6 +128,7 @@ struct EditorKeysFile {
     quit: Option<String>,
     home: Option<String>,
     cycle_mode: Option<String>,
+    toggle_sidebar: Option<String>,
     undo: Option<String>,
     redo: Option<String>,
     controls: Option<String>,
@@ -290,6 +292,7 @@ impl Default for KeyBindings {
                 quit: Shortcut::parse("ctrl+q").expect("default shortcut"),
                 home: Shortcut::parse("ctrl+w").expect("default shortcut"),
                 cycle_mode: Shortcut::parse("ctrl+p").expect("default shortcut"),
+                toggle_sidebar: Shortcut::parse("ctrl+e").expect("default shortcut"),
                 undo: Shortcut::parse("ctrl+z").expect("default shortcut"),
                 redo: Shortcut::parse("ctrl+r").expect("default shortcut"),
                 controls: Shortcut::parse("?").expect("default shortcut"),
@@ -342,6 +345,10 @@ impl KeyBindings {
                 quit: parse_or_default(file.editor.quit, defaults.editor.quit)?,
                 home: parse_or_default(file.editor.home, defaults.editor.home)?,
                 cycle_mode: parse_or_default(file.editor.cycle_mode, defaults.editor.cycle_mode)?,
+                toggle_sidebar: parse_or_default(
+                    file.editor.toggle_sidebar,
+                    defaults.editor.toggle_sidebar,
+                )?,
                 undo: parse_or_default(file.editor.undo, defaults.editor.undo)?,
                 redo: parse_or_default(file.editor.redo, defaults.editor.redo)?,
                 controls: parse_or_default(file.editor.controls, defaults.editor.controls)?,
@@ -524,6 +531,7 @@ save = "ctrl+s"
 quit = "ctrl+q"
 home = "ctrl+w"
 cycle_mode = "ctrl+p"
+toggle_sidebar = "ctrl+e"
 undo = "ctrl+z"
 redo = "ctrl+r"
 controls = "?"

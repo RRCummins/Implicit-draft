@@ -11,21 +11,23 @@ use crate::{
     picker::{Picker, PickerAction, PickerEntry},
     preview, recents, render,
     settings::{ConfigPane, ConfigState},
+    sidebar::{SidebarAction, SidebarRow, SidebarState},
     theme::Theme,
     welcome::{BRAILLE_LOGO, SHORTCUTS, WelcomeState},
 };
 
 const FRAME_POLL_INTERVAL: Duration = Duration::from_millis(80);
 const EDITOR_HELP: &str =
-    "ctrl+z undo | ctrl+r redo | ctrl+s save | ctrl+, settings | ctrl+w home";
+    "ctrl+e sidebar | ctrl+z undo | ctrl+s save | ctrl+, settings | ctrl+w home";
 const PREVIEW_HELP: &str =
-    "ctrl+p source | ctrl+, settings | arrows/page move | preview is read-only";
-const SOURCE_HELP: &str =
-    "ctrl+p source+hints | ctrl+, settings | plain text editing | ctrl+w home";
+    "ctrl+e sidebar | ctrl+p source | ctrl+, settings | preview is read-only";
+const SOURCE_HELP: &str = "ctrl+e sidebar | ctrl+p source+hints | ctrl+, settings | ctrl+w home";
 const PICKER_HELP: &str = "enter/right open | left/backspace parent | a filter | esc home";
 const HOME_HELP: &str = "o open | n new | c settings | enter recent | / search | q quit";
 const SEARCH_HELP: &str = "type to filter | backspace delete | enter keep | esc clear";
 const CONFIG_HELP: &str = "tab switch pane | enter apply | ctrl+, close | s save | esc cancel";
+const SIDEBAR_HELP: &str =
+    "sidebar: arrows browse | enter open | right/space toggle | tab editor | esc back";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EditorMode {
@@ -217,6 +219,7 @@ impl App {
         let mut clear_overlay = false;
         let mut config_exit = None;
         let mut reload_theme = false;
+        let default_mode = self.default_mode();
 
         match &mut self.screen {
             Screen::Editor(editor) => {
@@ -271,9 +274,90 @@ impl App {
                             next_screen = Some(Screen::Welcome(Self::load_welcome_state()));
                             next_status = Some(String::from(HOME_HELP));
                         }
+                    } else if keybindings.editor.toggle_sidebar.matches(key) {
+                        if editor.sidebar.is_open() {
+                            editor.sidebar.close();
+                            editor.focus = EditorFocus::Editor;
+                            next_status = Some(String::from("sidebar closed"));
+                        } else {
+                            match editor.sidebar.open() {
+                                Ok(()) => {
+                                    editor.focus = EditorFocus::Sidebar;
+                                    next_status = Some(String::from(SIDEBAR_HELP));
+                                }
+                                Err(error) => next_status = Some(error.to_string()),
+                            }
+                        }
                     } else if keybindings.editor.cycle_mode.matches(key) {
                         editor.mode = editor.mode.cycle();
                         next_status = Some(String::from(editor.mode.help()));
+                    } else if editor.sidebar.is_open() && key.code == KeyCode::Tab {
+                        editor.focus = match editor.focus {
+                            EditorFocus::Editor => EditorFocus::Sidebar,
+                            EditorFocus::Sidebar => EditorFocus::Editor,
+                        };
+                        next_status = Some(String::from(if editor.focus == EditorFocus::Sidebar {
+                            SIDEBAR_HELP
+                        } else {
+                            editor.mode.help()
+                        }));
+                    } else if editor.focus == EditorFocus::Sidebar {
+                        match key.code {
+                            KeyCode::Esc => {
+                                editor.focus = EditorFocus::Editor;
+                                next_status = Some(String::from(editor.mode.help()));
+                            }
+                            KeyCode::Up => {
+                                editor.sidebar.move_up();
+                                next_status = Some(String::from(SIDEBAR_HELP));
+                            }
+                            KeyCode::Down => {
+                                editor.sidebar.move_down();
+                                next_status = Some(String::from(SIDEBAR_HELP));
+                            }
+                            KeyCode::PageUp => {
+                                editor.sidebar.page_up(editor.viewport_height);
+                                next_status = Some(String::from(SIDEBAR_HELP));
+                            }
+                            KeyCode::PageDown => {
+                                editor.sidebar.page_down(editor.viewport_height);
+                                next_status = Some(String::from(SIDEBAR_HELP));
+                            }
+                            KeyCode::Left => match editor.sidebar.move_left() {
+                                Ok(()) => next_status = Some(String::from(SIDEBAR_HELP)),
+                                Err(error) => next_status = Some(error.to_string()),
+                            },
+                            KeyCode::Right | KeyCode::Char(' ') => {
+                                match editor.sidebar.toggle_selected_dir() {
+                                    Ok(()) => next_status = Some(String::from(SIDEBAR_HELP)),
+                                    Err(error) => next_status = Some(error.to_string()),
+                                }
+                            }
+                            KeyCode::Enter => match editor.sidebar.open_selected() {
+                                Ok(SidebarAction::None) => {
+                                    next_status = Some(String::from(SIDEBAR_HELP));
+                                }
+                                Ok(SidebarAction::OpenFile(path)) => {
+                                    match EditorState::open_from_sidebar(path.clone(), default_mode)
+                                    {
+                                        Ok(next_editor) => {
+                                            let _ = recents::remember(&path);
+                                            next_screen = Some(Screen::Editor(next_editor));
+                                            next_status = Some(String::from(default_mode.help()));
+                                        }
+                                        Err(error) => next_status = Some(error.to_string()),
+                                    }
+                                }
+                                Err(error) => next_status = Some(error.to_string()),
+                            },
+                            KeyCode::Char('r') if is_insertable(key.modifiers) => {
+                                match editor.sidebar.refresh() {
+                                    Ok(()) => next_status = Some(String::from("sidebar refreshed")),
+                                    Err(error) => next_status = Some(error.to_string()),
+                                }
+                            }
+                            _ => {}
+                        }
                     } else if editor.mode == EditorMode::Preview {
                         match key.code {
                             KeyCode::Left => editor.buffer.move_left(),
@@ -412,11 +496,11 @@ impl App {
                 match action {
                     Ok(PickerAction::None) => {}
                     Ok(PickerAction::OpenFile(path)) => {
-                        match EditorState::open(path.clone(), self.default_mode()) {
+                        match EditorState::open(path.clone(), default_mode) {
                             Ok(editor) => {
                                 let _ = recents::remember(&path);
                                 next_screen = Some(Screen::Editor(editor));
-                                next_status = Some(String::from(self.default_mode().help()));
+                                next_status = Some(String::from(default_mode.help()));
                             }
                             Err(error) => next_status = Some(error.to_string()),
                         }
@@ -439,11 +523,11 @@ impl App {
                 }
                 KeyCode::Enter => {
                     if let Some(path) = welcome.selected_path() {
-                        match EditorState::open(path.clone(), self.default_mode()) {
+                        match EditorState::open(path.clone(), default_mode) {
                             Ok(editor) => {
                                 let _ = recents::remember(&path);
                                 next_screen = Some(Screen::Editor(editor));
-                                next_status = Some(String::from(self.default_mode().help()));
+                                next_status = Some(String::from(default_mode.help()));
                             }
                             Err(error) => next_status = Some(error.to_string()),
                         }
@@ -459,8 +543,8 @@ impl App {
                     }
                 }
                 _ if keybindings.home.new_buffer.matches(key) => {
-                    next_screen = Some(Screen::Editor(EditorState::empty(self.default_mode())));
-                    next_status = Some(String::from(self.default_mode().help()));
+                    next_screen = Some(Screen::Editor(EditorState::empty(default_mode)));
+                    next_status = Some(String::from(default_mode.help()));
                 }
                 _ if keybindings.home.settings.matches(key) => {
                     self.open_config();
@@ -576,12 +660,16 @@ impl App {
         match &mut self.screen {
             Screen::Editor(editor) => {
                 editor.viewport_height = height;
+                let editor_width = editor_panel_width(width, &editor.sidebar);
                 let content_width = editor_content_width(
-                    width,
+                    editor_width,
                     editor.buffer.line_count(),
                     editor_line_numbers_enabled(editor.mode, self.config.line_numbers),
                 );
                 editor.buffer.sync_viewport(height, content_width);
+                if editor.sidebar.is_open() {
+                    editor.sidebar.sync_viewport(height);
+                }
             }
             Screen::Picker(picker) => picker.sync_viewport(height),
             Screen::Config(_) | Screen::Welcome(_) => {}
@@ -590,49 +678,81 @@ impl App {
 
     pub fn current_view(&self, list_height: usize, list_width: usize) -> ViewModel {
         match &self.screen {
-            Screen::Editor(editor) => ViewModel::Editor {
-                line_numbers: editor_line_numbers_enabled(editor.mode, self.config.line_numbers),
-                wrap: editor_wrap_enabled(editor.mode, self.config.wrap),
-                lines: match editor.mode {
-                    EditorMode::SourceHints => {
-                        markdown::style_document(editor.buffer.lines(), &self.theme)
-                    }
-                    EditorMode::Preview => {
-                        preview::render_document(editor.buffer.lines(), &self.theme, list_width)
-                    }
-                    EditorMode::Source => editor
-                        .buffer
-                        .lines()
-                        .iter()
-                        .cloned()
-                        .map(ratatui::text::Line::raw)
-                        .collect(),
-                },
-                cursor: if editor.dialog.is_some() || editor.mode == EditorMode::Preview {
-                    None
-                } else {
-                    editor.buffer.cursor_screen_position()
-                },
-                scroll: editor.buffer.scroll_offset(),
-                dialog: editor.dialog.map(|dialog| match dialog {
-                    EditorDialog::Quit => DialogView {
-                        title: String::from(" Unsaved Changes "),
-                        lines: vec![
-                            String::from("Save before quitting?"),
-                            String::from("Enter/y/ctrl+q: discard   ctrl+s: save and stay"),
-                            String::from("Esc or n: cancel"),
-                        ],
+            Screen::Editor(editor) => {
+                let line_numbers =
+                    editor_line_numbers_enabled(editor.mode, self.config.line_numbers);
+                let wrap = editor_wrap_enabled(editor.mode, self.config.wrap);
+                let editor_width = editor_panel_width(list_width, &editor.sidebar);
+                let content_width =
+                    editor_content_width(editor_width, editor.buffer.line_count(), line_numbers);
+
+                ViewModel::Editor {
+                    line_numbers,
+                    wrap,
+                    lines: match editor.mode {
+                        EditorMode::SourceHints => {
+                            markdown::style_document(editor.buffer.lines(), &self.theme)
+                        }
+                        EditorMode::Preview => preview::render_document(
+                            editor.buffer.lines(),
+                            &self.theme,
+                            content_width,
+                        ),
+                        EditorMode::Source => editor
+                            .buffer
+                            .lines()
+                            .iter()
+                            .cloned()
+                            .map(ratatui::text::Line::raw)
+                            .collect(),
                     },
-                    EditorDialog::ReturnHome => DialogView {
-                        title: String::from(" Return Home "),
-                        lines: vec![
-                            String::from("Save before returning home?"),
-                            String::from("Enter/y: discard   ctrl+s: save and return"),
-                            String::from("Esc or n: cancel"),
-                        ],
+                    cursor: if editor.dialog.is_some()
+                        || editor.mode == EditorMode::Preview
+                        || editor.focus == EditorFocus::Sidebar
+                    {
+                        None
+                    } else {
+                        editor.buffer.cursor_screen_position()
                     },
-                }),
-            },
+                    scroll: editor.buffer.scroll_offset(),
+                    sidebar_rows: if editor.sidebar.is_open() {
+                        editor.sidebar.visible_rows(list_height)
+                    } else {
+                        Vec::new()
+                    },
+                    sidebar_selected_row: if editor.sidebar.is_open() {
+                        editor.sidebar.selected_row()
+                    } else {
+                        None
+                    },
+                    sidebar_width: if editor.sidebar.is_open() {
+                        editor.sidebar.width()
+                    } else {
+                        0
+                    },
+                    sidebar_focused: editor.sidebar.is_open()
+                        && editor.focus == EditorFocus::Sidebar,
+                    sidebar_root: editor.sidebar.root_display(),
+                    dialog: editor.dialog.map(|dialog| match dialog {
+                        EditorDialog::Quit => DialogView {
+                            title: String::from(" Unsaved Changes "),
+                            lines: vec![
+                                String::from("Save before quitting?"),
+                                String::from("Enter/y/ctrl+q: discard   ctrl+s: save and stay"),
+                                String::from("Esc or n: cancel"),
+                            ],
+                        },
+                        EditorDialog::ReturnHome => DialogView {
+                            title: String::from(" Return Home "),
+                            lines: vec![
+                                String::from("Save before returning home?"),
+                                String::from("Enter/y: discard   ctrl+s: save and return"),
+                                String::from("Esc or n: cancel"),
+                            ],
+                        },
+                    }),
+                }
+            }
             Screen::Picker(picker) => ViewModel::Picker {
                 cwd: picker.cwd_display(),
                 filter: picker.filter_label().to_owned(),
@@ -863,6 +983,14 @@ fn editor_content_width(width: usize, line_count: usize, line_numbers: bool) -> 
         .max(1)
 }
 
+fn editor_panel_width(width: usize, sidebar: &SidebarState) -> usize {
+    if !sidebar.is_open() {
+        return width.max(1);
+    }
+
+    width.saturating_sub(sidebar.width() as usize).max(1)
+}
+
 fn line_number_gutter_width(line_count: usize) -> usize {
     line_count.max(1).to_string().len() + 2
 }
@@ -875,6 +1003,12 @@ fn editor_wrap_enabled(mode: EditorMode, configured: bool) -> bool {
     configured && mode == EditorMode::Preview
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EditorFocus {
+    Editor,
+    Sidebar,
+}
+
 #[derive(Debug)]
 pub struct EditorState {
     buffer: Buffer,
@@ -882,11 +1016,15 @@ pub struct EditorState {
     dialog: Option<EditorDialog>,
     viewport_height: usize,
     mode: EditorMode,
+    focus: EditorFocus,
+    sidebar: SidebarState,
 }
 
 impl EditorState {
     fn open(path: PathBuf, mode: EditorMode) -> Result<Self> {
         let buffer = Buffer::from_path(&path)?;
+        let sidebar =
+            SidebarState::for_file(Some(&path)).unwrap_or_else(|_| SidebarState::fallback());
 
         Ok(Self {
             buffer,
@@ -894,7 +1032,16 @@ impl EditorState {
             dialog: None,
             viewport_height: 1,
             mode,
+            focus: EditorFocus::Editor,
+            sidebar,
         })
+    }
+
+    fn open_from_sidebar(path: PathBuf, mode: EditorMode) -> Result<Self> {
+        let mut editor = Self::open(path, mode)?;
+        editor.sidebar.open()?;
+        editor.focus = EditorFocus::Editor;
+        Ok(editor)
     }
 
     fn empty(mode: EditorMode) -> Self {
@@ -904,6 +1051,8 @@ impl EditorState {
             dialog: None,
             viewport_height: 1,
             mode,
+            focus: EditorFocus::Editor,
+            sidebar: SidebarState::for_file(None).unwrap_or_else(|_| SidebarState::fallback()),
         }
     }
 
@@ -957,20 +1106,23 @@ impl Overlay {
         match self {
             Self::Editor(EditorMode::SourceHints) => vec![
                 "Arrows/Home/End/Page: move cursor",
-                "Ctrl+S save   Ctrl+Z undo   Ctrl+R redo",
+                "Ctrl+S save   Ctrl+Z undo   Ctrl+R redo   Ctrl+E sidebar",
                 "Ctrl+P preview mode   Ctrl+, settings   Ctrl+W return home",
+                "When sidebar is open: Tab focus   Enter open file   Space/Right toggle dir",
                 "Ctrl+Q quit app   ? or Esc close this dialog",
             ],
             Self::Editor(EditorMode::Preview) => vec![
                 "Arrows/Home/End/Page: move cursor",
-                "Ctrl+P source mode   Ctrl+, settings   Ctrl+W return home",
+                "Ctrl+P source mode   Ctrl+E sidebar   Ctrl+, settings   Ctrl+W return home",
+                "When sidebar is open: Tab focus   Enter open file   Space/Right toggle dir",
                 "Ctrl+S save   Ctrl+Q quit app",
                 "? or Esc close this dialog",
             ],
             Self::Editor(EditorMode::Source) => vec![
                 "Arrows/Home/End/Page: move cursor",
-                "Ctrl+S save   Ctrl+Z undo   Ctrl+R redo",
+                "Ctrl+S save   Ctrl+Z undo   Ctrl+R redo   Ctrl+E sidebar",
                 "Ctrl+P source+hints mode   Ctrl+, settings   Ctrl+W return home",
+                "When sidebar is open: Tab focus   Enter open file   Space/Right toggle dir",
                 "Ctrl+Q quit app   ? or Esc close this dialog",
             ],
             Self::Picker => vec![
@@ -1016,6 +1168,11 @@ pub enum ViewModel {
         lines: Vec<ratatui::text::Line<'static>>,
         cursor: Option<(usize, usize)>,
         scroll: (usize, usize),
+        sidebar_rows: Vec<SidebarRow>,
+        sidebar_selected_row: Option<usize>,
+        sidebar_width: u16,
+        sidebar_focused: bool,
+        sidebar_root: String,
         dialog: Option<DialogView>,
     },
     Picker {
@@ -1051,6 +1208,18 @@ pub enum ViewModel {
 mod tests {
     use super::*;
     use crossterm::event::{Event, KeyEventState};
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!("implicit-app-{name}-{unique}"))
+    }
 
     fn editor_app() -> App {
         App {
@@ -1137,6 +1306,103 @@ mod tests {
             panic!("editor screen");
         };
         assert_eq!(editor.mode, EditorMode::Source);
+    }
+
+    #[test]
+    fn ctrl_e_opens_sidebar_with_sidebar_focus() {
+        let mut app = editor_app();
+
+        app.handle_event(Event::Key(KeyEvent {
+            code: KeyCode::Char('e'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }));
+
+        let ViewModel::Editor {
+            sidebar_width,
+            sidebar_focused,
+            ..
+        } = app.current_view(10, 40)
+        else {
+            panic!("editor view");
+        };
+
+        assert!(sidebar_width > 0);
+        assert!(sidebar_focused);
+        assert_eq!(app.status_message, SIDEBAR_HELP);
+    }
+
+    #[test]
+    fn sidebar_tab_returns_focus_to_editor() {
+        let mut app = editor_app();
+
+        app.handle_event(Event::Key(KeyEvent {
+            code: KeyCode::Char('e'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }));
+        app.handle_event(Event::Key(KeyEvent {
+            code: KeyCode::Tab,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }));
+
+        let ViewModel::Editor {
+            cursor,
+            sidebar_focused,
+            ..
+        } = app.current_view(10, 40)
+        else {
+            panic!("editor view");
+        };
+
+        assert!(!sidebar_focused);
+        assert_eq!(cursor, Some((0, 0)));
+    }
+
+    #[test]
+    fn sidebar_enter_opens_selected_file() {
+        let root = temp_dir("sidebar-open");
+        fs::create_dir_all(&root).expect("mkdir");
+        fs::write(root.join("a.md"), "a").expect("file");
+        fs::write(root.join("b.md"), "b").expect("file");
+
+        let mut app = App::new(
+            StartupTarget::Open(root.join("a.md")),
+            AppConfig::default(),
+            KeyBindings::default(),
+        );
+
+        app.handle_event(Event::Key(KeyEvent {
+            code: KeyCode::Char('e'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }));
+        app.handle_event(Event::Key(KeyEvent {
+            code: KeyCode::Down,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }));
+        app.handle_event(Event::Key(KeyEvent {
+            code: KeyCode::Enter,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }));
+
+        let Screen::Editor(editor) = app.screen else {
+            panic!("editor screen");
+        };
+        assert!(editor.file_name().ends_with("b.md"));
+        assert!(editor.sidebar.is_open());
+        assert_eq!(editor.focus, EditorFocus::Editor);
+
+        fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]

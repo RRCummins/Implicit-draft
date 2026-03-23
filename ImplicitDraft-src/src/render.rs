@@ -9,6 +9,7 @@ use crate::{
     app::{App, DialogView, OverlayView, ViewModel},
     picker::PickerEntry,
     settings::ConfigPane,
+    sidebar::SidebarRow,
     theme::Theme,
 };
 
@@ -33,6 +34,11 @@ struct EditorView {
     lines: Vec<Line<'static>>,
     cursor: Option<(usize, usize)>,
     scroll: (usize, usize),
+    sidebar_rows: Vec<SidebarRow>,
+    sidebar_selected_row: Option<usize>,
+    sidebar_width: u16,
+    sidebar_focused: bool,
+    sidebar_root: String,
     dialog: Option<DialogView>,
 }
 
@@ -63,6 +69,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             lines,
             cursor,
             scroll,
+            sidebar_rows,
+            sidebar_selected_row,
+            sidebar_width,
+            sidebar_focused,
+            sidebar_root,
             dialog,
         } => draw_editor(
             frame,
@@ -73,6 +84,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 lines,
                 cursor,
                 scroll,
+                sidebar_rows,
+                sidebar_selected_row,
+                sidebar_width,
+                sidebar_focused,
+                sidebar_root,
                 dialog,
             },
             theme,
@@ -188,10 +204,31 @@ fn draw_editor(frame: &mut Frame, area: Rect, editor: EditorView, theme: Theme) 
         lines[row].style = lines[row].style.patch(theme.cursor);
     }
 
+    let editor_area = if editor.sidebar_width > 0 {
+        let [sidebar_area, editor_area] =
+            Layout::horizontal([Constraint::Length(editor.sidebar_width), Constraint::Min(1)])
+                .areas(area);
+
+        draw_sidebar(
+            frame,
+            sidebar_area,
+            &editor.sidebar_root,
+            &editor.sidebar_rows,
+            editor.sidebar_selected_row,
+            editor.sidebar_focused,
+            theme,
+        );
+
+        editor_area
+    } else {
+        area
+    };
+
     let editor_area = if editor.line_numbers {
         let gutter_width = line_number_gutter_width(lines.len());
         let [gutter_area, editor_area] =
-            Layout::horizontal([Constraint::Length(gutter_width), Constraint::Min(1)]).areas(area);
+            Layout::horizontal([Constraint::Length(gutter_width), Constraint::Min(1)])
+                .areas(editor_area);
 
         let gutter_lines = (1..=lines.len())
             .map(|number| {
@@ -207,7 +244,7 @@ fn draw_editor(frame: &mut Frame, area: Rect, editor: EditorView, theme: Theme) 
         frame.render_widget(gutter, gutter_area);
         editor_area
     } else {
-        area
+        editor_area
     };
 
     let editor_widget = Paragraph::new(lines)
@@ -243,6 +280,50 @@ fn draw_editor(frame: &mut Frame, area: Rect, editor: EditorView, theme: Theme) 
 
         frame.render_widget(dialog, dialog_area);
     }
+}
+
+fn draw_sidebar(
+    frame: &mut Frame,
+    area: Rect,
+    root: &str,
+    rows: &[SidebarRow],
+    selected_row: Option<usize>,
+    focused: bool,
+    theme: Theme,
+) {
+    let lines = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let style = if Some(index) == selected_row {
+                theme.selection.patch(theme.ui_chrome)
+            } else {
+                theme.background
+            };
+            Line::styled(row.label.clone(), style)
+        })
+        .collect::<Vec<_>>();
+
+    let title = if focused {
+        format!(
+            " Files * {} ",
+            fit_status_line(root, area.width.saturating_sub(12) as usize)
+        )
+    } else {
+        format!(
+            " Files {} ",
+            fit_status_line(root, area.width.saturating_sub(10) as usize)
+        )
+    };
+
+    let widget = Paragraph::new(lines).style(theme.background).block(
+        Block::default()
+            .title(title)
+            .title_style(theme.ui_chrome)
+            .borders(Borders::ALL)
+            .border_style(theme.ui_chrome),
+    );
+    frame.render_widget(widget, area);
 }
 
 fn draw_picker(
