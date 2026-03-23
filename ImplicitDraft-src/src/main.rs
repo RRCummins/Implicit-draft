@@ -9,12 +9,13 @@ mod terminal;
 mod theme;
 mod welcome;
 
+use std::ffi::OsStr;
 use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::Parser;
 
-use crate::app::App;
+use crate::app::{App, StartupTarget};
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "Terminal markdown editor", long_about = None)]
@@ -26,7 +27,7 @@ struct Cli {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let mut terminal = terminal::init()?;
-    let mut app = App::new(cli.file)?;
+    let mut app = App::new(resolve_startup_target(cli.file));
 
     let run_result = app.run(&mut terminal);
     let restore_result = terminal::restore();
@@ -34,4 +35,47 @@ fn main() -> Result<()> {
     restore_result?;
     run_result?;
     Ok(())
+}
+
+fn resolve_startup_target(file: Option<PathBuf>) -> StartupTarget {
+    match file {
+        Some(path) if path.as_os_str() == OsStr::new("welcome") => StartupTarget::Welcome,
+        Some(path) if path.is_dir() => StartupTarget::Browse(path),
+        Some(path) => StartupTarget::Open(path),
+        None => StartupTarget::Welcome,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn welcome_argument_opens_home_screen() {
+        match resolve_startup_target(Some(PathBuf::from("welcome"))) {
+            StartupTarget::Welcome => {}
+            StartupTarget::Open(path) => panic!("unexpected open target: {}", path.display()),
+            StartupTarget::Browse(path) => {
+                panic!("unexpected browse target: {}", path.display())
+            }
+        }
+    }
+
+    #[test]
+    fn regular_argument_opens_file() {
+        match resolve_startup_target(Some(PathBuf::from("notes.md"))) {
+            StartupTarget::Open(path) => assert_eq!(path, PathBuf::from("notes.md")),
+            StartupTarget::Welcome => panic!("unexpected welcome target"),
+            StartupTarget::Browse(path) => panic!("unexpected browse target: {}", path.display()),
+        }
+    }
+
+    #[test]
+    fn directory_argument_opens_browser() {
+        match resolve_startup_target(Some(PathBuf::from("."))) {
+            StartupTarget::Browse(path) => assert_eq!(path, PathBuf::from(".")),
+            StartupTarget::Open(path) => panic!("unexpected open target: {}", path.display()),
+            StartupTarget::Welcome => panic!("unexpected welcome target"),
+        }
+    }
 }

@@ -16,7 +16,7 @@ use crate::{
 const FRAME_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const EDITOR_HELP: &str = "ctrl+z undo | ctrl+r redo | ctrl+s save | ctrl+q quit";
 const PREVIEW_HELP: &str = "ctrl+p source+hints | arrows/page move | preview is read-only";
-const PICKER_HELP: &str = "enter open | a toggle filter | esc home";
+const PICKER_HELP: &str = "enter/right open | left/backspace parent | a filter | esc home";
 const HOME_HELP: &str = "o open | n new | enter recent | / search | q quit";
 const SEARCH_HELP: &str = "type to filter | backspace delete | enter keep | esc clear";
 
@@ -58,27 +58,46 @@ pub struct App {
     theme: Theme,
 }
 
+#[derive(Debug)]
+pub enum StartupTarget {
+    Welcome,
+    Browse(PathBuf),
+    Open(PathBuf),
+}
+
 impl App {
-    pub fn new(file_path: Option<PathBuf>) -> Result<Self> {
-        let (screen, status_message) = match file_path {
-            Some(path) => {
-                let editor = EditorState::open(path.clone())?;
-                let _ = recents::remember(&path);
-                (Screen::Editor(editor), String::from(EDITOR_HELP))
-            }
-            None => (
+    pub fn new(startup: StartupTarget) -> Self {
+        let (screen, status_message) = match startup {
+            StartupTarget::Browse(path) => match Picker::new(path.clone()) {
+                Ok(picker) => (Screen::Picker(picker), String::from(PICKER_HELP)),
+                Err(error) => (
+                    Screen::Welcome(Self::load_welcome_state()),
+                    format!("failed to browse {}: {error}", path.display()),
+                ),
+            },
+            StartupTarget::Open(path) => match EditorState::open(path.clone()) {
+                Ok(editor) => {
+                    let _ = recents::remember(&path);
+                    (Screen::Editor(editor), String::from(EDITOR_HELP))
+                }
+                Err(error) => (
+                    Screen::Welcome(Self::load_welcome_state()),
+                    format!("failed to open {}: {error}", path.display()),
+                ),
+            },
+            StartupTarget::Welcome => (
                 Screen::Welcome(Self::load_welcome_state()),
                 String::from(HOME_HELP),
             ),
         };
 
-        Ok(Self {
+        Self {
             screen,
             should_quit: false,
             status_message,
             search_mode: false,
             theme: Theme::load_named("dark").unwrap_or_else(|_| Theme::source_hints_default()),
-        })
+        }
     }
 
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
@@ -684,5 +703,37 @@ mod tests {
         };
         assert_eq!(editor.buffer.lines(), &[String::new()]);
         assert_eq!(app.status_message, PREVIEW_HELP);
+    }
+
+    #[test]
+    fn startup_open_failure_falls_back_to_welcome() {
+        let app = App::new(StartupTarget::Open(PathBuf::from("missing-file.md")));
+
+        let Screen::Welcome(_) = app.screen else {
+            panic!("welcome screen");
+        };
+        assert!(app.status_message.contains("failed to open"));
+        assert!(app.status_message.contains("missing-file.md"));
+    }
+
+    #[test]
+    fn startup_browse_failure_falls_back_to_welcome() {
+        let app = App::new(StartupTarget::Browse(PathBuf::from("missing-folder")));
+
+        let Screen::Welcome(_) = app.screen else {
+            panic!("welcome screen");
+        };
+        assert!(app.status_message.contains("failed to browse"));
+        assert!(app.status_message.contains("missing-folder"));
+    }
+
+    #[test]
+    fn startup_welcome_uses_home_status() {
+        let app = App::new(StartupTarget::Welcome);
+
+        let Screen::Welcome(_) = app.screen else {
+            panic!("welcome screen");
+        };
+        assert_eq!(app.status_message, HOME_HELP);
     }
 }

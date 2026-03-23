@@ -69,10 +69,39 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         ),
     }
 
-    let status = Line::from(app.status_line());
+    let status = Line::from(fit_status_line(
+        &app.status_line(),
+        status_area.width as usize,
+    ));
     let status_bar = Paragraph::new(status).style(theme.selection.patch(theme.ui_chrome));
 
     frame.render_widget(status_bar, status_area);
+}
+
+fn fit_status_line(line: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let len = line.chars().count();
+    if len <= width {
+        return format!("{line:<width$}");
+    }
+
+    if width == 1 {
+        return String::from("…");
+    }
+
+    let tail_len = width - 1;
+    let tail = line
+        .chars()
+        .rev()
+        .take(tail_len)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    format!("…{tail}")
 }
 
 fn draw_editor(
@@ -282,4 +311,19 @@ fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
         .areas(vertical);
 
     horizontal
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keeps_short_status_lines_intact() {
+        assert_eq!(fit_status_line("hello", 8), "hello   ");
+    }
+
+    #[test]
+    fn truncates_long_status_lines_from_the_left() {
+        assert_eq!(fit_status_line("abcdef", 4), "…def");
+    }
 }
