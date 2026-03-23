@@ -215,6 +215,9 @@ const GENERIC_KEYWORDS: &[&str] = &[
 ];
 const DEFAULT_STRING_DELIMITERS: &[char] = &['"', '\''];
 const JS_STRING_DELIMITERS: &[char] = &['"', '\'', '`'];
+const BACKTICK_MARKER: &str = "`";
+const TRIPLE_DOUBLE_QUOTE: &str = "\"\"\"";
+const TRIPLE_SINGLE_QUOTE: &str = "'''";
 
 pub fn render_document(
     lines: &[String],
@@ -260,6 +263,7 @@ pub fn render_preview_document(
 #[derive(Clone, Copy, Debug, Default)]
 struct RenderState {
     block_comment_end: Option<&'static str>,
+    string_end_marker: Option<&'static str>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -397,6 +401,23 @@ fn render_spans(
     while index < chars.len() {
         let (byte_index, ch) = chars[index];
 
+        if let Some(end_marker) = state.string_end_marker {
+            let end = match line[byte_index..].find(end_marker) {
+                Some(relative) => {
+                    let end = byte_index + relative + end_marker.len();
+                    state.string_end_marker = None;
+                    end
+                }
+                None => line.len(),
+            };
+            spans.push(Span::styled(
+                line[byte_index..end].to_owned(),
+                theme.code_string,
+            ));
+            index = char_position_at_or_after(&chars, end);
+            continue;
+        }
+
         if let Some(end_marker) = state.block_comment_end {
             let end = match line[byte_index..].find(end_marker) {
                 Some(relative) => {
@@ -477,12 +498,13 @@ fn render_spans(
             continue;
         }
 
-        if let Some(end) = string_token_end(line, &chars, index, ch, language, &grammar) {
+        if let Some(token) = string_token_end(line, &chars, index, ch, language, &grammar) {
             spans.push(Span::styled(
-                line[byte_index..end].to_owned(),
+                line[byte_index..token.end].to_owned(),
                 theme.code_string,
             ));
-            index = char_position_at_or_after(&chars, end);
+            state.string_end_marker = token.continues_with;
+            index = char_position_at_or_after(&chars, token.end);
             continue;
         }
 
@@ -551,6 +573,11 @@ fn find_string_end(
     line.len()
 }
 
+struct StringToken {
+    end: usize,
+    continues_with: Option<&'static str>,
+}
+
 fn string_token_end(
     line: &str,
     chars: &[(usize, char)],
@@ -558,16 +585,26 @@ fn string_token_end(
     delimiter: char,
     language: Language,
     grammar: &Grammar,
-) -> Option<usize> {
+) -> Option<StringToken> {
     if !grammar.string_delimiters.contains(&delimiter) {
         return None;
     }
 
-    if delimiter == '\'' && language == Language::Rust {
-        return rust_char_literal_end(chars, index);
+    if let Some(token) = multiline_string_token(line, index, language) {
+        return Some(token);
     }
 
-    Some(find_string_end(line, chars, index + 1, delimiter))
+    if delimiter == '\'' && language == Language::Rust {
+        return rust_char_literal_end(chars, index).map(|end| StringToken {
+            end,
+            continues_with: None,
+        });
+    }
+
+    Some(StringToken {
+        end: find_string_end(line, chars, index + 1, delimiter),
+        continues_with: None,
+    })
 }
 
 fn find_number_end(line: &str, chars: &[(usize, char)], mut index: usize) -> usize {
@@ -579,6 +616,33 @@ fn find_number_end(line: &str, chars: &[(usize, char)], mut index: usize) -> usi
         index += 1;
     }
     line.len()
+}
+
+fn multiline_string_token(line: &str, index: usize, language: Language) -> Option<StringToken> {
+    let start = line.get(index..)?;
+
+    let marker = match language {
+        Language::JavaScript if start.starts_with(BACKTICK_MARKER) => BACKTICK_MARKER,
+        Language::Python if start.starts_with(TRIPLE_DOUBLE_QUOTE) => TRIPLE_DOUBLE_QUOTE,
+        Language::Python if start.starts_with(TRIPLE_SINGLE_QUOTE) => TRIPLE_SINGLE_QUOTE,
+        _ => return None,
+    };
+
+    let body = &start[marker.len()..];
+    let end = match body.find(marker) {
+        Some(relative) => index + marker.len() + relative + marker.len(),
+        None => {
+            return Some(StringToken {
+                end: line.len(),
+                continues_with: Some(marker),
+            });
+        }
+    };
+
+    Some(StringToken {
+        end,
+        continues_with: None,
+    })
 }
 
 fn find_ident_end(line: &str, chars: &[(usize, char)], mut index: usize) -> usize {
@@ -1147,6 +1211,60 @@ mod tests {
                 .spans
                 .iter()
                 .any(|span| span.content.as_ref() == "body" && span.style == theme.code_type)
+        );
+    }
+
+    #[test]
+    fn javascript_template_strings_span_multiple_lines() {
+        let theme = Theme::source_hints_default();
+        let rendered = render_document(
+            &[
+                String::from("const tpl = `hello"),
+                String::from("${name}`;"),
+            ],
+            &theme,
+            Some(Path::new("main.ts")),
+            FileType::Code,
+        );
+
+        assert!(
+            rendered[0]
+                .spans
+                .iter()
+                .any(|span| span.content.as_ref() == "`hello" && span.style == theme.code_string)
+        );
+        assert_eq!(rendered[1].spans[0].style, theme.code_string);
+        assert_eq!(rendered[1].spans[0].content.as_ref(), "${name}`");
+    }
+
+    #[test]
+    fn python_triple_quotes_span_multiple_lines() {
+        let theme = Theme::source_hints_default();
+        let rendered = render_document(
+            &[
+                String::from("doc = \"\"\"hello"),
+                String::from("world\"\"\""),
+                String::from("value = 1"),
+            ],
+            &theme,
+            Some(Path::new("main.py")),
+            FileType::Code,
+        );
+
+        assert!(
+            rendered[0]
+                .spans
+                .iter()
+                .any(|span| span.content.as_ref() == "\"\"\"hello"
+                    && span.style == theme.code_string)
+        );
+        assert_eq!(rendered[1].spans[0].style, theme.code_string);
+        assert_eq!(rendered[1].spans[0].content.as_ref(), "world\"\"\"");
+        assert!(
+            rendered[2]
+                .spans
+                .iter()
+                .any(|span| span.content.as_ref() == "value" && span.style == Style::default())
         );
     }
 
