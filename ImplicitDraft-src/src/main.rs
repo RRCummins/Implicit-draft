@@ -1,11 +1,14 @@
 mod app;
 mod buffer;
+mod code;
 mod config;
+mod filetype;
 mod markdown;
 mod picker;
 mod preview;
 mod recents;
 mod render;
+mod session;
 mod settings;
 mod sidebar;
 mod terminal;

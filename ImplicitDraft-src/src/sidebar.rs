@@ -122,6 +122,10 @@ impl SidebarState {
         self.width
     }
 
+    pub fn set_width(&mut self, width: u16) {
+        self.width = width.clamp(MIN_WIDTH, MAX_WIDTH);
+    }
+
     pub fn resize_narrower(&mut self) {
         self.width = self.width.saturating_sub(2).max(MIN_WIDTH);
     }

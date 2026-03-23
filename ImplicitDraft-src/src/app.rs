@@ -6,10 +6,13 @@ use ratatui::DefaultTerminal;
 
 use crate::{
     buffer::Buffer,
+    code,
     config::{AppConfig, DefaultMode, KeyBindings},
+    filetype::FileType,
     markdown,
     picker::{Picker, PickerAction, PickerEntry},
     preview, recents, render,
+    session::SessionState,
     settings::{ConfigPane, ConfigState},
     sidebar::{SidebarAction, SidebarRow, SidebarState},
     theme::Theme,
@@ -81,6 +84,8 @@ pub struct App {
     theme: Theme,
     config: AppConfig,
     keybindings: KeyBindings,
+    session: SessionState,
+    persist_session: bool,
     config_return: Option<Box<Screen>>,
     overlay: Option<Overlay>,
     tick: u64,
@@ -98,6 +103,7 @@ impl App {
     pub fn new(startup: StartupTarget, config: AppConfig, keybindings: KeyBindings) -> Self {
         let launch_into_config = matches!(startup, StartupTarget::Config);
         let default_mode = EditorMode::from(config.default_mode);
+        let session = SessionState::load().unwrap_or_default();
         let theme = Theme::load_named(&config.theme).unwrap_or_else(|_| {
             Theme::load_named("dark").unwrap_or_else(|_| Theme::source_hints_default())
         });
@@ -109,16 +115,19 @@ impl App {
                     format!("failed to browse {}: {error}", path.display()),
                 ),
             },
-            StartupTarget::Open(path) => match EditorState::open(path.clone(), default_mode) {
-                Ok(editor) => {
-                    let _ = recents::remember(&path);
-                    (Screen::Editor(editor), String::from(default_mode.help()))
+            StartupTarget::Open(path) => {
+                match Self::open_editor(path.clone(), default_mode, &session) {
+                    Ok(editor) => {
+                        let _ = recents::remember(&path);
+                        let status = String::from(editor.mode.help());
+                        (Screen::Editor(editor), status)
+                    }
+                    Err(error) => (
+                        Screen::Welcome(Self::load_welcome_state()),
+                        format!("failed to open {}: {error}", path.display()),
+                    ),
                 }
-                Err(error) => (
-                    Screen::Welcome(Self::load_welcome_state()),
-                    format!("failed to open {}: {error}", path.display()),
-                ),
-            },
+            }
             StartupTarget::Welcome => (
                 Screen::Welcome(Self::load_welcome_state()),
                 String::from(HOME_HELP),
@@ -140,6 +149,8 @@ impl App {
             theme,
             config,
             keybindings,
+            session,
+            persist_session: true,
             config_return: launch_into_config
                 .then(|| Box::new(Screen::Welcome(Self::load_welcome_state()))),
             overlay: None,
@@ -219,6 +230,7 @@ impl App {
         let mut clear_overlay = false;
         let mut config_exit = None;
         let mut reload_theme = false;
+        let mut persist_sidebar = false;
         let default_mode = self.default_mode();
 
         match &mut self.screen {
@@ -279,11 +291,13 @@ impl App {
                             editor.sidebar.close();
                             editor.focus = EditorFocus::Editor;
                             next_status = Some(String::from("sidebar closed"));
+                            persist_sidebar = true;
                         } else {
                             match editor.sidebar.open() {
                                 Ok(()) => {
                                     editor.focus = EditorFocus::Sidebar;
                                     next_status = Some(String::from(SIDEBAR_HELP));
+                                    persist_sidebar = true;
                                 }
                                 Err(error) => next_status = Some(error.to_string()),
                             }
@@ -293,11 +307,13 @@ impl App {
                     {
                         editor.sidebar.resize_narrower();
                         next_status = Some(String::from("sidebar narrower"));
+                        persist_sidebar = true;
                     } else if editor.sidebar.is_open()
                         && keybindings.editor.sidebar_wider.matches(key)
                     {
                         editor.sidebar.resize_wider();
                         next_status = Some(String::from("sidebar wider"));
+                        persist_sidebar = true;
                     } else if keybindings.editor.cycle_mode.matches(key) {
                         editor.mode = editor.mode.cycle();
                         next_status = Some(String::from(editor.mode.help()));
@@ -348,12 +364,16 @@ impl App {
                                     next_status = Some(String::from(SIDEBAR_HELP));
                                 }
                                 Ok(SidebarAction::OpenFile(path)) => {
-                                    match EditorState::open_from_sidebar(path.clone(), default_mode)
-                                    {
+                                    match Self::open_editor(
+                                        path.clone(),
+                                        default_mode,
+                                        &self.session,
+                                    ) {
                                         Ok(next_editor) => {
                                             let _ = recents::remember(&path);
+                                            let status = String::from(next_editor.mode.help());
                                             next_screen = Some(Screen::Editor(next_editor));
-                                            next_status = Some(String::from(default_mode.help()));
+                                            next_status = Some(status);
                                         }
                                         Err(error) => next_status = Some(error.to_string()),
                                     }
@@ -506,11 +526,12 @@ impl App {
                 match action {
                     Ok(PickerAction::None) => {}
                     Ok(PickerAction::OpenFile(path)) => {
-                        match EditorState::open(path.clone(), default_mode) {
+                        match Self::open_editor(path.clone(), default_mode, &self.session) {
                             Ok(editor) => {
                                 let _ = recents::remember(&path);
+                                let status = String::from(editor.mode.help());
                                 next_screen = Some(Screen::Editor(editor));
-                                next_status = Some(String::from(default_mode.help()));
+                                next_status = Some(status);
                             }
                             Err(error) => next_status = Some(error.to_string()),
                         }
@@ -533,11 +554,12 @@ impl App {
                 }
                 KeyCode::Enter => {
                     if let Some(path) = welcome.selected_path() {
-                        match EditorState::open(path.clone(), default_mode) {
+                        match Self::open_editor(path.clone(), default_mode, &self.session) {
                             Ok(editor) => {
                                 let _ = recents::remember(&path);
+                                let status = String::from(editor.mode.help());
                                 next_screen = Some(Screen::Editor(editor));
-                                next_status = Some(String::from(default_mode.help()));
+                                next_status = Some(status);
                             }
                             Err(error) => next_status = Some(error.to_string()),
                         }
@@ -553,7 +575,10 @@ impl App {
                     }
                 }
                 _ if keybindings.home.new_buffer.matches(key) => {
-                    next_screen = Some(Screen::Editor(EditorState::empty(default_mode)));
+                    next_screen = Some(Screen::Editor(Self::empty_editor(
+                        default_mode,
+                        &self.session,
+                    )));
                     next_status = Some(String::from(default_mode.help()));
                 }
                 _ if keybindings.home.settings.matches(key) => {
@@ -649,6 +674,10 @@ impl App {
             self.status_message = status_message;
         }
 
+        if persist_sidebar && let Err(error) = self.persist_sidebar_session() {
+            self.status_message = error.to_string();
+        }
+
         if clear_overlay {
             self.overlay = None;
         }
@@ -699,16 +728,30 @@ impl App {
                 ViewModel::Editor {
                     line_numbers,
                     wrap,
-                    lines: match editor.mode {
-                        EditorMode::SourceHints => {
+                    lines: match (editor.file_type, editor.mode) {
+                        (FileType::Code, EditorMode::SourceHints | EditorMode::Source)
+                        | (FileType::Unknown, EditorMode::SourceHints) => code::render_document(
+                            editor.buffer.lines(),
+                            &self.theme,
+                            editor.file_path.as_deref(),
+                            editor.file_type,
+                        ),
+                        (_, EditorMode::SourceHints) => {
                             markdown::style_document(editor.buffer.lines(), &self.theme)
                         }
-                        EditorMode::Preview => preview::render_document(
+                        (FileType::Code, EditorMode::Preview) => code::render_preview_document(
+                            editor.buffer.lines(),
+                            &self.theme,
+                            editor.file_path.as_deref(),
+                            editor.file_type,
+                            content_width,
+                        ),
+                        (_, EditorMode::Preview) => preview::render_document(
                             editor.buffer.lines(),
                             &self.theme,
                             content_width,
                         ),
-                        EditorMode::Source => editor
+                        (_, EditorMode::Source) => editor
                             .buffer
                             .lines()
                             .iter()
@@ -848,6 +891,46 @@ impl App {
 
     fn default_mode(&self) -> EditorMode {
         EditorMode::from(self.config.default_mode)
+    }
+
+    fn editor_mode_for_path(path: &std::path::Path, configured: EditorMode) -> EditorMode {
+        match crate::filetype::detect(path) {
+            FileType::Markdown => EditorMode::SourceHints,
+            FileType::Text => EditorMode::Source,
+            FileType::Code => EditorMode::Source,
+            FileType::Unknown => configured,
+        }
+    }
+
+    fn open_editor(
+        path: PathBuf,
+        configured_mode: EditorMode,
+        session: &SessionState,
+    ) -> Result<EditorState> {
+        let mode = Self::editor_mode_for_path(&path, configured_mode);
+        let mut editor = EditorState::open(path, mode)?;
+        editor.apply_session(session)?;
+        Ok(editor)
+    }
+
+    fn empty_editor(mode: EditorMode, session: &SessionState) -> EditorState {
+        let mut editor = EditorState::empty(mode);
+        let _ = editor.apply_session(session);
+        editor
+    }
+
+    fn persist_sidebar_session(&mut self) -> Result<()> {
+        if !self.persist_session {
+            return Ok(());
+        }
+
+        let Screen::Editor(editor) = &self.screen else {
+            return Ok(());
+        };
+
+        self.session.sidebar_open = editor.sidebar.is_open();
+        self.session.sidebar_width = editor.sidebar.width();
+        self.session.save()
     }
 
     fn request_quit(&mut self) {
@@ -1023,6 +1106,7 @@ enum EditorFocus {
 pub struct EditorState {
     buffer: Buffer,
     file_path: Option<PathBuf>,
+    file_type: FileType,
     dialog: Option<EditorDialog>,
     viewport_height: usize,
     mode: EditorMode,
@@ -1035,10 +1119,12 @@ impl EditorState {
         let buffer = Buffer::from_path(&path)?;
         let sidebar =
             SidebarState::for_file(Some(&path)).unwrap_or_else(|_| SidebarState::fallback());
+        let file_type = crate::filetype::detect(&path);
 
         Ok(Self {
             buffer,
             file_path: Some(path),
+            file_type,
             dialog: None,
             viewport_height: 1,
             mode,
@@ -1047,23 +1133,28 @@ impl EditorState {
         })
     }
 
-    fn open_from_sidebar(path: PathBuf, mode: EditorMode) -> Result<Self> {
-        let mut editor = Self::open(path, mode)?;
-        editor.sidebar.open()?;
-        editor.focus = EditorFocus::Editor;
-        Ok(editor)
-    }
-
     fn empty(mode: EditorMode) -> Self {
         Self {
             buffer: Buffer::empty(),
             file_path: None,
+            file_type: FileType::Markdown,
             dialog: None,
             viewport_height: 1,
             mode,
             focus: EditorFocus::Editor,
             sidebar: SidebarState::for_file(None).unwrap_or_else(|_| SidebarState::fallback()),
         }
+    }
+
+    fn apply_session(&mut self, session: &SessionState) -> Result<()> {
+        self.sidebar.set_width(session.sidebar_width);
+        if session.sidebar_open {
+            self.sidebar.open()?;
+        } else {
+            self.sidebar.close();
+        }
+        self.focus = EditorFocus::Editor;
+        Ok(())
     }
 
     fn file_name(&self) -> &str {
@@ -1243,6 +1334,8 @@ mod tests {
             theme: Theme::source_hints_default(),
             config: AppConfig::default(),
             keybindings: KeyBindings::default(),
+            session: SessionState::default(),
+            persist_session: false,
             config_return: None,
             overlay: None,
             tick: 0,
@@ -1258,6 +1351,8 @@ mod tests {
             theme: Theme::source_hints_default(),
             config: AppConfig::default(),
             keybindings: KeyBindings::default(),
+            session: SessionState::default(),
+            persist_session: false,
             config_return: None,
             overlay: None,
             tick: 0,
@@ -1604,6 +1699,33 @@ mod tests {
     }
 
     #[test]
+    fn code_files_open_in_source_mode() {
+        let mode = App::editor_mode_for_path(&PathBuf::from("main.rs"), EditorMode::Preview);
+        assert_eq!(mode, EditorMode::Source);
+    }
+
+    #[test]
+    fn markdown_files_open_in_source_hints_mode() {
+        let mode = App::editor_mode_for_path(&PathBuf::from("note.md"), EditorMode::Preview);
+        assert_eq!(mode, EditorMode::SourceHints);
+    }
+
+    #[test]
+    fn editor_applies_sidebar_session_state() {
+        let mut editor = EditorState::empty(EditorMode::SourceHints);
+        let session = SessionState {
+            sidebar_open: true,
+            sidebar_width: 30,
+        };
+
+        editor.apply_session(&session).expect("apply session");
+
+        assert!(editor.sidebar.is_open());
+        assert_eq!(editor.sidebar.width(), 30);
+        assert_eq!(editor.focus, EditorFocus::Editor);
+    }
+
+    #[test]
     fn config_cancel_restores_previous_screen_and_config() {
         let mut app = editor_app();
 
@@ -1738,6 +1860,43 @@ mod tests {
 
         assert_eq!(lines[0].spans.len(), 1);
         assert_eq!(lines[0].spans[0].content.as_ref(), "# Title");
+    }
+
+    #[test]
+    fn code_files_render_with_syntax_spans() {
+        let mut app = editor_app();
+        let Screen::Editor(editor) = &mut app.screen else {
+            panic!("editor screen");
+        };
+        editor.buffer = Buffer::from_text("fn main() {}");
+        editor.file_path = Some(PathBuf::from("main.rs"));
+        editor.file_type = FileType::Code;
+        editor.mode = EditorMode::Source;
+
+        let ViewModel::Editor { lines, .. } = app.current_view(10, 40) else {
+            panic!("editor view");
+        };
+
+        assert!(lines[0].spans.len() > 1);
+        assert_eq!(lines[0].spans[0].content.as_ref(), "fn");
+    }
+
+    #[test]
+    fn code_preview_renders_gutter() {
+        let mut app = editor_app();
+        let Screen::Editor(editor) = &mut app.screen else {
+            panic!("editor screen");
+        };
+        editor.buffer = Buffer::from_text("fn main() {}");
+        editor.file_path = Some(PathBuf::from("main.rs"));
+        editor.file_type = FileType::Code;
+        editor.mode = EditorMode::Preview;
+
+        let ViewModel::Editor { lines, .. } = app.current_view(10, 40) else {
+            panic!("editor view");
+        };
+
+        assert_eq!(lines[0].spans[0].content.as_ref(), "1 │ ");
     }
 
     #[test]
