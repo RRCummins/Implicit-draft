@@ -47,6 +47,8 @@ pub struct EditorKeys {
     pub quit: Shortcut,
     pub home: Shortcut,
     pub find: Shortcut,
+    pub find_next: Shortcut,
+    pub find_prev: Shortcut,
     pub goto_line: Shortcut,
     pub cycle_mode: Shortcut,
     pub toggle_sidebar: Shortcut,
@@ -132,6 +134,8 @@ struct EditorKeysFile {
     quit: Option<String>,
     home: Option<String>,
     find: Option<String>,
+    find_next: Option<String>,
+    find_prev: Option<String>,
     goto_line: Option<String>,
     cycle_mode: Option<String>,
     toggle_sidebar: Option<String>,
@@ -300,6 +304,8 @@ impl Default for KeyBindings {
                 quit: Shortcut::parse("ctrl+q").expect("default shortcut"),
                 home: Shortcut::parse("ctrl+w").expect("default shortcut"),
                 find: Shortcut::parse("ctrl+f").expect("default shortcut"),
+                find_next: Shortcut::parse("alt+n").expect("default shortcut"),
+                find_prev: Shortcut::parse("alt+p").expect("default shortcut"),
                 goto_line: Shortcut::parse("ctrl+g").expect("default shortcut"),
                 cycle_mode: Shortcut::parse("ctrl+p").expect("default shortcut"),
                 toggle_sidebar: Shortcut::parse("ctrl+e").expect("default shortcut"),
@@ -357,6 +363,8 @@ impl KeyBindings {
                 quit: parse_or_default(file.editor.quit, defaults.editor.quit)?,
                 home: parse_or_default(file.editor.home, defaults.editor.home)?,
                 find: parse_or_default(file.editor.find, defaults.editor.find)?,
+                find_next: parse_or_default(file.editor.find_next, defaults.editor.find_next)?,
+                find_prev: parse_or_default(file.editor.find_prev, defaults.editor.find_prev)?,
                 goto_line: parse_or_default(file.editor.goto_line, defaults.editor.goto_line)?,
                 cycle_mode: parse_or_default(file.editor.cycle_mode, defaults.editor.cycle_mode)?,
                 toggle_sidebar: parse_or_default(
@@ -553,6 +561,8 @@ save = "ctrl+s"
 quit = "ctrl+q"
 home = "ctrl+w"
 find = "ctrl+f"
+find_next = "alt+n"
+find_prev = "alt+p"
 goto_line = "ctrl+g"
 cycle_mode = "ctrl+p"
 toggle_sidebar = "ctrl+e"

@@ -7,6 +7,7 @@ use ratatui::{
 
 use crate::{
     app::{App, DialogView, OverlayView, ViewModel},
+    buffer::SearchMatch,
     picker::PickerEntry,
     settings::ConfigPane,
     sidebar::SidebarRow,
@@ -33,6 +34,8 @@ struct EditorView {
     line_numbers: bool,
     wrap: bool,
     lines: Vec<Line<'static>>,
+    search_matches: Vec<SearchMatch>,
+    search_current: Option<usize>,
     cursor: Option<(usize, usize)>,
     scroll: (usize, usize),
     sidebar_rows: Vec<SidebarRow>,
@@ -69,6 +72,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             line_numbers,
             wrap,
             lines,
+            search_matches,
+            search_current,
             cursor,
             scroll,
             sidebar_rows,
@@ -85,6 +90,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 line_numbers,
                 wrap,
                 lines,
+                search_matches,
+                search_current,
                 cursor,
                 scroll,
                 sidebar_rows,
@@ -203,6 +210,12 @@ fn fit_status_line(line: &str, width: usize) -> String {
 
 fn draw_editor(frame: &mut Frame, area: Rect, editor: EditorView, theme: Theme) {
     let mut lines = editor.lines;
+    highlight_search_matches(
+        &mut lines,
+        &editor.search_matches,
+        editor.search_current,
+        theme,
+    );
     if let Some((_, row)) = editor.cursor.filter(|(_, row)| *row < lines.len()) {
         lines[row].style = lines[row].style.patch(theme.cursor);
     }
@@ -673,9 +686,91 @@ fn line_number_gutter_width(line_count: usize) -> u16 {
     (line_count.max(1).to_string().len() as u16) + 2
 }
 
+fn highlight_search_matches(
+    lines: &mut [Line<'static>],
+    search_matches: &[SearchMatch],
+    current: Option<usize>,
+    theme: Theme,
+) {
+    for (index, search_match) in search_matches.iter().copied().enumerate() {
+        let Some(line) = lines.get_mut(search_match.row) else {
+            continue;
+        };
+
+        let style = if Some(index) == current {
+            theme.selection.patch(theme.ui_chrome)
+        } else {
+            theme.selection
+        };
+        style_line_range(line, search_match.col, search_match.len, style);
+    }
+}
+
+fn style_line_range(
+    line: &mut Line<'static>,
+    start: usize,
+    len: usize,
+    style: ratatui::style::Style,
+) {
+    if len == 0 {
+        return;
+    }
+
+    let end = start.saturating_add(len);
+    let mut spans = Vec::new();
+    let mut offset = 0usize;
+
+    for span in line.spans.drain(..) {
+        let content = span.content.as_ref();
+        let span_len = content.chars().count();
+        let span_start = offset;
+        let span_end = offset + span_len;
+
+        if span_end <= start || span_start >= end {
+            spans.push(span);
+            offset = span_end;
+            continue;
+        }
+
+        let prefix_len = start.saturating_sub(span_start).min(span_len);
+        let highlight_start = prefix_len;
+        let highlight_end = end.saturating_sub(span_start).min(span_len);
+
+        if prefix_len > 0 {
+            spans.push(Span::styled(
+                content.chars().take(prefix_len).collect::<String>(),
+                span.style,
+            ));
+        }
+
+        if highlight_end > highlight_start {
+            spans.push(Span::styled(
+                content
+                    .chars()
+                    .skip(highlight_start)
+                    .take(highlight_end - highlight_start)
+                    .collect::<String>(),
+                span.style.patch(style),
+            ));
+        }
+
+        if highlight_end < span_len {
+            spans.push(Span::styled(
+                content.chars().skip(highlight_end).collect::<String>(),
+                span.style,
+            ));
+        }
+
+        offset = span_end;
+    }
+
+    line.spans = spans;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Style;
 
     #[test]
     fn keeps_short_status_lines_intact() {
@@ -685,5 +780,49 @@ mod tests {
     #[test]
     fn truncates_long_status_lines_from_the_left() {
         assert_eq!(fit_status_line("abcdef", 4), "…def");
+    }
+
+    #[test]
+    fn highlights_search_match_inside_line_spans() {
+        let theme = Theme::source_hints_default();
+        let mut line = Line::from(vec![
+            Span::styled(String::from("alpha "), Style::default()),
+            Span::styled(String::from("beta"), theme.code_keyword),
+        ]);
+
+        style_line_range(&mut line, 6, 4, theme.selection);
+
+        assert_eq!(line.spans.len(), 2);
+        assert_eq!(line.spans[1].content.as_ref(), "beta");
+        assert_eq!(
+            line.spans[1].style,
+            theme.code_keyword.patch(theme.selection)
+        );
+    }
+
+    #[test]
+    fn current_search_match_uses_emphasized_style() {
+        let theme = Theme::source_hints_default();
+        let mut lines = vec![Line::from(String::from("alpha beta"))];
+
+        highlight_search_matches(
+            &mut lines,
+            &[SearchMatch {
+                row: 0,
+                col: 6,
+                len: 4,
+            }],
+            Some(0),
+            theme,
+        );
+
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .any(|span| span.content.as_ref() == "beta"
+                    && span.style
+                        == Style::default().patch(theme.selection.patch(theme.ui_chrome)))
+        );
     }
 }

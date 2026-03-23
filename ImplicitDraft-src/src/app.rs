@@ -1,4 +1,8 @@
-use std::{env, path::PathBuf, time::Duration};
+use std::{
+    env, fs,
+    path::PathBuf,
+    time::Duration,
+};
 
 use anyhow::{Result, anyhow};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -20,12 +24,10 @@ use crate::{
 };
 
 const FRAME_POLL_INTERVAL: Duration = Duration::from_millis(80);
-const EDITOR_HELP: &str =
-    "ctrl+f find | ctrl+g goto | ctrl+e sidebar | ctrl+s save | ctrl+, settings";
-const PREVIEW_HELP: &str =
-    "ctrl+f find | ctrl+g goto | home/end line | ctrl+home/end doc | ctrl+p source";
+const EDITOR_HELP: &str = "ctrl+f find | alt+n next | alt+p prev | ctrl+g goto | ctrl+s save";
+const PREVIEW_HELP: &str = "ctrl+f find | alt+n next | alt+p prev | ctrl+g goto | ctrl+p source";
 const SOURCE_HELP: &str =
-    "ctrl+f find | ctrl+g goto | home/end line | ctrl+home/end doc | ctrl+p source+hints";
+    "ctrl+f find | alt+n next | alt+p prev | ctrl+g goto | ctrl+p source+hints";
 const PICKER_HELP: &str = "enter/right open | left/backspace parent | a filter | esc home";
 const HOME_HELP: &str = "o open | n new | c settings | enter recent | / search | q quit";
 const SEARCH_HELP: &str = "type to filter | backspace delete | enter keep | esc clear";
@@ -254,6 +256,9 @@ impl App {
                             SaveDialogOutcome::Canceled => {
                                 next_status = Some(String::from("save canceled"));
                             }
+                            SaveDialogOutcome::Status(message) => {
+                                next_status = Some(message);
+                            }
                             SaveDialogOutcome::Error(error) => {
                                 next_status = Some(error.to_string());
                             }
@@ -343,8 +348,12 @@ impl App {
                         self.overlay = Some(Overlay::Editor(editor.mode));
                         next_status = Some(String::from("controls"));
                     } else if keybindings.editor.find.matches(key) {
-                        editor.dialog = Some(EditorDialog::Find(FindState::new(editor)));
+                        editor.dialog = Some(EditorDialog::Find(FindState::for_reopen(editor)));
                         next_status = Some(String::from("find"));
+                    } else if keybindings.editor.find_next.matches(key) {
+                        next_status = Some(Self::step_editor_search(editor, true));
+                    } else if keybindings.editor.find_prev.matches(key) {
+                        next_status = Some(Self::step_editor_search(editor, false));
                     } else if keybindings.editor.goto_line.matches(key) {
                         editor.dialog = Some(EditorDialog::GotoLine(GotoLineState::new(
                             editor.buffer.cursor().0 + 1,
@@ -864,6 +873,12 @@ impl App {
                             .map(ratatui::text::Line::raw)
                             .collect(),
                     },
+                    search_matches: editor
+                        .search
+                        .as_ref()
+                        .map(|state| state.matches.clone())
+                        .unwrap_or_default(),
+                    search_current: editor.search.as_ref().and_then(|state| state.current_index),
                     cursor: if editor.dialog.is_some()
                         || editor.mode == EditorMode::Preview
                         || editor.focus == EditorFocus::Sidebar
@@ -909,12 +924,26 @@ impl App {
                             ],
                         },
                         EditorDialog::SaveAs(state) => DialogView {
-                            title: String::from(" Save As "),
-                            lines: vec![
-                                String::from("Enter a path and press Enter or Ctrl+S"),
-                                format!("path: {}", state.path),
-                                String::from("Esc cancels"),
-                            ],
+                            title: String::from(if state.confirm_overwrite {
+                                " Overwrite File "
+                            } else {
+                                " Save As "
+                            }),
+                            lines: if state.confirm_overwrite {
+                                vec![
+                                    format!("path: {}", state.path),
+                                    String::from(
+                                        "File exists. Press Enter or Ctrl+S to overwrite.",
+                                    ),
+                                    String::from("Edit path, Backspace, or Esc to cancel."),
+                                ]
+                            } else {
+                                vec![
+                                    String::from("Enter a path and press Enter or Ctrl+S"),
+                                    format!("path: {}", state.path),
+                                    String::from("Tab completes path   Esc cancels"),
+                                ]
+                            },
                         },
                         EditorDialog::Find(state) => DialogView {
                             title: String::from(" Find "),
@@ -927,6 +956,7 @@ impl App {
                                     None => format!("matches: 0/{}", state.matches.len()),
                                 },
                                 String::from("Enter/Down next   Shift+Enter/Up prev"),
+                                String::from("Alt+N next after close   Alt+P prev"),
                                 String::from("Esc closes"),
                             ],
                         },
@@ -1099,6 +1129,18 @@ impl App {
         Ok(SaveOutcome::Saved)
     }
 
+    fn step_editor_search(editor: &mut EditorState, forward: bool) -> String {
+        let Some(search) = editor.search.as_mut() else {
+            return String::from("no active search");
+        };
+
+        match search.step(&mut editor.buffer, forward) {
+            FindDialogOutcome::Moved { current, total } => format!("find {current}/{total}"),
+            FindDialogOutcome::NoMatches => String::from("no matches"),
+            FindDialogOutcome::None | FindDialogOutcome::Closed => String::from("find"),
+        }
+    }
+
     fn handle_find_input(editor: &mut EditorState, key: KeyEvent) -> FindDialogOutcome {
         let Some(EditorDialog::Find(state)) = editor.dialog.as_mut() else {
             return FindDialogOutcome::None;
@@ -1106,22 +1148,35 @@ impl App {
 
         match key.code {
             KeyCode::Esc => {
+                editor.search = Some(state.clone());
                 editor.dialog = None;
                 FindDialogOutcome::Closed
             }
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                state.step(&mut editor.buffer, false)
+                let outcome = state.step(&mut editor.buffer, false);
+                editor.search = Some(state.clone());
+                outcome
             }
-            KeyCode::Enter | KeyCode::Down => state.step(&mut editor.buffer, true),
-            KeyCode::Up => state.step(&mut editor.buffer, false),
+            KeyCode::Enter | KeyCode::Down => {
+                let outcome = state.step(&mut editor.buffer, true);
+                editor.search = Some(state.clone());
+                outcome
+            }
+            KeyCode::Up => {
+                let outcome = state.step(&mut editor.buffer, false);
+                editor.search = Some(state.clone());
+                outcome
+            }
             KeyCode::Backspace => {
                 state.query.pop();
                 state.refresh(&mut editor.buffer);
+                editor.search = Some(state.clone());
                 state.outcome()
             }
             KeyCode::Char(ch) if is_insertable(key.modifiers) => {
                 state.query.push(ch);
                 state.refresh(&mut editor.buffer);
+                editor.search = Some(state.clone());
                 state.outcome()
             }
             _ => FindDialogOutcome::None,
@@ -1176,11 +1231,14 @@ impl App {
                 SaveDialogOutcome::Canceled
             }
             KeyCode::Enter => Self::save_editor_as(editor),
+            KeyCode::Tab => Self::complete_save_as_path(editor),
             KeyCode::Backspace => {
+                state.confirm_overwrite = false;
                 state.path.pop();
                 SaveDialogOutcome::None
             }
             KeyCode::Char(ch) if is_insertable(key.modifiers) => {
+                state.confirm_overwrite = false;
                 state.path.push(ch);
                 SaveDialogOutcome::None
             }
@@ -1203,6 +1261,14 @@ impl App {
         }
 
         let path = PathBuf::from(trimmed);
+        let same_target = editor.file_path.as_deref() == Some(path.as_path());
+        if path.exists() && !same_target && !state.confirm_overwrite {
+            let mut state = state;
+            state.confirm_overwrite = true;
+            editor.dialog = Some(EditorDialog::SaveAs(state));
+            return SaveDialogOutcome::Status(String::from("confirm overwrite"));
+        }
+
         match editor.buffer.save_to_path(&path) {
             Ok(()) => {
                 editor.file_path = Some(path);
@@ -1213,6 +1279,56 @@ impl App {
                 SaveDialogOutcome::Error(error)
             }
         }
+    }
+
+    fn complete_save_as_path(editor: &mut EditorState) -> SaveDialogOutcome {
+        let Some(EditorDialog::SaveAs(state)) = editor.dialog.as_mut() else {
+            return SaveDialogOutcome::None;
+        };
+
+        let current = state.path.trim();
+        let (base_dir, prefix, replace_from) = completion_parts(current);
+        let Ok(entries) = fs::read_dir(&base_dir) else {
+            return SaveDialogOutcome::Error(anyhow!("failed to read {}", base_dir.display()));
+        };
+
+        let mut matches = entries
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                let file_name = entry.file_name();
+                let name = file_name.to_str()?.to_owned();
+                name.starts_with(prefix)
+                    .then_some((name, entry.path().is_dir()))
+            })
+            .collect::<Vec<_>>();
+        matches.sort_by(|left, right| left.0.cmp(&right.0));
+
+        if matches.is_empty() {
+            return SaveDialogOutcome::Status(String::from("no path matches"));
+        }
+
+        let common = longest_common_prefix(
+            &matches
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+        );
+        let replacement = if matches.len() == 1 {
+            let (name, is_dir) = &matches[0];
+            let mut completed = name.clone();
+            if *is_dir {
+                completed.push(std::path::MAIN_SEPARATOR);
+            }
+            completed
+        } else if common.len() > prefix.len() {
+            common
+        } else {
+            return SaveDialogOutcome::Status(format!("{} path matches", matches.len()));
+        };
+
+        state.path.replace_range(replace_from.., &replacement);
+        state.confirm_overwrite = false;
+        SaveDialogOutcome::Status(String::from("completed path"))
     }
 
     fn apply_edit<F>(editor: &mut EditorState, edit: F)
@@ -1369,6 +1485,58 @@ fn short_path(path: &std::path::Path) -> String {
     tail.join(" ❯ ")
 }
 
+fn completion_parts(path: &str) -> (PathBuf, &str, usize) {
+    let separator = std::path::MAIN_SEPARATOR;
+    if path.is_empty() {
+        return (
+            env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            "",
+            0,
+        );
+    }
+
+    if path.ends_with(separator) {
+        return (PathBuf::from(path), "", path.len());
+    }
+
+    match path.rfind(separator) {
+        Some(index) => {
+            let base = if index == 0 {
+                PathBuf::from(separator.to_string())
+            } else {
+                PathBuf::from(&path[..index])
+            };
+            (base, &path[index + 1..], index + 1)
+        }
+        None => (
+            env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            path,
+            0,
+        ),
+    }
+}
+
+fn longest_common_prefix(values: &[&str]) -> String {
+    let Some(first) = values.first() else {
+        return String::new();
+    };
+
+    let mut prefix = String::new();
+    for (index, ch) in first.chars().enumerate() {
+        if values
+            .iter()
+            .skip(1)
+            .all(|value| value.chars().nth(index) == Some(ch))
+        {
+            prefix.push(ch);
+        } else {
+            break;
+        }
+    }
+
+    prefix
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EditorFocus {
     Editor,
@@ -1381,6 +1549,7 @@ pub struct EditorState {
     file_path: Option<PathBuf>,
     file_type: FileType,
     dialog: Option<EditorDialog>,
+    search: Option<FindState>,
     viewport_height: usize,
     mode: EditorMode,
     focus: EditorFocus,
@@ -1399,6 +1568,7 @@ impl EditorState {
             file_path: Some(path),
             file_type,
             dialog: None,
+            search: None,
             viewport_height: 1,
             mode,
             focus: EditorFocus::Editor,
@@ -1412,6 +1582,7 @@ impl EditorState {
             file_path: None,
             file_type: FileType::Markdown,
             dialog: None,
+            search: None,
             viewport_height: 1,
             mode,
             focus: EditorFocus::Editor,
@@ -1438,6 +1609,7 @@ impl EditorState {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 enum Screen {
     Editor(EditorState),
@@ -1472,6 +1644,7 @@ enum SaveAfterAction {
 struct SaveAsState {
     path: String,
     after_save: SaveAfterAction,
+    confirm_overwrite: bool,
 }
 
 impl SaveAsState {
@@ -1479,6 +1652,7 @@ impl SaveAsState {
         Self {
             path: String::from(DEFAULT_SAVE_AS_PATH),
             after_save,
+            confirm_overwrite: false,
         }
     }
 }
@@ -1494,6 +1668,7 @@ enum SaveDialogOutcome {
     None,
     Saved(SaveAfterAction),
     Canceled,
+    Status(String),
     Error(anyhow::Error),
 }
 
@@ -1512,6 +1687,17 @@ impl FindState {
             matches: Vec::new(),
             current_index: None,
             anchor: editor.buffer.cursor(),
+        }
+    }
+
+    fn for_reopen(editor: &EditorState) -> Self {
+        match &editor.search {
+            Some(state) => {
+                let mut reopened = state.clone();
+                reopened.anchor = editor.buffer.cursor();
+                reopened
+            }
+            None => Self::new(editor),
         }
     }
 
@@ -1606,7 +1792,7 @@ impl Overlay {
             Self::Editor(EditorMode::SourceHints) => vec![
                 "Arrows move   Home/End line start/end   Ctrl+Home/End doc start/end",
                 "Ctrl+S save or save-as   Ctrl+F find   Ctrl+G goto line   Ctrl+E sidebar",
-                "Ctrl+Z undo   Ctrl+R redo",
+                "Alt+N next match   Alt+P previous match   Ctrl+Z undo   Ctrl+R redo",
                 "Ctrl+P preview mode   Ctrl+, settings   Ctrl+W return home",
                 "When sidebar is open: Tab focus   Enter open file   Space/Right toggle dir",
                 "Ctrl+[ narrower   Ctrl+] wider",
@@ -1615,6 +1801,7 @@ impl Overlay {
             Self::Editor(EditorMode::Preview) => vec![
                 "Arrows move   Home/End line start/end   Ctrl+Home/End doc start/end",
                 "Ctrl+F find   Ctrl+G goto line   Ctrl+P source mode",
+                "Alt+N next match   Alt+P previous match",
                 "Ctrl+E sidebar   Ctrl+, settings   Ctrl+W return home",
                 "When sidebar is open: Tab focus   Enter open file   Space/Right toggle dir",
                 "Ctrl+[ narrower   Ctrl+] wider",
@@ -1624,7 +1811,7 @@ impl Overlay {
             Self::Editor(EditorMode::Source) => vec![
                 "Arrows move   Home/End line start/end   Ctrl+Home/End doc start/end",
                 "Ctrl+S save or save-as   Ctrl+F find   Ctrl+G goto line   Ctrl+E sidebar",
-                "Ctrl+Z undo   Ctrl+R redo",
+                "Alt+N next match   Alt+P previous match   Ctrl+Z undo   Ctrl+R redo",
                 "Ctrl+P source+hints mode   Ctrl+, settings   Ctrl+W return home",
                 "When sidebar is open: Tab focus   Enter open file   Space/Right toggle dir",
                 "Ctrl+[ narrower   Ctrl+] wider",
@@ -1672,6 +1859,8 @@ pub enum ViewModel {
         line_numbers: bool,
         wrap: bool,
         lines: Vec<ratatui::text::Line<'static>>,
+        search_matches: Vec<SearchMatch>,
+        search_current: Option<usize>,
         cursor: Option<(usize, usize)>,
         scroll: (usize, usize),
         sidebar_rows: Vec<SidebarRow>,
@@ -2374,6 +2563,63 @@ mod tests {
     }
 
     #[test]
+    fn closing_find_preserves_highlights() {
+        let mut app = editor_app();
+        let Screen::Editor(editor) = &mut app.screen else {
+            panic!("editor screen");
+        };
+        editor.buffer = Buffer::from_text("alpha beta");
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        )));
+        for ch in ['b', 'e', 't', 'a'] {
+            app.handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+
+        let ViewModel::Editor { search_matches, .. } = app.current_view(10, 40) else {
+            panic!("editor view");
+        };
+        assert_eq!(search_matches.len(), 1);
+    }
+
+    #[test]
+    fn alt_n_moves_to_next_saved_match() {
+        let mut app = editor_app();
+        let Screen::Editor(editor) = &mut app.screen else {
+            panic!("editor screen");
+        };
+        editor.buffer = Buffer::from_text("beta one\nbeta two\nbeta three");
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        )));
+        for ch in ['b', 'e', 't', 'a'] {
+            app.handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('n'),
+            KeyModifiers::ALT,
+        )));
+
+        let Screen::Editor(editor) = app.screen else {
+            panic!("editor screen");
+        };
+        assert_eq!(editor.buffer.cursor(), (1, 0));
+        assert_eq!(app.status_message, "find 2/3");
+    }
+
+    #[test]
     fn ctrl_g_jumps_to_requested_line() {
         let mut app = editor_app();
         let Screen::Editor(editor) = &mut app.screen else {
@@ -2437,6 +2683,7 @@ mod tests {
         editor.dialog = Some(EditorDialog::SaveAs(SaveAsState {
             path: path.display().to_string(),
             after_save: SaveAfterAction::Stay,
+            confirm_overwrite: false,
         }));
 
         app.handle_event(Event::Key(KeyEvent {
@@ -2451,6 +2698,81 @@ mod tests {
         };
         assert_eq!(editor.file_path.as_deref(), Some(path.as_path()));
         assert_eq!(fs::read_to_string(&path).expect("saved file"), "hello");
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn save_as_existing_file_requires_overwrite_confirmation() {
+        let root = temp_dir("save-overwrite");
+        fs::create_dir_all(&root).expect("mkdir");
+        let path = root.join("note.md");
+        fs::write(&path, "old").expect("seed");
+
+        let mut app = editor_app();
+        let Screen::Editor(editor) = &mut app.screen else {
+            panic!("editor screen");
+        };
+        editor.buffer = Buffer::from_text("new");
+        editor.dialog = Some(EditorDialog::SaveAs(SaveAsState {
+            path: path.display().to_string(),
+            after_save: SaveAfterAction::Stay,
+            confirm_overwrite: false,
+        }));
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+
+        let Screen::Editor(editor) = &app.screen else {
+            panic!("editor screen");
+        };
+        let Some(EditorDialog::SaveAs(state)) = &editor.dialog else {
+            panic!("save as dialog");
+        };
+        assert!(state.confirm_overwrite);
+        assert_eq!(fs::read_to_string(&path).expect("existing file"), "old");
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+
+        let Screen::Editor(editor) = app.screen else {
+            panic!("editor screen");
+        };
+        assert!(editor.dialog.is_none());
+        assert_eq!(fs::read_to_string(&path).expect("overwritten file"), "new");
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn save_as_tab_completes_unique_path() {
+        let root = temp_dir("save-complete");
+        fs::create_dir_all(&root).expect("mkdir");
+        fs::write(root.join("notes.md"), "body").expect("file");
+
+        let mut app = editor_app();
+        let Screen::Editor(editor) = &mut app.screen else {
+            panic!("editor screen");
+        };
+        editor.dialog = Some(EditorDialog::SaveAs(SaveAsState {
+            path: root.join("no").display().to_string(),
+            after_save: SaveAfterAction::Stay,
+            confirm_overwrite: false,
+        }));
+
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+
+        let Screen::Editor(editor) = &app.screen else {
+            panic!("editor screen");
+        };
+        let Some(EditorDialog::SaveAs(state)) = &editor.dialog else {
+            panic!("save as dialog");
+        };
+        assert!(state.path.ends_with("notes.md"));
 
         fs::remove_dir_all(root).expect("cleanup");
     }
