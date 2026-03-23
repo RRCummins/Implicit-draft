@@ -30,6 +30,12 @@ pub struct SidebarState {
     width: u16,
 }
 
+#[derive(Debug, Default)]
+struct IgnoreFilter {
+    exact: BTreeSet<PathBuf>,
+    directories: Vec<PathBuf>,
+}
+
 #[derive(Clone, Debug)]
 struct SidebarEntry {
     path: PathBuf,
@@ -137,7 +143,8 @@ impl SidebarState {
     pub fn refresh(&mut self) -> Result<()> {
         let selected_path = self.selected_path().cloned();
         self.git_statuses = load_git_statuses(&self.root);
-        self.entries = build_entries(&self.root, &self.expanded, &self.git_statuses)?;
+        let ignored = load_ignored_paths(&self.root);
+        self.entries = build_entries(&self.root, &self.expanded, &self.git_statuses, &ignored)?;
 
         if self.entries.is_empty() {
             self.selected = 0;
@@ -294,10 +301,21 @@ impl GitMarker {
     }
 }
 
+impl IgnoreFilter {
+    fn contains(&self, path: &Path) -> bool {
+        self.exact.contains(path)
+            || self
+                .directories
+                .iter()
+                .any(|directory| path.starts_with(directory))
+    }
+}
+
 fn build_entries(
     root: &Path,
     expanded: &BTreeSet<PathBuf>,
     statuses: &BTreeMap<PathBuf, GitMarker>,
+    ignored: &IgnoreFilter,
 ) -> Result<Vec<SidebarEntry>> {
     let mut entries = vec![SidebarEntry {
         path: root.to_path_buf(),
@@ -309,7 +327,7 @@ fn build_entries(
     }];
 
     if expanded.contains(root) {
-        append_children(&mut entries, root, expanded, statuses, 1)?;
+        append_children(&mut entries, root, expanded, statuses, ignored, 1)?;
     }
 
     Ok(entries)
@@ -320,6 +338,7 @@ fn append_children(
     directory: &Path,
     expanded: &BTreeSet<PathBuf>,
     statuses: &BTreeMap<PathBuf, GitMarker>,
+    ignored: &IgnoreFilter,
     depth: usize,
 ) -> Result<()> {
     let mut children = Vec::new();
@@ -329,6 +348,9 @@ fn append_children(
     {
         let entry = entry?;
         let path = entry.path();
+        if ignored.contains(&path) {
+            continue;
+        }
         let metadata = entry.metadata()?;
         let is_dir = metadata.is_dir();
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -349,7 +371,7 @@ fn append_children(
         });
 
         if is_expanded {
-            append_children(entries, &path, expanded, statuses, depth + 1)?;
+            append_children(entries, &path, expanded, statuses, ignored, depth + 1)?;
         }
     }
 
@@ -406,6 +428,39 @@ fn load_git_statuses(root: &Path) -> BTreeMap<PathBuf, GitMarker> {
     }
 
     statuses
+}
+
+fn load_ignored_paths(root: &Path) -> IgnoreFilter {
+    let output = match Command::new("git")
+        .args([
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+        ])
+        .current_dir(root)
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return IgnoreFilter::default(),
+    };
+
+    let mut ignored = IgnoreFilter::default();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let path = line.trim().trim_matches('"');
+        if path.is_empty() {
+            continue;
+        }
+
+        if let Some(directory) = path.strip_suffix('/') {
+            ignored.directories.push(root.join(directory));
+        } else {
+            ignored.exact.insert(root.join(path));
+        }
+    }
+
+    ignored
 }
 
 fn root_label(root: &Path) -> String {
@@ -500,6 +555,31 @@ mod tests {
 
         assert_eq!(tracked.marker, Some('M'));
         assert_eq!(new_file.marker, Some('?'));
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn hides_gitignored_entries() {
+        let root = temp_dir("gitignore");
+        fs::create_dir_all(root.join("visible")).expect("mkdir");
+        fs::create_dir_all(root.join("ignored-dir")).expect("mkdir");
+        fs::write(root.join(".gitignore"), "ignored-dir/\n*.log\n").expect("ignore file");
+        fs::write(root.join("visible/notes.md"), "visible\n").expect("visible file");
+        fs::write(root.join("ignored-dir/secret.md"), "ignored\n").expect("ignored file");
+        fs::write(root.join("debug.log"), "ignored\n").expect("ignored file");
+        git(&root, &["init"]);
+
+        let mut sidebar = SidebarState::new(root.clone()).expect("sidebar");
+        sidebar.select_path(&root.join("visible"));
+        sidebar.toggle_selected_dir().expect("toggle");
+        let rows = sidebar.visible_rows(20);
+
+        assert!(rows.iter().any(|row| row.label.contains("visible/")));
+        assert!(rows.iter().any(|row| row.label.contains("notes.md")));
+        assert!(!rows.iter().any(|row| row.label.contains("ignored-dir/")));
+        assert!(!rows.iter().any(|row| row.label.contains("secret.md")));
+        assert!(!rows.iter().any(|row| row.label.contains("debug.log")));
 
         fs::remove_dir_all(root).expect("cleanup");
     }
