@@ -22,6 +22,9 @@ pub struct Theme {
     pub rule: Style,
     pub list_marker: Style,
     pub ui_chrome: Style,
+    pub git_added: Style,
+    pub git_modified: Style,
+    pub git_untracked: Style,
     pub cursor: Style,
     pub selection: Style,
     pub background: Style,
@@ -44,6 +47,9 @@ struct ThemeFile {
     rule: Option<String>,
     list_marker: Option<String>,
     ui_chrome: Option<String>,
+    git_added: Option<String>,
+    git_modified: Option<String>,
+    git_untracked: Option<String>,
     cursor: Option<String>,
     selection: Option<String>,
     background: Option<String>,
@@ -410,6 +416,15 @@ impl Theme {
             ui_chrome: Style::default()
                 .fg(palette.ui_chrome)
                 .add_modifier(Modifier::BOLD),
+            git_added: Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+            git_modified: Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+            git_untracked: Style::default()
+                .fg(Color::LightMagenta)
+                .add_modifier(Modifier::BOLD),
             cursor: Style::default().bg(palette.cursor),
             selection: Style::default().bg(palette.selection),
             background: Style::default().bg(palette.background),
@@ -432,6 +447,9 @@ impl Theme {
         apply_fg(&mut self.rule, file.rule)?;
         apply_fg(&mut self.list_marker, file.list_marker)?;
         apply_fg(&mut self.ui_chrome, file.ui_chrome)?;
+        apply_fg(&mut self.git_added, file.git_added)?;
+        apply_fg(&mut self.git_modified, file.git_modified)?;
+        apply_fg(&mut self.git_untracked, file.git_untracked)?;
         apply_bg(&mut self.cursor, file.cursor)?;
         apply_bg(&mut self.selection, file.selection)?;
         apply_bg(&mut self.background, file.background)?;

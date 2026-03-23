@@ -48,6 +48,8 @@ pub struct EditorKeys {
     pub home: Shortcut,
     pub cycle_mode: Shortcut,
     pub toggle_sidebar: Shortcut,
+    pub sidebar_narrower: Shortcut,
+    pub sidebar_wider: Shortcut,
     pub undo: Shortcut,
     pub redo: Shortcut,
     pub controls: Shortcut,
@@ -129,6 +131,8 @@ struct EditorKeysFile {
     home: Option<String>,
     cycle_mode: Option<String>,
     toggle_sidebar: Option<String>,
+    sidebar_narrower: Option<String>,
+    sidebar_wider: Option<String>,
     undo: Option<String>,
     redo: Option<String>,
     controls: Option<String>,
@@ -293,6 +297,8 @@ impl Default for KeyBindings {
                 home: Shortcut::parse("ctrl+w").expect("default shortcut"),
                 cycle_mode: Shortcut::parse("ctrl+p").expect("default shortcut"),
                 toggle_sidebar: Shortcut::parse("ctrl+e").expect("default shortcut"),
+                sidebar_narrower: Shortcut::parse("ctrl+[").expect("default shortcut"),
+                sidebar_wider: Shortcut::parse("ctrl+]").expect("default shortcut"),
                 undo: Shortcut::parse("ctrl+z").expect("default shortcut"),
                 redo: Shortcut::parse("ctrl+r").expect("default shortcut"),
                 controls: Shortcut::parse("?").expect("default shortcut"),
@@ -348,6 +354,14 @@ impl KeyBindings {
                 toggle_sidebar: parse_or_default(
                     file.editor.toggle_sidebar,
                     defaults.editor.toggle_sidebar,
+                )?,
+                sidebar_narrower: parse_or_default(
+                    file.editor.sidebar_narrower,
+                    defaults.editor.sidebar_narrower,
+                )?,
+                sidebar_wider: parse_or_default(
+                    file.editor.sidebar_wider,
+                    defaults.editor.sidebar_wider,
                 )?,
                 undo: parse_or_default(file.editor.undo, defaults.editor.undo)?,
                 redo: parse_or_default(file.editor.redo, defaults.editor.redo)?,
@@ -532,6 +546,8 @@ quit = "ctrl+q"
 home = "ctrl+w"
 cycle_mode = "ctrl+p"
 toggle_sidebar = "ctrl+e"
+sidebar_narrower = "ctrl+["
+sidebar_wider = "ctrl+]"
 undo = "ctrl+z"
 redo = "ctrl+r"
 controls = "?"

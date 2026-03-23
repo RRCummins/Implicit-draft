@@ -1,17 +1,21 @@
 use std::{
     cmp::Ordering,
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use anyhow::{Context, Result};
 
 const DEFAULT_WIDTH: u16 = 22;
+const MIN_WIDTH: u16 = 14;
+const MAX_WIDTH: u16 = 40;
 
 #[derive(Clone, Debug)]
 pub struct SidebarRow {
     pub label: String,
+    pub marker: Option<char>,
 }
 
 #[derive(Debug)]
@@ -21,6 +25,7 @@ pub struct SidebarState {
     selected: usize,
     scroll: usize,
     expanded: BTreeSet<PathBuf>,
+    git_statuses: BTreeMap<PathBuf, GitMarker>,
     open: bool,
     width: u16,
 }
@@ -32,12 +37,20 @@ struct SidebarEntry {
     label: String,
     is_dir: bool,
     expanded: bool,
+    marker: Option<GitMarker>,
 }
 
 #[derive(Debug)]
 pub enum SidebarAction {
     None,
     OpenFile(PathBuf),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GitMarker {
+    Modified,
+    Added,
+    Untracked,
 }
 
 impl SidebarState {
@@ -62,6 +75,7 @@ impl SidebarState {
             selected: 0,
             scroll: 0,
             expanded,
+            git_statuses: BTreeMap::new(),
             open: false,
             width: DEFAULT_WIDTH,
         };
@@ -80,10 +94,12 @@ impl SidebarState {
                 label,
                 is_dir: true,
                 expanded: true,
+                marker: None,
             }],
             selected: 0,
             scroll: 0,
             expanded: BTreeSet::from([root]),
+            git_statuses: BTreeMap::new(),
             open: false,
             width: DEFAULT_WIDTH,
         }
@@ -106,9 +122,18 @@ impl SidebarState {
         self.width
     }
 
+    pub fn resize_narrower(&mut self) {
+        self.width = self.width.saturating_sub(2).max(MIN_WIDTH);
+    }
+
+    pub fn resize_wider(&mut self) {
+        self.width = (self.width + 2).min(MAX_WIDTH);
+    }
+
     pub fn refresh(&mut self) -> Result<()> {
         let selected_path = self.selected_path().cloned();
-        self.entries = build_entries(&self.root, &self.expanded)?;
+        self.git_statuses = load_git_statuses(&self.root);
+        self.entries = build_entries(&self.root, &self.expanded, &self.git_statuses)?;
 
         if self.entries.is_empty() {
             self.selected = 0;
@@ -142,6 +167,7 @@ impl SidebarState {
             .iter()
             .map(|entry| SidebarRow {
                 label: entry.render_label(),
+                marker: entry.marker.map(GitMarker::symbol),
             })
             .collect()
     }
@@ -254,17 +280,32 @@ impl SidebarEntry {
     }
 }
 
-fn build_entries(root: &Path, expanded: &BTreeSet<PathBuf>) -> Result<Vec<SidebarEntry>> {
+impl GitMarker {
+    fn symbol(self) -> char {
+        match self {
+            Self::Modified => 'M',
+            Self::Added => 'A',
+            Self::Untracked => '?',
+        }
+    }
+}
+
+fn build_entries(
+    root: &Path,
+    expanded: &BTreeSet<PathBuf>,
+    statuses: &BTreeMap<PathBuf, GitMarker>,
+) -> Result<Vec<SidebarEntry>> {
     let mut entries = vec![SidebarEntry {
         path: root.to_path_buf(),
         depth: 0,
         label: root_label(root),
         is_dir: true,
         expanded: expanded.contains(root),
+        marker: None,
     }];
 
     if expanded.contains(root) {
-        append_children(&mut entries, root, expanded, 1)?;
+        append_children(&mut entries, root, expanded, statuses, 1)?;
     }
 
     Ok(entries)
@@ -274,6 +315,7 @@ fn append_children(
     entries: &mut Vec<SidebarEntry>,
     directory: &Path,
     expanded: &BTreeSet<PathBuf>,
+    statuses: &BTreeMap<PathBuf, GitMarker>,
     depth: usize,
 ) -> Result<()> {
     let mut children = Vec::new();
@@ -299,10 +341,11 @@ fn append_children(
             label: if is_dir { format!("{name}/") } else { name },
             is_dir,
             expanded: is_expanded,
+            marker: statuses.get(&path).copied(),
         });
 
         if is_expanded {
-            append_children(entries, &path, expanded, depth + 1)?;
+            append_children(entries, &path, expanded, statuses, depth + 1)?;
         }
     }
 
@@ -314,6 +357,51 @@ fn compare_entries(left: (&str, bool), right: (&str, bool)) -> Ordering {
         .1
         .cmp(&left.1)
         .then_with(|| left.0.to_lowercase().cmp(&right.0.to_lowercase()))
+}
+
+fn load_git_statuses(root: &Path) -> BTreeMap<PathBuf, GitMarker> {
+    let output = match Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .current_dir(root)
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return BTreeMap::new(),
+    };
+
+    let mut statuses = BTreeMap::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if line.len() < 4 {
+            continue;
+        }
+
+        let status = &line[..2];
+        let path = line[3..].trim();
+        let path = path
+            .rsplit_once(" -> ")
+            .map(|(_, renamed)| renamed)
+            .unwrap_or(path)
+            .trim_matches('"');
+        if path.is_empty() {
+            continue;
+        }
+
+        let marker = if status == "??" {
+            Some(GitMarker::Untracked)
+        } else if status.contains('A') {
+            Some(GitMarker::Added)
+        } else if status.contains('M') {
+            Some(GitMarker::Modified)
+        } else {
+            None
+        };
+
+        if let Some(marker) = marker {
+            statuses.insert(root.join(path), marker);
+        }
+    }
+
+    statuses
 }
 
 fn root_label(root: &Path) -> String {
@@ -334,6 +422,19 @@ mod tests {
             .expect("clock")
             .as_nanos();
         std::env::temp_dir().join(format!("implicit-sidebar-{name}-{unique}"))
+    }
+
+    fn git(root: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .env("GIT_AUTHOR_NAME", "Implicit")
+            .env("GIT_AUTHOR_EMAIL", "implicit@example.com")
+            .env("GIT_COMMITTER_NAME", "Implicit")
+            .env("GIT_COMMITTER_EMAIL", "implicit@example.com")
+            .status()
+            .expect("git command");
+        assert!(status.success(), "git {:?} failed", args);
     }
 
     #[test]
@@ -365,6 +466,36 @@ mod tests {
 
         let rows = sidebar.visible_rows(10);
         assert!(rows.iter().any(|row| row.label.contains("main.rs")));
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn maps_git_status_markers_for_file_rows() {
+        let root = temp_dir("git-markers");
+        fs::create_dir_all(&root).expect("mkdir");
+        fs::write(root.join("tracked.md"), "first\n").expect("file");
+        git(&root, &["init"]);
+        git(&root, &["add", "tracked.md"]);
+        git(&root, &["commit", "-m", "init"]);
+
+        fs::write(root.join("tracked.md"), "changed\n").expect("file");
+        fs::write(root.join("new.md"), "new\n").expect("file");
+
+        let sidebar = SidebarState::new(root.clone()).expect("sidebar");
+        let rows = sidebar.visible_rows(10);
+
+        let tracked = rows
+            .iter()
+            .find(|row| row.label.contains("tracked.md"))
+            .expect("tracked row");
+        let new_file = rows
+            .iter()
+            .find(|row| row.label.contains("new.md"))
+            .expect("new row");
+
+        assert_eq!(tracked.marker, Some('M'));
+        assert_eq!(new_file.marker, Some('?'));
 
         fs::remove_dir_all(root).expect("cleanup");
     }

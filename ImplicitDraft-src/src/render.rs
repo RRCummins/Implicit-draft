@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Flex, Layout, Rect},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
@@ -128,7 +128,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 active_pane,
                 options,
                 selected_option,
-                preview_theme,
+                preview_theme: *preview_theme,
                 preview_lines,
             },
             theme,
@@ -295,12 +295,26 @@ fn draw_sidebar(
         .iter()
         .enumerate()
         .map(|(index, row)| {
-            let style = if Some(index) == selected_row {
+            let selected = Some(index) == selected_row;
+            let style = if selected {
                 theme.selection.patch(theme.ui_chrome)
             } else {
                 theme.background
             };
-            Line::styled(row.label.clone(), style)
+            let marker_style = row.marker.map(|marker| {
+                let base = match marker {
+                    'A' => theme.git_added,
+                    'M' => theme.git_modified,
+                    '?' => theme.git_untracked,
+                    _ => theme.ui_chrome,
+                };
+                if selected {
+                    base.patch(theme.selection)
+                } else {
+                    base
+                }
+            });
+            sidebar_line(&row.label, row.marker, style, marker_style, area.width)
         })
         .collect::<Vec<_>>();
 
@@ -324,6 +338,36 @@ fn draw_sidebar(
             .border_style(theme.ui_chrome),
     );
     frame.render_widget(widget, area);
+}
+
+fn sidebar_line(
+    label: &str,
+    marker: Option<char>,
+    label_style: ratatui::style::Style,
+    marker_style: Option<ratatui::style::Style>,
+    width: u16,
+) -> Line<'static> {
+    let inner_width = width.saturating_sub(2) as usize;
+    if inner_width == 0 {
+        return Line::styled(String::new(), label_style);
+    }
+
+    let label_width = label.chars().count();
+    let marker_width = usize::from(marker.is_some());
+    let gap = inner_width.saturating_sub(label_width + marker_width);
+
+    let mut spans = vec![Span::styled(label.to_owned(), label_style)];
+    if gap > 0 {
+        spans.push(Span::styled(" ".repeat(gap), label_style));
+    }
+    if let Some(marker) = marker {
+        spans.push(Span::styled(
+            marker.to_string(),
+            marker_style.unwrap_or(label_style),
+        ));
+    }
+
+    Line::from(spans)
 }
 
 fn draw_picker(

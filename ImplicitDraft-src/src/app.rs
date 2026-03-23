@@ -27,7 +27,7 @@ const HOME_HELP: &str = "o open | n new | c settings | enter recent | / search |
 const SEARCH_HELP: &str = "type to filter | backspace delete | enter keep | esc clear";
 const CONFIG_HELP: &str = "tab switch pane | enter apply | ctrl+, close | s save | esc cancel";
 const SIDEBAR_HELP: &str =
-    "sidebar: arrows browse | enter open | right/space toggle | tab editor | esc back";
+    "sidebar: arrows browse | enter open | space toggle | ctrl+[ ] resize | tab editor";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EditorMode {
@@ -288,6 +288,16 @@ impl App {
                                 Err(error) => next_status = Some(error.to_string()),
                             }
                         }
+                    } else if editor.sidebar.is_open()
+                        && keybindings.editor.sidebar_narrower.matches(key)
+                    {
+                        editor.sidebar.resize_narrower();
+                        next_status = Some(String::from("sidebar narrower"));
+                    } else if editor.sidebar.is_open()
+                        && keybindings.editor.sidebar_wider.matches(key)
+                    {
+                        editor.sidebar.resize_wider();
+                        next_status = Some(String::from("sidebar wider"));
                     } else if keybindings.editor.cycle_mode.matches(key) {
                         editor.mode = editor.mode.cycle();
                         next_status = Some(String::from(editor.mode.help()));
@@ -783,7 +793,7 @@ impl App {
                         .map(|row| (row.label, row.value))
                         .collect(),
                     selected_option: config_state.selected_option(),
-                    preview_theme,
+                    preview_theme: Box::new(preview_theme),
                     preview_lines: config_state.preview_lines(&preview_theme, list_width),
                 }
             }
@@ -1109,12 +1119,14 @@ impl Overlay {
                 "Ctrl+S save   Ctrl+Z undo   Ctrl+R redo   Ctrl+E sidebar",
                 "Ctrl+P preview mode   Ctrl+, settings   Ctrl+W return home",
                 "When sidebar is open: Tab focus   Enter open file   Space/Right toggle dir",
+                "Ctrl+[ narrower   Ctrl+] wider",
                 "Ctrl+Q quit app   ? or Esc close this dialog",
             ],
             Self::Editor(EditorMode::Preview) => vec![
                 "Arrows/Home/End/Page: move cursor",
                 "Ctrl+P source mode   Ctrl+E sidebar   Ctrl+, settings   Ctrl+W return home",
                 "When sidebar is open: Tab focus   Enter open file   Space/Right toggle dir",
+                "Ctrl+[ narrower   Ctrl+] wider",
                 "Ctrl+S save   Ctrl+Q quit app",
                 "? or Esc close this dialog",
             ],
@@ -1123,6 +1135,7 @@ impl Overlay {
                 "Ctrl+S save   Ctrl+Z undo   Ctrl+R redo   Ctrl+E sidebar",
                 "Ctrl+P source+hints mode   Ctrl+, settings   Ctrl+W return home",
                 "When sidebar is open: Tab focus   Enter open file   Space/Right toggle dir",
+                "Ctrl+[ narrower   Ctrl+] wider",
                 "Ctrl+Q quit app   ? or Esc close this dialog",
             ],
             Self::Picker => vec![
@@ -1190,7 +1203,7 @@ pub enum ViewModel {
         active_pane: ConfigPane,
         options: Vec<(String, String)>,
         selected_option: usize,
-        preview_theme: Theme,
+        preview_theme: Box<Theme>,
         preview_lines: Vec<ratatui::text::Line<'static>>,
     },
     Welcome {
@@ -1403,6 +1416,72 @@ mod tests {
         assert_eq!(editor.focus, EditorFocus::Editor);
 
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn ctrl_right_bracket_widens_sidebar() {
+        let mut app = editor_app();
+
+        app.handle_event(Event::Key(KeyEvent {
+            code: KeyCode::Char('e'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }));
+        let before = match app.current_view(10, 40) {
+            ViewModel::Editor { sidebar_width, .. } => sidebar_width,
+            _ => panic!("editor view"),
+        };
+
+        app.handle_event(Event::Key(KeyEvent {
+            code: KeyCode::Char(']'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }));
+
+        let after = match app.current_view(10, 40) {
+            ViewModel::Editor { sidebar_width, .. } => sidebar_width,
+            _ => panic!("editor view"),
+        };
+
+        assert_eq!(after, before + 2);
+    }
+
+    #[test]
+    fn ctrl_left_bracket_narrows_sidebar() {
+        let mut app = editor_app();
+
+        app.handle_event(Event::Key(KeyEvent {
+            code: KeyCode::Char('e'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }));
+        app.handle_event(Event::Key(KeyEvent {
+            code: KeyCode::Char(']'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }));
+        let before = match app.current_view(10, 40) {
+            ViewModel::Editor { sidebar_width, .. } => sidebar_width,
+            _ => panic!("editor view"),
+        };
+
+        app.handle_event(Event::Key(KeyEvent {
+            code: KeyCode::Char('['),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }));
+
+        let after = match app.current_view(10, 40) {
+            ViewModel::Editor { sidebar_width, .. } => sidebar_width,
+            _ => panic!("editor view"),
+        };
+
+        assert_eq!(after + 2, before);
     }
 
     #[test]
