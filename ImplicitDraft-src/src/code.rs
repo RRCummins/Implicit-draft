@@ -508,13 +508,7 @@ fn render_spans(
         if is_identifier_start(ch) {
             let end = find_ident_end(line, &chars, index + 1);
             let token = &line[byte_index..end];
-            let style = if is_macro_call(line, end, language) || grammar.keywords.contains(&token) {
-                theme.code_keyword
-            } else if is_type_like(token, language) {
-                theme.code_type
-            } else {
-                Style::default()
-            };
+            let style = identifier_style(token, line, byte_index, end, language, &grammar, theme);
             spans.push(Span::styled(token.to_owned(), style));
             index = char_position_at_or_after(&chars, end);
             continue;
@@ -763,6 +757,75 @@ fn shell_variable_end(
 
 fn is_macro_call(line: &str, ident_end: usize, language: Language) -> bool {
     language == Language::Rust && line[ident_end..].starts_with('!')
+}
+
+fn identifier_style(
+    token: &str,
+    line: &str,
+    byte_index: usize,
+    ident_end: usize,
+    language: Language,
+    grammar: &Grammar,
+    theme: &Theme,
+) -> Style {
+    if is_macro_call(line, ident_end, language) || grammar.keywords.contains(&token) {
+        return theme.code_keyword;
+    }
+
+    if is_type_like(token, language)
+        || is_namespace_path(line, byte_index, ident_end, language)
+        || is_member_access(line, byte_index, language)
+    {
+        return theme.code_type;
+    }
+
+    if is_function_call(line, ident_end, language) {
+        return theme.code_keyword;
+    }
+
+    Style::default()
+}
+
+fn is_function_call(line: &str, ident_end: usize, language: Language) -> bool {
+    match next_non_whitespace_char(line, ident_end) {
+        Some('(') => !matches!(language, Language::Data),
+        _ => false,
+    }
+}
+
+fn is_namespace_path(line: &str, byte_index: usize, ident_end: usize, language: Language) -> bool {
+    if matches!(language, Language::Data) {
+        return false;
+    }
+
+    line[ident_end..].starts_with("::")
+        || previous_non_whitespace(line, byte_index).is_some_and(|(prev_index, prev_char)| {
+            prev_char == ':' && prev_index > 0 && line[..prev_index].ends_with(':')
+        })
+}
+
+fn is_member_access(line: &str, byte_index: usize, language: Language) -> bool {
+    if matches!(language, Language::Data) {
+        return false;
+    }
+
+    previous_non_whitespace(line, byte_index).is_some_and(|(prev_index, prev_char)| {
+        prev_char == '.'
+            || (prev_char == '>' && prev_index > 0 && line[..prev_index].ends_with('-'))
+    })
+}
+
+fn next_non_whitespace_char(line: &str, byte_index: usize) -> Option<char> {
+    line[byte_index..]
+        .chars()
+        .find(|candidate| !candidate.is_whitespace())
+}
+
+fn previous_non_whitespace(line: &str, byte_index: usize) -> Option<(usize, char)> {
+    line[..byte_index]
+        .char_indices()
+        .rev()
+        .find(|(_, candidate)| !candidate.is_whitespace())
 }
 
 fn char_position_at_or_after(chars: &[(usize, char)], byte_index: usize) -> usize {
@@ -1022,6 +1085,69 @@ mod tests {
 
         assert_eq!(rendered[0].spans[0].content.as_ref(), "@dataclass");
         assert_eq!(rendered[0].spans[0].style, theme.code_keyword);
+    }
+
+    #[test]
+    fn function_calls_use_code_keyword_style() {
+        let theme = Theme::source_hints_default();
+        let rendered = render_document(
+            &[String::from("render_frame(theme);")],
+            &theme,
+            Some(Path::new("main.rs")),
+            FileType::Code,
+        );
+
+        assert!(rendered[0].spans.iter().any(
+            |span| span.content.as_ref() == "render_frame" && span.style == theme.code_keyword
+        ));
+    }
+
+    #[test]
+    fn namespace_paths_use_code_type_style() {
+        let theme = Theme::source_hints_default();
+        let rendered = render_document(
+            &[String::from("crate::render::draw();")],
+            &theme,
+            Some(Path::new("main.rs")),
+            FileType::Code,
+        );
+
+        assert!(
+            rendered[0]
+                .spans
+                .iter()
+                .any(|span| span.content.as_ref() == "crate" && span.style == theme.code_type)
+        );
+        assert!(
+            rendered[0]
+                .spans
+                .iter()
+                .any(|span| span.content.as_ref() == "render" && span.style == theme.code_type)
+        );
+    }
+
+    #[test]
+    fn member_access_uses_code_type_style() {
+        let theme = Theme::source_hints_default();
+        let rendered = render_document(
+            &[String::from("client.fetch().body")],
+            &theme,
+            Some(Path::new("main.rs")),
+            FileType::Code,
+        );
+
+        assert!(
+            rendered[0]
+                .spans
+                .iter()
+                .any(|span| span.content.as_ref() == "fetch" && span.style == theme.code_type)
+        );
+        assert!(
+            rendered[0]
+                .spans
+                .iter()
+                .any(|span| span.content.as_ref() == "body" && span.style == theme.code_type)
+        );
     }
 
     #[test]

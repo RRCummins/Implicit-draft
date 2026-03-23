@@ -29,6 +29,7 @@ struct WelcomeView<'a> {
 }
 
 struct EditorView {
+    title: String,
     line_numbers: bool,
     wrap: bool,
     lines: Vec<Line<'static>>,
@@ -64,6 +65,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     match app.current_view(buffer_area.height as usize, buffer_area.width as usize) {
         ViewModel::Editor {
+            title,
             line_numbers,
             wrap,
             lines,
@@ -79,6 +81,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             frame,
             buffer_area,
             EditorView {
+                title,
                 line_numbers,
                 wrap,
                 lines,
@@ -223,6 +226,17 @@ fn draw_editor(frame: &mut Frame, area: Rect, editor: EditorView, theme: Theme) 
     } else {
         area
     };
+
+    let [title_area, editor_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(editor_area);
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            format!(" {} ", editor.title),
+            theme.ui_chrome,
+        ))
+        .style(theme.background),
+        title_area,
+    );
 
     let editor_area = if editor.line_numbers {
         let gutter_width = line_number_gutter_width(lines.len());

@@ -726,6 +726,11 @@ impl App {
                     editor_content_width(editor_width, editor.buffer.line_count(), line_numbers);
 
                 ViewModel::Editor {
+                    title: editor
+                        .file_path
+                        .as_deref()
+                        .map(short_path)
+                        .unwrap_or_else(|| String::from("[untitled]")),
                     line_numbers,
                     wrap,
                     lines: match (editor.file_type, editor.mode) {
@@ -1096,6 +1101,18 @@ fn editor_wrap_enabled(mode: EditorMode, configured: bool) -> bool {
     configured && mode == EditorMode::Preview
 }
 
+fn short_path(path: &std::path::Path) -> String {
+    let parts: Vec<&str> = path
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => s.to_str(),
+            _ => None,
+        })
+        .collect();
+    let tail = if parts.len() > 3 { &parts[parts.len() - 3..] } else { &parts[..] };
+    tail.join(" ❯ ")
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EditorFocus {
     Editor,
@@ -1267,6 +1284,7 @@ pub struct OverlayView {
 #[derive(Debug)]
 pub enum ViewModel {
     Editor {
+        title: String,
         line_numbers: bool,
         wrap: bool,
         lines: Vec<ratatui::text::Line<'static>>,
