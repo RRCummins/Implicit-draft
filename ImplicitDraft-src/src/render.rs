@@ -8,6 +8,7 @@ use ratatui::{
 use crate::{
     app::{App, DialogView, OverlayView, ViewModel},
     buffer::SearchMatch,
+    gitdiff::LineChange,
     picker::PickerEntry,
     settings::ConfigPane,
     sidebar::SidebarRow,
@@ -33,6 +34,7 @@ struct EditorView {
     title: String,
     line_numbers: bool,
     wrap: bool,
+    git_change_markers: Vec<Option<LineChange>>,
     lines: Vec<Line<'static>>,
     search_matches: Vec<SearchMatch>,
     search_current: Option<usize>,
@@ -71,6 +73,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             title,
             line_numbers,
             wrap,
+            git_change_markers,
             lines,
             search_matches,
             search_current,
@@ -89,6 +92,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 title,
                 line_numbers,
                 wrap,
+                git_change_markers,
                 lines,
                 search_matches,
                 search_current,
@@ -247,6 +251,29 @@ fn draw_editor(frame: &mut Frame, area: Rect, editor: EditorView, theme: Theme) 
             .style(theme.background),
         title_area,
     );
+
+    let show_git_change_gutter = editor.git_change_markers.iter().any(Option::is_some);
+    let editor_area = if show_git_change_gutter {
+        let [gutter_area, editor_area] =
+            Layout::horizontal([Constraint::Length(2), Constraint::Min(1)]).areas(editor_area);
+
+        let gutter_lines = (0..lines.len())
+            .map(
+                |row| match editor.git_change_markers.get(row).copied().flatten() {
+                    Some(LineChange::Added) => Line::styled("▏ ".to_owned(), theme.git_added),
+                    Some(LineChange::Modified) => Line::styled("▏ ".to_owned(), theme.git_modified),
+                    None => Line::styled("  ".to_owned(), theme.background),
+                },
+            )
+            .collect::<Vec<_>>();
+        let gutter = Paragraph::new(gutter_lines)
+            .style(theme.background)
+            .scroll((editor.scroll.0 as u16, 0));
+        frame.render_widget(gutter, gutter_area);
+        editor_area
+    } else {
+        editor_area
+    };
 
     let editor_area = if editor.line_numbers {
         let gutter_width = line_number_gutter_width(lines.len());

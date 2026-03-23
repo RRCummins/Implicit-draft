@@ -3,6 +3,7 @@ mod buffer;
 mod code;
 mod config;
 mod filetype;
+mod gitdiff;
 mod markdown;
 mod picker;
 mod preview;

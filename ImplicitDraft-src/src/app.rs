@@ -9,6 +9,7 @@ use crate::{
     code,
     config::{AppConfig, DefaultMode, KeyBindings},
     filetype::FileType,
+    gitdiff::LineChange,
     markdown,
     picker::{Picker, PickerAction, PickerEntry},
     preview, recents, render,
@@ -573,6 +574,7 @@ impl App {
                             }
                             _ if keybindings.editor.undo.matches(key) => {
                                 next_status = Some(if editor.buffer.undo() {
+                                    editor.refresh_git_changes();
                                     String::from("undo")
                                 } else {
                                     String::from("nothing to undo")
@@ -580,6 +582,7 @@ impl App {
                             }
                             _ if keybindings.editor.redo.matches(key) => {
                                 next_status = Some(if editor.buffer.redo() {
+                                    editor.refresh_git_changes();
                                     String::from("redo")
                                 } else {
                                     String::from("nothing to redo")
@@ -840,6 +843,7 @@ impl App {
                     editor_width,
                     editor.buffer.line_count(),
                     editor_line_numbers_enabled(editor.mode, self.config.line_numbers),
+                    editor.git_change_markers.iter().any(Option::is_some),
                 );
                 editor.buffer.sync_viewport(height, content_width);
                 if editor.sidebar.is_open() {
@@ -858,8 +862,13 @@ impl App {
                     editor_line_numbers_enabled(editor.mode, self.config.line_numbers);
                 let wrap = editor_wrap_enabled(editor.mode, self.config.wrap);
                 let editor_width = editor_panel_width(list_width, &editor.sidebar);
-                let content_width =
-                    editor_content_width(editor_width, editor.buffer.line_count(), line_numbers);
+                let show_git_change_gutter = editor.git_change_markers.iter().any(Option::is_some);
+                let content_width = editor_content_width(
+                    editor_width,
+                    editor.buffer.line_count(),
+                    line_numbers,
+                    show_git_change_gutter,
+                );
 
                 ViewModel::Editor {
                     title: editor
@@ -869,6 +878,7 @@ impl App {
                         .unwrap_or_else(|| String::from("[untitled]")),
                     line_numbers,
                     wrap,
+                    git_change_markers: editor.git_change_markers.clone(),
                     lines: match (editor.file_type, editor.mode) {
                         (FileType::Code, EditorMode::SourceHints | EditorMode::Source)
                         | (FileType::Unknown, EditorMode::SourceHints) => code::render_document(
@@ -1160,6 +1170,7 @@ impl App {
         };
 
         editor.buffer.save_to_path(path)?;
+        editor.refresh_git_changes();
         editor.dialog = None;
         Ok(SaveOutcome::Saved)
     }
@@ -1339,7 +1350,9 @@ impl App {
 
         match editor.buffer.save_to_path(&path) {
             Ok(()) => {
+                editor.file_type = crate::filetype::detect(&path);
                 editor.file_path = Some(path);
+                editor.refresh_git_changes();
                 SaveDialogOutcome::Saved(state.after_save)
             }
             Err(error) => {
@@ -1404,6 +1417,7 @@ impl App {
         F: FnOnce(&mut Buffer),
     {
         edit(&mut editor.buffer);
+        editor.refresh_git_changes();
     }
 
     fn load_welcome_state() -> WelcomeState {
@@ -1507,13 +1521,19 @@ fn is_insertable(modifiers: KeyModifiers) -> bool {
     matches!(modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
 }
 
-fn editor_content_width(width: usize, line_count: usize, line_numbers: bool) -> usize {
-    if !line_numbers {
-        return width.max(1);
-    }
-
+fn editor_content_width(
+    width: usize,
+    line_count: usize,
+    line_numbers: bool,
+    show_git_change_gutter: bool,
+) -> usize {
     width
-        .saturating_sub(line_number_gutter_width(line_count))
+        .saturating_sub(git_change_gutter_width(show_git_change_gutter))
+        .saturating_sub(if line_numbers {
+            line_number_gutter_width(line_count)
+        } else {
+            0
+        })
         .max(1)
 }
 
@@ -1527,6 +1547,10 @@ fn editor_panel_width(width: usize, sidebar: &SidebarState) -> usize {
 
 fn line_number_gutter_width(line_count: usize) -> usize {
     line_count.max(1).to_string().len() + 2
+}
+
+fn git_change_gutter_width(show: bool) -> usize {
+    if show { 2 } else { 0 }
 }
 
 fn editor_line_numbers_enabled(mode: EditorMode, configured: bool) -> bool {
@@ -1616,6 +1640,7 @@ pub struct EditorState {
     buffer: Buffer,
     file_path: Option<PathBuf>,
     file_type: FileType,
+    git_change_markers: Vec<Option<LineChange>>,
     dialog: Option<EditorDialog>,
     search: Option<FindState>,
     viewport_height: usize,
@@ -1635,13 +1660,15 @@ impl EditorState {
             buffer,
             file_path: Some(path),
             file_type,
+            git_change_markers: Vec::new(),
             dialog: None,
             search: None,
             viewport_height: 1,
             mode,
             focus: EditorFocus::Editor,
             sidebar,
-        })
+        }
+        .with_git_changes())
     }
 
     fn empty(mode: EditorMode) -> Self {
@@ -1649,6 +1676,7 @@ impl EditorState {
             buffer: Buffer::empty(),
             file_path: None,
             file_type: FileType::Markdown,
+            git_change_markers: Vec::new(),
             dialog: None,
             search: None,
             viewport_height: 1,
@@ -1674,6 +1702,16 @@ impl EditorState {
             Some(path) => path.to_str().unwrap_or("[non-utf8 path]"),
             None => "[untitled]",
         }
+    }
+
+    fn with_git_changes(mut self) -> Self {
+        self.refresh_git_changes();
+        self
+    }
+
+    fn refresh_git_changes(&mut self) {
+        self.git_change_markers =
+            crate::gitdiff::markers_for_buffer(self.file_path.as_deref(), self.buffer.lines());
     }
 }
 
@@ -1962,6 +2000,7 @@ pub enum ViewModel {
         title: String,
         line_numbers: bool,
         wrap: bool,
+        git_change_markers: Vec<Option<LineChange>>,
         lines: Vec<ratatui::text::Line<'static>>,
         search_matches: Vec<SearchMatch>,
         search_current: Option<usize>,
@@ -2009,6 +2048,7 @@ mod tests {
     use crossterm::event::{Event, KeyEventState};
     use std::{
         fs,
+        process::Command,
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -2018,6 +2058,15 @@ mod tests {
             .expect("clock")
             .as_nanos();
         std::env::temp_dir().join(format!("implicit-app-{name}-{unique}"))
+    }
+
+    fn git(root: &PathBuf, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .status()
+            .expect("git command");
+        assert!(status.success(), "git {:?} failed", args);
     }
 
     fn editor_app() -> App {
@@ -2992,6 +3041,46 @@ mod tests {
         };
 
         assert_eq!(lines[0].spans[0].content.as_ref(), "1 │ ");
+    }
+
+    #[test]
+    fn current_view_includes_git_change_markers_for_modified_lines() {
+        let root = temp_dir("git-line-markers");
+        fs::create_dir_all(&root).expect("root");
+        git(&root, &["init"]);
+        git(&root, &["config", "user.name", "Implicit Draft"]);
+        git(&root, &["config", "user.email", "implicit@example.com"]);
+
+        let path = root.join("main.swift");
+        fs::write(&path, "print(\"hello\")\nlet value = 1\n").expect("file");
+        git(&root, &["add", "main.swift"]);
+        git(&root, &["commit", "-m", "init"]);
+
+        let mut app = App::new(
+            StartupTarget::Open(path),
+            AppConfig::default(),
+            KeyBindings::default(),
+        );
+        let Screen::Editor(editor) = &mut app.screen else {
+            panic!("expected editor");
+        };
+        editor.buffer.move_end();
+        editor.buffer.insert_char('!');
+        let markers =
+            crate::gitdiff::markers_for_buffer(editor.file_path.as_deref(), editor.buffer.lines());
+        assert_eq!(markers[0], Some(LineChange::Modified));
+        editor.git_change_markers = markers;
+
+        let ViewModel::Editor {
+            git_change_markers, ..
+        } = app.current_view(10, 40)
+        else {
+            panic!("expected editor view");
+        };
+
+        assert_eq!(git_change_markers[0], Some(LineChange::Modified));
+
+        fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]
