@@ -10,6 +10,7 @@ use crate::{
     markdown,
     picker::{Picker, PickerAction, PickerEntry},
     preview, recents, render,
+    settings::{ConfigPane, ConfigState},
     theme::Theme,
     welcome::{BRAILLE_LOGO, SHORTCUTS, WelcomeState},
 };
@@ -21,6 +22,7 @@ const SOURCE_HELP: &str = "ctrl+p source+hints | plain text editing | ctrl+w hom
 const PICKER_HELP: &str = "enter/right open | left/backspace parent | a filter | esc home";
 const HOME_HELP: &str = "o open | n new | enter recent | / search | ? controls | q quit";
 const SEARCH_HELP: &str = "type to filter | backspace delete | enter keep | esc clear";
+const CONFIG_HELP: &str = "tab switch pane | arrows move | enter apply | s save | esc cancel";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EditorMode {
@@ -72,7 +74,8 @@ pub struct App {
     status_message: String,
     search_mode: bool,
     theme: Theme,
-    default_mode: EditorMode,
+    config: AppConfig,
+    config_return: Option<Box<Screen>>,
     overlay: Option<Overlay>,
     tick: u64,
 }
@@ -80,12 +83,14 @@ pub struct App {
 #[derive(Debug)]
 pub enum StartupTarget {
     Welcome,
+    Config,
     Browse(PathBuf),
     Open(PathBuf),
 }
 
 impl App {
     pub fn new(startup: StartupTarget, config: AppConfig) -> Self {
+        let launch_into_config = matches!(startup, StartupTarget::Config);
         let default_mode = EditorMode::from(config.default_mode);
         let theme = Theme::load_named(&config.theme).unwrap_or_else(|_| {
             Theme::load_named("dark").unwrap_or_else(|_| Theme::source_hints_default())
@@ -112,6 +117,13 @@ impl App {
                 Screen::Welcome(Self::load_welcome_state()),
                 String::from(HOME_HELP),
             ),
+            StartupTarget::Config => match ConfigState::new(&config) {
+                Ok(config_state) => (Screen::Config(config_state), String::from(CONFIG_HELP)),
+                Err(error) => (
+                    Screen::Welcome(Self::load_welcome_state()),
+                    error.to_string(),
+                ),
+            },
         };
 
         Self {
@@ -120,7 +132,9 @@ impl App {
             status_message,
             search_mode: false,
             theme,
-            default_mode,
+            config,
+            config_return: launch_into_config
+                .then(|| Box::new(Screen::Welcome(Self::load_welcome_state()))),
             overlay: None,
             tick: 0,
         }
@@ -165,6 +179,14 @@ impl App {
             return;
         }
 
+        if key.code == KeyCode::Char(',')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && !matches!(self.screen, Screen::Config(_))
+        {
+            self.open_config();
+            return;
+        }
+
         if self.search_mode {
             self.handle_search_input(key);
             return;
@@ -177,6 +199,7 @@ impl App {
                     self.status_message = match self.screen {
                         Screen::Editor(ref editor) => String::from(editor.mode.help()),
                         Screen::Picker(_) => String::from(PICKER_HELP),
+                        Screen::Config(_) => String::from(CONFIG_HELP),
                         Screen::Welcome(_) => String::from(HOME_HELP),
                     };
                 }
@@ -189,6 +212,8 @@ impl App {
         let mut next_screen = None;
         let mut should_quit_now = false;
         let mut clear_overlay = false;
+        let mut config_exit = None;
+        let mut reload_theme = false;
 
         match &mut self.screen {
             Screen::Editor(editor) => {
@@ -298,7 +323,8 @@ impl App {
                                 next_status = Some(String::from("editing"));
                             }
                             KeyCode::Tab => {
-                                Self::apply_edit(editor, |buffer| buffer.insert_spaces(4));
+                                let tab_width = self.config.tab_width();
+                                Self::apply_edit(editor, |buffer| buffer.insert_spaces(tab_width));
                                 next_status = Some(String::from("editing"));
                             }
                             KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -384,11 +410,11 @@ impl App {
                 match action {
                     Ok(PickerAction::None) => {}
                     Ok(PickerAction::OpenFile(path)) => {
-                        match EditorState::open(path.clone(), self.default_mode) {
+                        match EditorState::open(path.clone(), self.default_mode()) {
                             Ok(editor) => {
                                 let _ = recents::remember(&path);
                                 next_screen = Some(Screen::Editor(editor));
-                                next_status = Some(String::from(self.default_mode.help()));
+                                next_status = Some(String::from(self.default_mode().help()));
                             }
                             Err(error) => next_status = Some(error.to_string()),
                         }
@@ -411,11 +437,11 @@ impl App {
                 }
                 KeyCode::Enter => {
                     if let Some(path) = welcome.selected_path() {
-                        match EditorState::open(path.clone(), self.default_mode) {
+                        match EditorState::open(path.clone(), self.default_mode()) {
                             Ok(editor) => {
                                 let _ = recents::remember(&path);
                                 next_screen = Some(Screen::Editor(editor));
-                                next_status = Some(String::from(self.default_mode.help()));
+                                next_status = Some(String::from(self.default_mode().help()));
                             }
                             Err(error) => next_status = Some(error.to_string()),
                         }
@@ -431,8 +457,8 @@ impl App {
                     }
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') => {
-                    next_screen = Some(Screen::Editor(EditorState::empty(self.default_mode)));
-                    next_status = Some(String::from(self.default_mode.help()));
+                    next_screen = Some(Screen::Editor(EditorState::empty(self.default_mode())));
+                    next_status = Some(String::from(self.default_mode().help()));
                 }
                 KeyCode::Char('/') => {
                     match Picker::new(env::current_dir().unwrap_or_else(|_| PathBuf::from("."))) {
@@ -445,6 +471,50 @@ impl App {
                     }
                 }
                 KeyCode::Char('q') | KeyCode::Char('Q') => should_quit_now = true,
+                _ => {}
+            },
+            Screen::Config(config_state) => match key.code {
+                KeyCode::Char('?') => {
+                    self.overlay = Some(Overlay::Config);
+                    next_status = Some(String::from("controls"));
+                }
+                KeyCode::Esc => config_exit = Some(ConfigExit::Cancel),
+                KeyCode::Tab => {
+                    config_state.toggle_pane();
+                    next_status = Some(String::from(CONFIG_HELP));
+                }
+                KeyCode::Up => {
+                    config_state.move_up();
+                    if config_state.active_pane() == ConfigPane::Theme {
+                        config_state.sync_theme(&mut self.config);
+                        reload_theme = true;
+                    }
+                }
+                KeyCode::Down => {
+                    config_state.move_down();
+                    if config_state.active_pane() == ConfigPane::Theme {
+                        config_state.sync_theme(&mut self.config);
+                        reload_theme = true;
+                    }
+                }
+                KeyCode::Left => {
+                    if config_state.active_pane() == ConfigPane::Options {
+                        config_state.cycle_option_backward(&mut self.config);
+                    }
+                }
+                KeyCode::Right => {
+                    if config_state.active_pane() == ConfigPane::Options {
+                        config_state.cycle_option_forward(&mut self.config);
+                    }
+                }
+                KeyCode::Enter => {
+                    if config_state.active_pane() == ConfigPane::Options {
+                        config_state.cycle_option_forward(&mut self.config);
+                    } else {
+                        config_exit = Some(ConfigExit::Apply);
+                    }
+                }
+                KeyCode::Char('s') | KeyCode::Char('S') => config_exit = Some(ConfigExit::Save),
                 _ => {}
             },
         }
@@ -462,8 +532,16 @@ impl App {
             self.overlay = None;
         }
 
+        if reload_theme {
+            self.reload_theme();
+        }
+
         if should_quit_now {
             self.should_quit = true;
+        }
+
+        if let Some(exit) = config_exit {
+            self.finish_config(exit);
         }
     }
 
@@ -471,10 +549,15 @@ impl App {
         match &mut self.screen {
             Screen::Editor(editor) => {
                 editor.viewport_height = height;
-                editor.buffer.sync_viewport(height, width);
+                let content_width = editor_content_width(
+                    width,
+                    editor.buffer.line_count(),
+                    self.config.line_numbers,
+                );
+                editor.buffer.sync_viewport(height, content_width);
             }
             Screen::Picker(picker) => picker.sync_viewport(height),
-            Screen::Welcome(_) => {}
+            Screen::Config(_) | Screen::Welcome(_) => {}
         }
     }
 
@@ -537,6 +620,18 @@ impl App {
                         String::from("modified: -"),
                     ]),
             },
+            Screen::Config(config_state) => ViewModel::Config {
+                themes: config_state.theme_names().to_vec(),
+                selected_theme: config_state.selected_theme(),
+                active_pane: config_state.active_pane(),
+                options: config_state
+                    .option_rows(&self.config)
+                    .into_iter()
+                    .map(|row| (row.label, row.value))
+                    .collect(),
+                selected_option: config_state.selected_option(),
+                preview_lines: config_state.preview_lines(&self.theme, list_width),
+            },
             Screen::Welcome(welcome) => ViewModel::Welcome {
                 logo: BRAILLE_LOGO.iter().map(|line| (*line).to_owned()).collect(),
                 version: format!("v{}", env!("CARGO_PKG_VERSION")),
@@ -581,8 +676,17 @@ impl App {
                 picker.filter_label(),
                 self.status_message
             ),
+            Screen::Config(_) => format!(" settings [Config]  {} ", self.status_message),
             Screen::Welcome(_) => format!(" welcome [Home]  {} ", self.status_message),
         }
+    }
+
+    pub fn line_numbers_enabled(&self) -> bool {
+        self.config.line_numbers
+    }
+
+    fn default_mode(&self) -> EditorMode {
+        EditorMode::from(self.config.default_mode)
     }
 
     fn request_quit(&mut self) {
@@ -594,7 +698,7 @@ impl App {
                     return;
                 }
             }
-            Screen::Picker(_) | Screen::Welcome(_) => {}
+            Screen::Picker(_) | Screen::Config(_) | Screen::Welcome(_) => {}
         }
 
         self.should_quit = true;
@@ -622,6 +726,59 @@ impl App {
             Ok(recents) => WelcomeState::new(recents),
             Err(_) => WelcomeState::default(),
         }
+    }
+
+    fn open_config(&mut self) {
+        match ConfigState::new(&self.config) {
+            Ok(state) => {
+                let previous =
+                    std::mem::replace(&mut self.screen, Screen::Welcome(WelcomeState::default()));
+                self.config_return = Some(Box::new(previous));
+                self.screen = Screen::Config(state);
+                self.overlay = None;
+                self.search_mode = false;
+                self.status_message = String::from(CONFIG_HELP);
+            }
+            Err(error) => self.status_message = error.to_string(),
+        }
+    }
+
+    fn finish_config(&mut self, exit: ConfigExit) {
+        let Screen::Config(config_state) = &self.screen else {
+            return;
+        };
+
+        let original = config_state.original_config().clone();
+        match exit {
+            ConfigExit::Cancel => {
+                self.config = original;
+                self.reload_theme();
+                self.status_message = String::from("settings canceled");
+            }
+            ConfigExit::Apply => {
+                self.status_message = String::from("settings applied");
+            }
+            ConfigExit::Save => match self.config.save() {
+                Ok(()) => self.status_message = String::from("settings saved"),
+                Err(error) => {
+                    self.status_message = error.to_string();
+                    return;
+                }
+            },
+        }
+
+        self.screen = self
+            .config_return
+            .take()
+            .map(|screen| *screen)
+            .unwrap_or(Screen::Welcome(Self::load_welcome_state()));
+        self.overlay = None;
+    }
+
+    fn reload_theme(&mut self) {
+        self.theme = Theme::load_named(&self.config.theme).unwrap_or_else(|_| {
+            Theme::load_named("dark").unwrap_or_else(|_| Theme::source_hints_default())
+        });
     }
 
     fn handle_search_input(&mut self, key: KeyEvent) {
@@ -675,6 +832,20 @@ fn should_quit(key: KeyEvent) -> bool {
     key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
+fn editor_content_width(width: usize, line_count: usize, line_numbers: bool) -> usize {
+    if !line_numbers {
+        return width.max(1);
+    }
+
+    width
+        .saturating_sub(line_number_gutter_width(line_count))
+        .max(1)
+}
+
+fn line_number_gutter_width(line_count: usize) -> usize {
+    line_count.max(1).to_string().len() + 2
+}
+
 #[derive(Debug)]
 pub struct EditorState {
     buffer: Buffer,
@@ -719,7 +890,15 @@ impl EditorState {
 enum Screen {
     Editor(EditorState),
     Picker(Picker),
+    Config(ConfigState),
     Welcome(WelcomeState),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ConfigExit {
+    Cancel,
+    Apply,
+    Save,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -732,6 +911,7 @@ enum EditorDialog {
 enum Overlay {
     Editor(EditorMode),
     Picker,
+    Config,
     Home,
 }
 
@@ -740,6 +920,7 @@ impl Overlay {
         match self {
             Self::Editor(_) => " Controls ",
             Self::Picker => " Picker Controls ",
+            Self::Config => " Settings Controls ",
             Self::Home => " Home Controls ",
         }
     }
@@ -769,6 +950,12 @@ impl Overlay {
                 "Left or Backspace: go to parent folder",
                 "A toggle filter   / search   Esc home",
                 "? or Esc close this dialog",
+            ],
+            Self::Config => vec![
+                "Tab switches Theme and Options panes",
+                "Arrows move selection in the active pane",
+                "Enter apply to session   S save to config.toml",
+                "Esc cancel and revert   ? or Esc close this dialog",
             ],
             Self::Home => vec![
                 "O open file picker   N new untitled buffer",
@@ -808,6 +995,14 @@ pub enum ViewModel {
         selected_row: Option<usize>,
         metadata: [String; 4],
     },
+    Config {
+        themes: Vec<String>,
+        selected_theme: usize,
+        active_pane: ConfigPane,
+        options: Vec<(String, String)>,
+        selected_option: usize,
+        preview_lines: Vec<ratatui::text::Line<'static>>,
+    },
     Welcome {
         logo: Vec<String>,
         version: String,
@@ -831,7 +1026,8 @@ mod tests {
             status_message: String::from(EDITOR_HELP),
             search_mode: false,
             theme: Theme::source_hints_default(),
-            default_mode: EditorMode::SourceHints,
+            config: AppConfig::default(),
+            config_return: None,
             overlay: None,
             tick: 0,
         }
@@ -965,6 +1161,69 @@ mod tests {
         }));
 
         assert!(app.overlay.is_some());
+    }
+
+    #[test]
+    fn ctrl_comma_opens_config_screen() {
+        let mut app = editor_app();
+
+        app.handle_event(Event::Key(KeyEvent {
+            code: KeyCode::Char(','),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }));
+
+        assert!(matches!(app.screen, Screen::Config(_)));
+        assert!(app.config_return.is_some());
+    }
+
+    #[test]
+    fn config_cancel_restores_previous_screen_and_config() {
+        let mut app = editor_app();
+
+        app.handle_event(Event::Key(KeyEvent {
+            code: KeyCode::Char(','),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }));
+        app.handle_event(Event::Key(KeyEvent {
+            code: KeyCode::Tab,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }));
+        app.handle_event(Event::Key(KeyEvent {
+            code: KeyCode::Down,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }));
+        app.handle_event(Event::Key(KeyEvent {
+            code: KeyCode::Down,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }));
+        app.handle_event(Event::Key(KeyEvent {
+            code: KeyCode::Right,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }));
+
+        assert!(app.config.line_numbers);
+
+        app.handle_event(Event::Key(KeyEvent {
+            code: KeyCode::Esc,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }));
+
+        assert!(matches!(app.screen, Screen::Editor(_)));
+        assert!(!app.config.line_numbers);
     }
 
     #[test]

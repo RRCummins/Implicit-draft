@@ -227,6 +227,10 @@ impl Buffer {
         &self.lines
     }
 
+    pub fn line_count(&self) -> usize {
+        self.lines.len()
+    }
+
     pub fn scroll_offset(&self) -> (usize, usize) {
         (self.scroll_row, self.scroll_col)
     }

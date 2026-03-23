@@ -8,6 +8,7 @@ use ratatui::{
 use crate::{
     app::{App, DialogView, OverlayView, ViewModel},
     picker::PickerEntry,
+    settings::ConfigPane,
     theme::Theme,
 };
 
@@ -26,6 +27,23 @@ struct WelcomeView<'a> {
     meta: WelcomeMeta,
 }
 
+struct EditorView {
+    lines: Vec<Line<'static>>,
+    cursor: Option<(usize, usize)>,
+    scroll: (usize, usize),
+    dialog: Option<DialogView>,
+    line_numbers: bool,
+}
+
+struct ConfigView {
+    themes: Vec<String>,
+    selected_theme: usize,
+    active_pane: ConfigPane,
+    options: Vec<(String, String)>,
+    selected_option: usize,
+    preview_lines: Vec<Line<'static>>,
+}
+
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let theme = app.theme();
     let [buffer_area, status_area] = Layout::default()
@@ -41,7 +59,18 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             cursor,
             scroll,
             dialog,
-        } => draw_editor(frame, buffer_area, lines, cursor, scroll, dialog, theme),
+        } => draw_editor(
+            frame,
+            buffer_area,
+            EditorView {
+                lines,
+                cursor,
+                scroll,
+                dialog,
+                line_numbers: app.line_numbers_enabled(),
+            },
+            theme,
+        ),
         ViewModel::Picker {
             cwd,
             filter,
@@ -56,6 +85,26 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             &entries,
             selected_row,
             metadata,
+            theme,
+        ),
+        ViewModel::Config {
+            themes,
+            selected_theme,
+            active_pane,
+            options,
+            selected_option,
+            preview_lines,
+        } => draw_config(
+            frame,
+            buffer_area,
+            ConfigView {
+                themes,
+                selected_theme,
+                active_pane,
+                options,
+                selected_option,
+                preview_lines,
+            },
             theme,
         ),
         ViewModel::Welcome {
@@ -123,31 +172,45 @@ fn fit_status_line(line: &str, width: usize) -> String {
     format!("…{tail}")
 }
 
-fn draw_editor(
-    frame: &mut Frame,
-    area: Rect,
-    lines: Vec<Line<'static>>,
-    cursor: Option<(usize, usize)>,
-    scroll: (usize, usize),
-    dialog: Option<DialogView>,
-    theme: Theme,
-) {
-    let mut lines = lines;
-    if let Some((_, row)) = cursor.filter(|(_, row)| *row < lines.len()) {
+fn draw_editor(frame: &mut Frame, area: Rect, editor: EditorView, theme: Theme) {
+    let mut lines = editor.lines;
+    if let Some((_, row)) = editor.cursor.filter(|(_, row)| *row < lines.len()) {
         lines[row].style = lines[row].style.patch(theme.cursor);
     }
 
-    let editor = Paragraph::new(lines)
+    let editor_area = if editor.line_numbers {
+        let gutter_width = line_number_gutter_width(lines.len());
+        let [gutter_area, editor_area] =
+            Layout::horizontal([Constraint::Length(gutter_width), Constraint::Min(1)]).areas(area);
+
+        let gutter_lines = (1..=lines.len())
+            .map(|number| {
+                Line::styled(
+                    format!("{number:>width$} ", width = gutter_width as usize - 1),
+                    theme.ui_chrome,
+                )
+            })
+            .collect::<Vec<_>>();
+        let gutter = Paragraph::new(gutter_lines)
+            .style(theme.background)
+            .scroll((editor.scroll.0 as u16, 0));
+        frame.render_widget(gutter, gutter_area);
+        editor_area
+    } else {
+        area
+    };
+
+    let editor_widget = Paragraph::new(lines)
         .block(Block::default())
         .style(theme.background);
-    let editor = editor.scroll((scroll.0 as u16, scroll.1 as u16));
-    frame.render_widget(editor, area);
+    let editor_widget = editor_widget.scroll((editor.scroll.0 as u16, editor.scroll.1 as u16));
+    frame.render_widget(editor_widget, editor_area);
 
-    if let Some((column, row)) = cursor {
-        frame.set_cursor_position((area.x + column as u16, area.y + row as u16));
+    if let Some((column, row)) = editor.cursor {
+        frame.set_cursor_position((editor_area.x + column as u16, editor_area.y + row as u16));
     }
 
-    if let Some(dialog) = dialog {
+    if let Some(dialog) = editor.dialog {
         let dialog_area = centered_rect(area, 52, 7);
         frame.render_widget(Clear, dialog_area);
 
@@ -209,6 +272,89 @@ fn draw_picker(
         )
         .wrap(Wrap { trim: false });
     frame.render_widget(meta, meta_area);
+}
+
+fn draw_config(frame: &mut Frame, area: Rect, config: ConfigView, theme: Theme) {
+    let [main_area, hint_area] =
+        Layout::vertical([Constraint::Min(8), Constraint::Length(2)]).areas(area);
+    let [left_area, preview_area] =
+        Layout::horizontal([Constraint::Length(32), Constraint::Min(20)]).areas(main_area);
+    let [theme_area, options_area] =
+        Layout::vertical([Constraint::Min(8), Constraint::Length(9)]).areas(left_area);
+
+    let theme_lines = config
+        .themes
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let prefix = if index == config.selected_theme {
+                "> "
+            } else {
+                "  "
+            };
+            let style = if config.active_pane == ConfigPane::Theme && index == config.selected_theme
+            {
+                theme.selection.patch(theme.ui_chrome)
+            } else {
+                theme.background
+            };
+            Line::styled(format!("{prefix}{name}"), style)
+        })
+        .collect::<Vec<_>>();
+    let theme_widget = Paragraph::new(theme_lines).style(theme.background).block(
+        Block::default()
+            .title(" Theme ")
+            .title_style(theme.ui_chrome)
+            .borders(Borders::ALL)
+            .border_style(theme.ui_chrome),
+    );
+    frame.render_widget(theme_widget, theme_area);
+
+    let option_lines = config
+        .options
+        .iter()
+        .enumerate()
+        .map(|(index, (label, value))| {
+            let style =
+                if config.active_pane == ConfigPane::Options && index == config.selected_option {
+                    theme.selection.patch(theme.ui_chrome)
+                } else {
+                    theme.background
+                };
+            Line::styled(format!("{label:<13} [{value}]"), style)
+        })
+        .collect::<Vec<_>>();
+    let options_widget = Paragraph::new(option_lines).style(theme.background).block(
+        Block::default()
+            .title(" Options ")
+            .title_style(theme.ui_chrome)
+            .borders(Borders::ALL)
+            .border_style(theme.ui_chrome),
+    );
+    frame.render_widget(options_widget, options_area);
+
+    let preview_widget = Paragraph::new(config.preview_lines)
+        .style(theme.background)
+        .block(
+            Block::default()
+                .title(" Preview ")
+                .title_style(theme.ui_chrome)
+                .borders(Borders::ALL)
+                .border_style(theme.ui_chrome),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(preview_widget, preview_area);
+
+    let hint = Paragraph::new(vec![Line::raw(
+        "Tab switch pane   Enter apply   S save   Esc cancel",
+    )])
+    .style(theme.background.patch(theme.ui_chrome))
+    .block(
+        Block::default()
+            .borders(Borders::TOP)
+            .border_style(theme.ui_chrome),
+    );
+    frame.render_widget(hint, hint_area);
 }
 
 fn draw_welcome(frame: &mut Frame, area: Rect, welcome: WelcomeView<'_>, theme: Theme) {
@@ -358,6 +504,10 @@ fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
         .areas(vertical);
 
     horizontal
+}
+
+fn line_number_gutter_width(line_count: usize) -> u16 {
+    (line_count.max(1).to_string().len() as u16) + 2
 }
 
 #[cfg(test)]

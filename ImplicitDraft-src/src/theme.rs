@@ -54,6 +54,37 @@ impl Theme {
         Self::builtin("dark").expect("dark builtin exists")
     }
 
+    pub fn available_names() -> Result<Vec<String>> {
+        let mut names = BUILTIN_THEME_NAMES
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<Vec<_>>();
+
+        let themes_dir = config_dir().join("themes");
+        if themes_dir.exists() {
+            for entry in fs::read_dir(&themes_dir)
+                .with_context(|| format!("failed to read {}", themes_dir.display()))?
+            {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().and_then(|value| value.to_str()) != Some("toml") {
+                    continue;
+                }
+
+                let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+                    continue;
+                };
+
+                if !names.iter().any(|name| name == stem) {
+                    names.push(stem.to_owned());
+                }
+            }
+        }
+
+        names.sort();
+        Ok(names)
+    }
+
     pub fn load_named(name: &str) -> Result<Self> {
         let mut theme = Self::builtin(name)?;
 
@@ -247,6 +278,14 @@ impl Theme {
         Ok(())
     }
 }
+
+const BUILTIN_THEME_NAMES: &[&str] = &[
+    "dark",
+    "light",
+    "gruvbox",
+    "catppuccin-mocha",
+    "catppuccin-latte",
+];
 
 #[derive(Clone, Copy)]
 struct Palette {
