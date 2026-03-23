@@ -53,6 +53,12 @@ pub enum SidebarAction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SidebarCreateKind {
+    File,
+    Directory,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GitMarker {
     Modified,
     Added,
@@ -262,6 +268,44 @@ impl SidebarState {
         }
 
         Ok(())
+    }
+
+    pub fn creation_root(&self) -> PathBuf {
+        match self.entries.get(self.selected) {
+            Some(entry) if entry.is_dir => entry.path.clone(),
+            Some(entry) => entry
+                .path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| self.root.clone()),
+            None => self.root.clone(),
+        }
+    }
+
+    pub fn create_entry(&mut self, kind: SidebarCreateKind, name: &str) -> Result<PathBuf> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!("name cannot be empty");
+        }
+        if trimmed.contains(std::path::MAIN_SEPARATOR) {
+            anyhow::bail!("name must not contain path separators");
+        }
+
+        let path = self.creation_root().join(trimmed);
+        if path.exists() {
+            anyhow::bail!("{} already exists", path.display());
+        }
+
+        match kind {
+            SidebarCreateKind::File => fs::write(&path, "")
+                .with_context(|| format!("failed to create {}", path.display()))?,
+            SidebarCreateKind::Directory => fs::create_dir(&path)
+                .with_context(|| format!("failed to create {}", path.display()))?,
+        }
+
+        self.refresh()?;
+        self.select_path(&path);
+        Ok(path)
     }
 
     pub fn root_display(&self) -> String {
@@ -580,6 +624,43 @@ mod tests {
         assert!(!rows.iter().any(|row| row.label.contains("ignored-dir/")));
         assert!(!rows.iter().any(|row| row.label.contains("secret.md")));
         assert!(!rows.iter().any(|row| row.label.contains("debug.log")));
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn creates_file_in_selected_directory() {
+        let root = temp_dir("create-file");
+        fs::create_dir_all(root.join("docs")).expect("mkdir");
+
+        let mut sidebar = SidebarState::new(root.clone()).expect("sidebar");
+        sidebar.select_path(&root.join("docs"));
+        let created = sidebar
+            .create_entry(SidebarCreateKind::File, "note.md")
+            .expect("create file");
+
+        assert_eq!(created, root.join("docs/note.md"));
+        assert!(created.exists());
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn creates_directory_next_to_selected_file() {
+        let root = temp_dir("create-dir");
+        fs::create_dir_all(root.join("docs")).expect("mkdir");
+        fs::write(root.join("docs/note.md"), "body").expect("file");
+
+        let mut sidebar = SidebarState::new(root.clone()).expect("sidebar");
+        sidebar.select_path(&root.join("docs"));
+        sidebar.toggle_selected_dir().expect("expand docs");
+        sidebar.select_path(&root.join("docs/note.md"));
+        let created = sidebar
+            .create_entry(SidebarCreateKind::Directory, "assets")
+            .expect("create dir");
+
+        assert_eq!(created, root.join("docs/assets"));
+        assert!(created.is_dir());
 
         fs::remove_dir_all(root).expect("cleanup");
     }

@@ -1,8 +1,4 @@
-use std::{
-    env, fs,
-    path::PathBuf,
-    time::Duration,
-};
+use std::{env, fs, path::PathBuf, time::Duration};
 
 use anyhow::{Result, anyhow};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -18,7 +14,7 @@ use crate::{
     preview, recents, render,
     session::SessionState,
     settings::{ConfigPane, ConfigState},
-    sidebar::{SidebarAction, SidebarRow, SidebarState},
+    sidebar::{SidebarAction, SidebarCreateKind, SidebarRow, SidebarState},
     theme::Theme,
     welcome::{BRAILLE_LOGO, SHORTCUTS, WelcomeState},
 };
@@ -289,6 +285,20 @@ impl App {
                                 }
                             }
                         }
+                        EditorDialog::SidebarCreate(_) => {
+                            match Self::handle_sidebar_create_input(editor, key) {
+                                SidebarCreateOutcome::None => {}
+                                SidebarCreateOutcome::Created(path) => {
+                                    next_status = Some(format!("created {}", path.display()));
+                                }
+                                SidebarCreateOutcome::Canceled => {
+                                    next_status = Some(String::from(SIDEBAR_HELP));
+                                }
+                                SidebarCreateOutcome::Error(error) => {
+                                    next_status = Some(error.to_string());
+                                }
+                            }
+                        }
                         EditorDialog::Quit | EditorDialog::ReturnHome => match key.code {
                             KeyCode::Enter | KeyCode::Char('y') => match dialog {
                                 EditorDialog::Quit => should_quit_now = true,
@@ -466,6 +476,22 @@ impl App {
                                     Ok(()) => next_status = Some(String::from("sidebar refreshed")),
                                     Err(error) => next_status = Some(error.to_string()),
                                 }
+                            }
+                            KeyCode::Char('n') if key.modifiers == KeyModifiers::NONE => {
+                                editor.dialog =
+                                    Some(EditorDialog::SidebarCreate(SidebarCreateState::new(
+                                        SidebarCreateKind::File,
+                                        editor.sidebar.creation_root(),
+                                    )));
+                                next_status = Some(String::from("new file"));
+                            }
+                            KeyCode::Char('N') if key.modifiers == KeyModifiers::SHIFT => {
+                                editor.dialog =
+                                    Some(EditorDialog::SidebarCreate(SidebarCreateState::new(
+                                        SidebarCreateKind::Directory,
+                                        editor.sidebar.creation_root(),
+                                    )));
+                                next_status = Some(String::from("new folder"));
                             }
                             _ => {}
                         }
@@ -968,6 +994,14 @@ impl App {
                                 String::from("Esc cancels"),
                             ],
                         },
+                        EditorDialog::SidebarCreate(state) => DialogView {
+                            title: String::from(state.title()),
+                            lines: vec![
+                                format!("parent: {}", state.parent.display()),
+                                format!("name: {}", state.name),
+                                String::from("Enter creates   Esc cancels"),
+                            ],
+                        },
                     }),
                 }
             }
@@ -1217,6 +1251,39 @@ impl App {
                 GotoLineOutcome::None
             }
             _ => GotoLineOutcome::None,
+        }
+    }
+
+    fn handle_sidebar_create_input(
+        editor: &mut EditorState,
+        key: KeyEvent,
+    ) -> SidebarCreateOutcome {
+        let Some(EditorDialog::SidebarCreate(state)) = editor.dialog.as_mut() else {
+            return SidebarCreateOutcome::None;
+        };
+
+        match key.code {
+            KeyCode::Esc => {
+                editor.dialog = None;
+                SidebarCreateOutcome::Canceled
+            }
+            KeyCode::Enter => {
+                let path = match editor.sidebar.create_entry(state.kind, &state.name) {
+                    Ok(path) => path,
+                    Err(error) => return SidebarCreateOutcome::Error(error),
+                };
+                editor.dialog = None;
+                SidebarCreateOutcome::Created(path)
+            }
+            KeyCode::Backspace => {
+                state.name.pop();
+                SidebarCreateOutcome::None
+            }
+            KeyCode::Char(ch) if is_insertable(key.modifiers) => {
+                state.name.push(ch);
+                SidebarCreateOutcome::None
+            }
+            _ => SidebarCreateOutcome::None,
         }
     }
 
@@ -1631,6 +1698,7 @@ enum EditorDialog {
     SaveAs(SaveAsState),
     Find(FindState),
     GotoLine(GotoLineState),
+    SidebarCreate(SidebarCreateState),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1769,6 +1837,38 @@ enum GotoLineOutcome {
     Error(anyhow::Error),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SidebarCreateState {
+    kind: SidebarCreateKind,
+    parent: PathBuf,
+    name: String,
+}
+
+impl SidebarCreateState {
+    fn new(kind: SidebarCreateKind, parent: PathBuf) -> Self {
+        Self {
+            kind,
+            parent,
+            name: String::new(),
+        }
+    }
+
+    fn title(&self) -> &'static str {
+        match self.kind {
+            SidebarCreateKind::File => " New File ",
+            SidebarCreateKind::Directory => " New Folder ",
+        }
+    }
+}
+
+#[derive(Debug)]
+enum SidebarCreateOutcome {
+    None,
+    Created(PathBuf),
+    Canceled,
+    Error(anyhow::Error),
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Overlay {
     Editor(EditorMode),
@@ -1794,7 +1894,8 @@ impl Overlay {
                 "Ctrl+S save or save-as   Ctrl+F find   Ctrl+G goto line   Ctrl+E sidebar",
                 "Alt+N next match   Alt+P previous match   Ctrl+Z undo   Ctrl+R redo",
                 "Ctrl+P preview mode   Ctrl+, settings   Ctrl+W return home",
-                "When sidebar is open: Tab focus   Enter open file   Space/Right toggle dir",
+                "When sidebar is open: Tab focus   Enter open file   N file   Shift+N folder",
+                "Space/Right toggle dir",
                 "Ctrl+[ narrower   Ctrl+] wider",
                 "Ctrl+Q quit app   ? or Esc close this dialog",
             ],
@@ -1803,7 +1904,8 @@ impl Overlay {
                 "Ctrl+F find   Ctrl+G goto line   Ctrl+P source mode",
                 "Alt+N next match   Alt+P previous match",
                 "Ctrl+E sidebar   Ctrl+, settings   Ctrl+W return home",
-                "When sidebar is open: Tab focus   Enter open file   Space/Right toggle dir",
+                "When sidebar is open: Tab focus   Enter open file   N file   Shift+N folder",
+                "Space/Right toggle dir",
                 "Ctrl+[ narrower   Ctrl+] wider",
                 "Ctrl+S save   Ctrl+Q quit app",
                 "? or Esc close this dialog",
@@ -1813,7 +1915,8 @@ impl Overlay {
                 "Ctrl+S save or save-as   Ctrl+F find   Ctrl+G goto line   Ctrl+E sidebar",
                 "Alt+N next match   Alt+P previous match   Ctrl+Z undo   Ctrl+R redo",
                 "Ctrl+P source+hints mode   Ctrl+, settings   Ctrl+W return home",
-                "When sidebar is open: Tab focus   Enter open file   Space/Right toggle dir",
+                "When sidebar is open: Tab focus   Enter open file   N file   Shift+N folder",
+                "Space/Right toggle dir",
                 "Ctrl+[ narrower   Ctrl+] wider",
                 "Ctrl+Q quit app   ? or Esc close this dialog",
             ],
@@ -2100,6 +2203,82 @@ mod tests {
         assert!(editor.file_name().ends_with("b.md"));
         assert!(editor.sidebar.is_open());
         assert_eq!(editor.focus, EditorFocus::Editor);
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn sidebar_n_creates_new_file() {
+        let root = temp_dir("sidebar-new-file");
+        fs::create_dir_all(root.join("docs")).expect("mkdir");
+
+        let mut app = App::new(
+            StartupTarget::Browse(root.clone()),
+            AppConfig::default(),
+            KeyBindings::default(),
+        );
+        assert!(matches!(&app.screen, Screen::Picker(_)));
+        app.screen = Screen::Editor(EditorState::empty(EditorMode::SourceHints));
+        let Screen::Editor(editor) = &mut app.screen else {
+            panic!("editor screen");
+        };
+        editor.sidebar = SidebarState::new(root.clone()).expect("sidebar");
+        editor.sidebar.open().expect("open");
+        editor.focus = EditorFocus::Sidebar;
+        editor.sidebar.select_path(&root.join("docs"));
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('n'),
+            KeyModifiers::NONE,
+        )));
+        for ch in ['n', 'o', 't', 'e', '.', 'm', 'd'] {
+            app.handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+
+        assert!(root.join("docs/note.md").exists());
+        assert!(app.status_message.contains("created"));
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn sidebar_shift_n_creates_new_folder() {
+        let root = temp_dir("sidebar-new-folder");
+        fs::create_dir_all(root.join("docs")).expect("mkdir");
+
+        let mut app = editor_app();
+        let Screen::Editor(editor) = &mut app.screen else {
+            panic!("editor screen");
+        };
+        editor.sidebar = SidebarState::new(root.clone()).expect("sidebar");
+        editor.sidebar.open().expect("open");
+        editor.focus = EditorFocus::Sidebar;
+        editor.sidebar.select_path(&root.join("docs"));
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('N'),
+            KeyModifiers::SHIFT,
+        )));
+        for ch in ['a', 's', 's', 'e', 't', 's'] {
+            app.handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+
+        assert!(root.join("docs/assets").is_dir());
+        assert!(app.status_message.contains("created"));
 
         fs::remove_dir_all(root).expect("cleanup");
     }
