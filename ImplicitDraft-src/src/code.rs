@@ -442,11 +442,37 @@ fn render_spans(
             continue;
         }
 
+        if let Some((key_end, delimiter_end)) =
+            data_key_range(line, byte_index, language, grammar.line_comment)
+        {
+            spans.push(Span::styled(
+                line[byte_index..key_end].to_owned(),
+                theme.code_type,
+            ));
+            if delimiter_end > key_end {
+                spans.push(Span::styled(
+                    line[key_end..delimiter_end].to_owned(),
+                    theme.code_punctuation,
+                ));
+            }
+            index = char_position_at_or_after(&chars, delimiter_end);
+            continue;
+        }
+
         if grammar.string_delimiters.contains(&ch) {
             let end = find_string_end(line, &chars, index + 1, ch);
             spans.push(Span::styled(
                 line[byte_index..end].to_owned(),
                 theme.code_string,
+            ));
+            index = char_position_at_or_after(&chars, end);
+            continue;
+        }
+
+        if let Some(end) = shell_variable_end(line, &chars, index, language) {
+            spans.push(Span::styled(
+                line[byte_index..end].to_owned(),
+                theme.code_type,
             ));
             index = char_position_at_or_after(&chars, end);
             continue;
@@ -534,6 +560,111 @@ fn find_ident_end(line: &str, chars: &[(usize, char)], mut index: usize) -> usiz
         index += 1;
     }
     line.len()
+}
+
+fn data_key_range(
+    line: &str,
+    byte_index: usize,
+    language: Language,
+    line_comment: Option<&str>,
+) -> Option<(usize, usize)> {
+    if language != Language::Data || byte_index != data_key_start(line)? {
+        return None;
+    }
+
+    let search_end = comment_start_after(line, line_comment);
+    let relevant = &line[byte_index..search_end];
+
+    if relevant.starts_with('"') || relevant.starts_with('\'') {
+        let delimiter = relevant.chars().next()?;
+        let local_end = find_quoted_key_end(relevant, delimiter)?;
+        let remainder = &relevant[local_end..];
+        let delimiter_offset = remainder
+            .char_indices()
+            .find_map(|(offset, ch)| matches!(ch, ':' | '=').then_some(offset))?;
+        let key_end = byte_index + local_end;
+        let delimiter_start = key_end + delimiter_offset;
+        return Some((key_end, delimiter_start + 1));
+    }
+
+    let delimiter_offset = relevant
+        .char_indices()
+        .find_map(|(offset, ch)| matches!(ch, ':' | '=').then_some(offset))?;
+    let raw_key = relevant[..delimiter_offset].trim_end();
+    if raw_key.is_empty() {
+        return None;
+    }
+    let key_end = byte_index + raw_key.len();
+    Some((key_end, byte_index + delimiter_offset + 1))
+}
+
+fn data_key_start(line: &str) -> Option<usize> {
+    let trimmed = line.trim_start();
+    let offset = line.len() - trimmed.len();
+    let trimmed = trimmed.strip_prefix("- ").unwrap_or(trimmed);
+    let marker_offset = if line[offset..].starts_with("- ") {
+        2
+    } else {
+        0
+    };
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(offset + marker_offset)
+    }
+}
+
+fn find_quoted_key_end(text: &str, delimiter: char) -> Option<usize> {
+    let mut escaped = false;
+    for (offset, ch) in text.char_indices().skip(1) {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == delimiter {
+            return Some(offset + ch.len_utf8());
+        }
+    }
+    None
+}
+
+fn comment_start_after(line: &str, line_comment: Option<&str>) -> usize {
+    line_comment
+        .and_then(|marker| line.find(marker))
+        .unwrap_or(line.len())
+}
+
+fn shell_variable_end(
+    line: &str,
+    chars: &[(usize, char)],
+    index: usize,
+    language: Language,
+) -> Option<usize> {
+    if language != Language::Shell || chars.get(index)?.1 != '$' {
+        return None;
+    }
+
+    let start = chars[index].0;
+    let next = chars.get(index + 1).copied()?;
+    if next.1 == '{' {
+        for (byte_index, ch) in chars.iter().copied().skip(index + 2) {
+            if ch == '}' {
+                return Some(byte_index + ch.len_utf8());
+            }
+        }
+        return Some(line.len());
+    }
+
+    if !is_identifier_start(next.1) {
+        return None;
+    }
+
+    let end = find_ident_end(line, chars, index + 2);
+    Some(end.max(start + 1))
 }
 
 fn char_position_at_or_after(chars: &[(usize, char)], byte_index: usize) -> usize {
@@ -702,6 +833,44 @@ mod tests {
         );
 
         assert_eq!(rendered[0].spans[0].style, theme.code_keyword);
+    }
+
+    #[test]
+    fn data_keys_use_code_type_style() {
+        let theme = Theme::source_hints_default();
+        let rendered = render_document(
+            &[String::from("theme = \"dark\"")],
+            &theme,
+            Some(Path::new("config.toml")),
+            FileType::Code,
+        );
+
+        assert_eq!(rendered[0].spans[0].content.as_ref(), "theme");
+        assert_eq!(rendered[0].spans[0].style, theme.code_type);
+    }
+
+    #[test]
+    fn shell_variables_use_code_type_style() {
+        let theme = Theme::source_hints_default();
+        let rendered = render_document(
+            &[String::from("echo $HOME ${USER}")],
+            &theme,
+            Some(Path::new("script.sh")),
+            FileType::Code,
+        );
+
+        assert!(
+            rendered[0]
+                .spans
+                .iter()
+                .any(|span| span.content.as_ref() == "$HOME" && span.style == theme.code_type)
+        );
+        assert!(
+            rendered[0]
+                .spans
+                .iter()
+                .any(|span| span.content.as_ref() == "${USER}" && span.style == theme.code_type)
+        );
     }
 
     #[test]

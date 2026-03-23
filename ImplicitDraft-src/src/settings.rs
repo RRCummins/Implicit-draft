@@ -3,10 +3,11 @@
 use anyhow::Result;
 use ratatui::text::Line;
 
-use crate::{config::AppConfig, preview, theme::Theme};
+use crate::{code, config::AppConfig, filetype::FileType, preview, theme::Theme};
 
 const TAB_WIDTH_OPTIONS: [usize; 3] = [2, 4, 8];
 const PREVIEW_SAMPLE: &str = "# Heading\n## Secondary Heading\n**bold** and *italic*\n`inline code`\n\n> blockquote\n\n- list item one\n- list item two\n- [x] done item\n\n[implicit.dev](https://implicit.dev)\n\n```rust\nfn main() {}\n```";
+const CODE_PREVIEW_SAMPLE: &str = "fn paint(theme: Theme) {\n    let accent = \"implicit\";\n    let port = 8080;\n    // preview code colors\n}";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConfigPane {
@@ -127,11 +128,26 @@ impl ConfigState {
     }
 
     pub fn preview_lines(&self, theme: &Theme, width: usize) -> Vec<Line<'static>> {
-        let lines = PREVIEW_SAMPLE
+        let markdown_lines = PREVIEW_SAMPLE
             .lines()
             .map(str::to_owned)
             .collect::<Vec<_>>();
-        preview::render_document(&lines, theme, width)
+        let code_lines = CODE_PREVIEW_SAMPLE
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+
+        let mut rendered = preview::render_document(&markdown_lines, theme, width);
+        rendered.push(Line::raw(String::new()));
+        rendered.push(Line::raw(String::from("Source Preview")));
+        rendered.extend(code::render_preview_document(
+            &code_lines,
+            theme,
+            Some(std::path::Path::new("preview.rs")),
+            FileType::Code,
+            width,
+        ));
+        rendered
     }
 
     pub fn option_rows(&self) -> Vec<ConfigOptionRow> {
@@ -325,5 +341,23 @@ mod tests {
 
         assert!(!config.line_numbers);
         assert_eq!(config.theme, "dark");
+    }
+
+    #[test]
+    fn preview_lines_include_code_preview_section() {
+        let state = ConfigState::new(&AppConfig::default()).expect("config state");
+        let theme = Theme::source_hints_default();
+        let lines = state.preview_lines(&theme, 48);
+
+        assert!(lines.iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.content.as_ref() == "Source Preview")
+        }));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.spans.iter().any(|span| span.content.as_ref() == "fn"))
+        );
     }
 }
