@@ -2,13 +2,22 @@ use std::path::PathBuf;
 
 use crate::recents::RecentFile;
 
-pub const BRAILLE_LOGO: &[&str] = &["⣶⣶⣶⣶⣶⣶⣶", "⣿⣿⠿⠿⠿⣿⣿", "⣿⣿⣶⣶⣶⣿⣿", "⣿⣿⣤⣤⣤⣿⣿", "⠿⠿⠿⠿⠿⠿⠿"];
+// "implicit" rendered as a 2-row pixel-font using half-block characters.
+// Each letter is 3–5 terminal columns wide with 1-column gaps between letters.
+// ▀ = top pixel only, ▄ = bottom pixel only, █ = both pixels, space = neither.
+//
+//  i     m       p    l    i    c    i    t
+pub const BRAILLE_LOGO: &[&str] = &[
+    " ▀  █▀█▀█ █▀▄ █    ▀  █▀   ▀  ▀█▀",
+    " █  █   █ █▀  █▄▄  █  █▄   █   █ ",
+];
 
 pub const SHORTCUTS: &[(&str, &str)] = &[
     ("O", "Open file picker"),
     ("N", "New untitled buffer"),
     ("Enter", "Open highlighted recent file"),
     ("/", "Search files (next)"),
+    ("?", "Show controls"),
     ("Q", "Quit"),
 ];
 

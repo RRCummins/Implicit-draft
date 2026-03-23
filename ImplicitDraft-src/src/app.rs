@@ -14,10 +14,10 @@ use crate::{
 };
 
 const FRAME_POLL_INTERVAL: Duration = Duration::from_millis(250);
-const EDITOR_HELP: &str = "ctrl+z undo | ctrl+r redo | ctrl+s save | ctrl+q quit";
+const EDITOR_HELP: &str = "ctrl+z undo | ctrl+r redo | ctrl+s save | ctrl+w home | ? controls";
 const PREVIEW_HELP: &str = "ctrl+p source+hints | arrows/page move | preview is read-only";
 const PICKER_HELP: &str = "enter/right open | left/backspace parent | a filter | esc home";
-const HOME_HELP: &str = "o open | n new | enter recent | / search | q quit";
+const HOME_HELP: &str = "o open | n new | enter recent | / search | ? controls | q quit";
 const SEARCH_HELP: &str = "type to filter | backspace delete | enter keep | esc clear";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,6 +56,7 @@ pub struct App {
     status_message: String,
     search_mode: bool,
     theme: Theme,
+    overlay: Option<Overlay>,
 }
 
 #[derive(Debug)]
@@ -97,6 +98,7 @@ impl App {
             status_message,
             search_mode: false,
             theme: Theme::load_named("dark").unwrap_or_else(|_| Theme::source_hints_default()),
+            overlay: None,
         }
     }
 
@@ -114,6 +116,13 @@ impl App {
 
     pub fn theme(&self) -> Theme {
         self.theme
+    }
+
+    pub fn overlay(&self) -> Option<OverlayView> {
+        self.overlay.map(|overlay| OverlayView {
+            title: overlay.title().to_owned(),
+            lines: overlay.lines().into_iter().map(str::to_owned).collect(),
+        })
     }
 
     fn handle_event(&mut self, event: Event) {
@@ -135,17 +144,39 @@ impl App {
             return;
         }
 
+        if self.overlay.is_some() {
+            match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?') => {
+                    self.overlay = None;
+                    self.status_message = match self.screen {
+                        Screen::Editor(ref editor) => String::from(editor.mode.help()),
+                        Screen::Picker(_) => String::from(PICKER_HELP),
+                        Screen::Welcome(_) => String::from(HOME_HELP),
+                    };
+                }
+                _ => {}
+            }
+            return;
+        }
+
         let mut next_status = None;
         let mut next_screen = None;
         let mut should_quit_now = false;
+        let mut clear_overlay = false;
 
         match &mut self.screen {
             Screen::Editor(editor) => {
-                if editor.quit_dialog_open {
+                if let Some(dialog) = editor.dialog {
                     match key.code {
-                        KeyCode::Enter | KeyCode::Char('y') => should_quit_now = true,
+                        KeyCode::Enter | KeyCode::Char('y') => match dialog {
+                            EditorDialog::Quit => should_quit_now = true,
+                            EditorDialog::ReturnHome => {
+                                next_screen = Some(Screen::Welcome(Self::load_welcome_state()));
+                                next_status = Some(String::from(HOME_HELP));
+                            }
+                        },
                         KeyCode::Esc | KeyCode::Char('n') => {
-                            editor.quit_dialog_open = false;
+                            editor.dialog = None;
                             next_status = Some(String::from("quit canceled"));
                         }
                         KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -153,14 +184,39 @@ impl App {
                         }
                         KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             match Self::save_editor(editor) {
-                                Ok(()) => next_status = Some(String::from("saved")),
+                                Ok(()) => {
+                                    editor.dialog = None;
+                                    match dialog {
+                                        EditorDialog::Quit => {
+                                            next_status = Some(String::from("saved"));
+                                        }
+                                        EditorDialog::ReturnHome => {
+                                            next_screen =
+                                                Some(Screen::Welcome(Self::load_welcome_state()));
+                                            next_status = Some(String::from(HOME_HELP));
+                                        }
+                                    }
+                                }
                                 Err(error) => next_status = Some(error.to_string()),
                             }
                         }
                         _ => {}
                     }
                 } else {
-                    if key.code == KeyCode::Char('p')
+                    if key.code == KeyCode::Char('?') {
+                        self.overlay = Some(Overlay::Editor(editor.mode));
+                        next_status = Some(String::from("controls"));
+                    } else if key.code == KeyCode::Char('w')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                    {
+                        if editor.buffer.is_dirty() {
+                            editor.dialog = Some(EditorDialog::ReturnHome);
+                            next_status = Some(String::from("unsaved changes"));
+                        } else {
+                            next_screen = Some(Screen::Welcome(Self::load_welcome_state()));
+                            next_status = Some(String::from(HOME_HELP));
+                        }
+                    } else if key.code == KeyCode::Char('p')
                         && key.modifiers.contains(KeyModifiers::CONTROL)
                     {
                         editor.mode = editor.mode.cycle();
@@ -250,6 +306,11 @@ impl App {
             }
             Screen::Picker(picker) => {
                 let action = match key.code {
+                    KeyCode::Char('?') => {
+                        self.overlay = Some(Overlay::Picker);
+                        next_status = Some(String::from("controls"));
+                        Ok(PickerAction::None)
+                    }
                     KeyCode::Up => {
                         picker.move_up();
                         next_status = Some(String::from("browse"));
@@ -310,6 +371,10 @@ impl App {
                 }
             }
             Screen::Welcome(welcome) => match key.code {
+                KeyCode::Char('?') => {
+                    self.overlay = Some(Overlay::Home);
+                    next_status = Some(String::from("controls"));
+                }
                 KeyCode::Up => {
                     welcome.move_up();
                     next_status = Some(String::from("browse recents"));
@@ -361,10 +426,15 @@ impl App {
 
         if let Some(screen) = next_screen {
             self.screen = screen;
+            clear_overlay = true;
         }
 
         if let Some(status_message) = next_status {
             self.status_message = status_message;
+        }
+
+        if clear_overlay {
+            self.overlay = None;
         }
 
         if should_quit_now {
@@ -394,17 +464,30 @@ impl App {
                         preview::render_document(editor.buffer.lines(), &self.theme, list_width)
                     }
                 },
-                cursor: if editor.quit_dialog_open || editor.mode == EditorMode::Preview {
+                cursor: if editor.dialog.is_some() || editor.mode == EditorMode::Preview {
                     None
                 } else {
                     editor.buffer.cursor_screen_position()
                 },
                 scroll: editor.buffer.scroll_offset(),
-                dialog: editor.quit_dialog_open.then_some([
-                    String::from("Save before quitting?"),
-                    String::from("Enter/y/ctrl+q: discard   ctrl+s: save and stay"),
-                    String::from("Esc or n: cancel"),
-                ]),
+                dialog: editor.dialog.map(|dialog| match dialog {
+                    EditorDialog::Quit => DialogView {
+                        title: String::from(" Unsaved Changes "),
+                        lines: vec![
+                            String::from("Save before quitting?"),
+                            String::from("Enter/y/ctrl+q: discard   ctrl+s: save and stay"),
+                            String::from("Esc or n: cancel"),
+                        ],
+                    },
+                    EditorDialog::ReturnHome => DialogView {
+                        title: String::from(" Return Home "),
+                        lines: vec![
+                            String::from("Save before returning home?"),
+                            String::from("Enter/y: discard   ctrl+s: save and return"),
+                            String::from("Esc or n: cancel"),
+                        ],
+                    },
+                }),
             },
             Screen::Picker(picker) => ViewModel::Picker {
                 cwd: picker.cwd_display(),
@@ -424,6 +507,7 @@ impl App {
             },
             Screen::Welcome(welcome) => ViewModel::Welcome {
                 logo: BRAILLE_LOGO.iter().map(|line| (*line).to_owned()).collect(),
+                version: format!("v{}", env!("CARGO_PKG_VERSION")),
                 shortcuts: SHORTCUTS
                     .iter()
                     .map(|(label, value)| ((*label).to_owned(), (*value).to_owned()))
@@ -472,7 +556,7 @@ impl App {
         match &mut self.screen {
             Screen::Editor(editor) => {
                 if editor.buffer.is_dirty() {
-                    editor.quit_dialog_open = true;
+                    editor.dialog = Some(EditorDialog::Quit);
                     self.status_message = String::from("unsaved changes");
                     return;
                 }
@@ -489,7 +573,7 @@ impl App {
         };
 
         editor.buffer.save_to_path(path)?;
-        editor.quit_dialog_open = false;
+        editor.dialog = None;
         Ok(())
     }
 
@@ -562,7 +646,7 @@ fn should_quit(key: KeyEvent) -> bool {
 pub struct EditorState {
     buffer: Buffer,
     file_path: Option<PathBuf>,
-    quit_dialog_open: bool,
+    dialog: Option<EditorDialog>,
     viewport_height: usize,
     mode: EditorMode,
 }
@@ -574,7 +658,7 @@ impl EditorState {
         Ok(Self {
             buffer,
             file_path: Some(path),
-            quit_dialog_open: false,
+            dialog: None,
             viewport_height: 1,
             mode: EditorMode::SourceHints,
         })
@@ -584,7 +668,7 @@ impl EditorState {
         Self {
             buffer: Buffer::empty(),
             file_path: None,
-            quit_dialog_open: false,
+            dialog: None,
             viewport_height: 1,
             mode: EditorMode::SourceHints,
         }
@@ -605,13 +689,77 @@ enum Screen {
     Welcome(WelcomeState),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EditorDialog {
+    Quit,
+    ReturnHome,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Overlay {
+    Editor(EditorMode),
+    Picker,
+    Home,
+}
+
+impl Overlay {
+    fn title(self) -> &'static str {
+        match self {
+            Self::Editor(_) => " Controls ",
+            Self::Picker => " Picker Controls ",
+            Self::Home => " Home Controls ",
+        }
+    }
+
+    fn lines(self) -> Vec<&'static str> {
+        match self {
+            Self::Editor(EditorMode::SourceHints) => vec![
+                "Arrows/Home/End/Page: move cursor",
+                "Ctrl+S save   Ctrl+Z undo   Ctrl+R redo",
+                "Ctrl+P preview mode   Ctrl+W return home",
+                "Ctrl+Q quit app   ? or Esc close this dialog",
+            ],
+            Self::Editor(EditorMode::Preview) => vec![
+                "Arrows/Home/End/Page: move cursor",
+                "Ctrl+P source+hints mode   Ctrl+W return home",
+                "Ctrl+S save   Ctrl+Q quit app",
+                "? or Esc close this dialog",
+            ],
+            Self::Picker => vec![
+                "Enter or Right: open file or enter folder",
+                "Left or Backspace: go to parent folder",
+                "A toggle filter   / search   Esc home",
+                "? or Esc close this dialog",
+            ],
+            Self::Home => vec![
+                "O open file picker   N new untitled buffer",
+                "Enter open selected recent   Up/Down move",
+                "/ search files   Q quit",
+                "? or Esc close this dialog",
+            ],
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct DialogView {
+    pub title: String,
+    pub lines: Vec<String>,
+}
+
+#[derive(Debug)]
+pub struct OverlayView {
+    pub title: String,
+    pub lines: Vec<String>,
+}
+
 #[derive(Debug)]
 pub enum ViewModel {
     Editor {
         lines: Vec<ratatui::text::Line<'static>>,
         cursor: Option<(usize, usize)>,
         scroll: (usize, usize),
-        dialog: Option<[String; 3]>,
+        dialog: Option<DialogView>,
     },
     Picker {
         cwd: String,
@@ -623,6 +771,7 @@ pub enum ViewModel {
     },
     Welcome {
         logo: Vec<String>,
+        version: String,
         shortcuts: Vec<(String, String)>,
         recents: Vec<(String, String)>,
         selected_row: Option<usize>,
@@ -642,6 +791,7 @@ mod tests {
             status_message: String::from(EDITOR_HELP),
             search_mode: false,
             theme: Theme::source_hints_default(),
+            overlay: None,
         }
     }
 
@@ -703,6 +853,57 @@ mod tests {
         };
         assert_eq!(editor.buffer.lines(), &[String::new()]);
         assert_eq!(app.status_message, PREVIEW_HELP);
+    }
+
+    #[test]
+    fn ctrl_w_returns_clean_editor_to_home() {
+        let mut app = editor_app();
+
+        app.handle_event(Event::Key(KeyEvent {
+            code: KeyCode::Char('w'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }));
+
+        let Screen::Welcome(_) = app.screen else {
+            panic!("welcome screen");
+        };
+    }
+
+    #[test]
+    fn ctrl_w_prompts_when_editor_is_dirty() {
+        let mut app = editor_app();
+        let Screen::Editor(editor) = &mut app.screen else {
+            panic!("editor screen");
+        };
+        editor.buffer.insert_char('x');
+
+        app.handle_event(Event::Key(KeyEvent {
+            code: KeyCode::Char('w'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }));
+
+        let Screen::Editor(editor) = app.screen else {
+            panic!("editor screen");
+        };
+        assert_eq!(editor.dialog, Some(EditorDialog::ReturnHome));
+    }
+
+    #[test]
+    fn question_mark_opens_controls_overlay() {
+        let mut app = editor_app();
+
+        app.handle_event(Event::Key(KeyEvent {
+            code: KeyCode::Char('?'),
+            modifiers: KeyModifiers::SHIFT,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }));
+
+        assert!(app.overlay.is_some());
     }
 
     #[test]

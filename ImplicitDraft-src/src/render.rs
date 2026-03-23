@@ -6,7 +6,7 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, ViewModel},
+    app::{App, DialogView, OverlayView, ViewModel},
     picker::PickerEntry,
     theme::Theme,
 };
@@ -15,6 +15,14 @@ use crate::{
 struct WelcomeMeta {
     selected_row: Option<usize>,
     search_active: bool,
+}
+
+struct WelcomeView<'a> {
+    logo: &'a [String],
+    version: &'a str,
+    shortcuts: &'a [(String, String)],
+    recents: &'a [(String, String)],
+    meta: WelcomeMeta,
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -51,6 +59,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         ),
         ViewModel::Welcome {
             logo,
+            version,
             shortcuts,
             recents,
             selected_row,
@@ -58,12 +67,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         } => draw_welcome(
             frame,
             buffer_area,
-            &logo,
-            &shortcuts,
-            &recents,
-            WelcomeMeta {
-                selected_row,
-                search_active,
+            WelcomeView {
+                logo: &logo,
+                version: &version,
+                shortcuts: &shortcuts,
+                recents: &recents,
+                meta: WelcomeMeta {
+                    selected_row,
+                    search_active,
+                },
             },
             theme,
         ),
@@ -76,6 +88,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let status_bar = Paragraph::new(status).style(theme.selection.patch(theme.ui_chrome));
 
     frame.render_widget(status_bar, status_area);
+
+    if let Some(overlay) = app.overlay() {
+        draw_overlay(frame, buffer_area, overlay, theme);
+    }
 }
 
 fn fit_status_line(line: &str, width: usize) -> String {
@@ -110,7 +126,7 @@ fn draw_editor(
     lines: Vec<Line<'static>>,
     cursor: Option<(usize, usize)>,
     scroll: (usize, usize),
-    dialog: Option<[String; 3]>,
+    dialog: Option<DialogView>,
     theme: Theme,
 ) {
     let mut lines = lines;
@@ -128,15 +144,15 @@ fn draw_editor(
         frame.set_cursor_position((area.x + column as u16, area.y + row as u16));
     }
 
-    if let Some(lines) = dialog {
+    if let Some(dialog) = dialog {
         let dialog_area = centered_rect(area, 52, 7);
         frame.render_widget(Clear, dialog_area);
 
-        let dialog = Paragraph::new(lines.into_iter().map(Line::raw).collect::<Vec<_>>())
+        let dialog = Paragraph::new(dialog.lines.into_iter().map(Line::raw).collect::<Vec<_>>())
             .style(theme.background)
             .block(
                 Block::default()
-                    .title(" Unsaved Changes ")
+                    .title(dialog.title)
                     .borders(Borders::ALL)
                     .border_style(theme.ui_chrome)
                     .title_style(theme.ui_chrome),
@@ -192,15 +208,7 @@ fn draw_picker(
     frame.render_widget(meta, meta_area);
 }
 
-fn draw_welcome(
-    frame: &mut Frame,
-    area: Rect,
-    logo: &[String],
-    shortcuts: &[(String, String)],
-    recents: &[(String, String)],
-    meta: WelcomeMeta,
-    theme: Theme,
-) {
+fn draw_welcome(frame: &mut Frame, area: Rect, welcome: WelcomeView<'_>, theme: Theme) {
     let [hero_area, body_area, hint_area] = Layout::vertical([
         Constraint::Length(8),
         Constraint::Min(8),
@@ -211,19 +219,27 @@ fn draw_welcome(
         Layout::horizontal([Constraint::Length(24), Constraint::Min(20)]).areas(hero_area);
     let [shortcuts_area, recents_area] = two_column(body_area);
 
-    let logo_widget = Paragraph::new(logo.iter().cloned().map(Line::raw).collect::<Vec<_>>())
-        .style(theme.background)
-        .block(
-            Block::default()
-                .title(" Braille Logo ")
-                .title_style(theme.ui_chrome)
-                .borders(Borders::ALL)
-                .border_style(theme.ui_chrome),
-        );
+    let logo_widget = Paragraph::new(
+        welcome
+            .logo
+            .iter()
+            .cloned()
+            .map(Line::raw)
+            .collect::<Vec<_>>(),
+    )
+    .style(theme.background)
+    .block(
+        Block::default()
+            .title(" Braille Logo ")
+            .title_style(theme.ui_chrome)
+            .borders(Borders::ALL)
+            .border_style(theme.ui_chrome),
+    );
     frame.render_widget(logo_widget, logo_area);
 
     let title_lines = vec![
         Line::raw("implicit"),
+        Line::raw(welcome.version.to_owned()),
         Line::raw("a markdown editor for the terminal"),
         Line::raw(""),
         Line::raw("Press O to open a file"),
@@ -241,7 +257,8 @@ fn draw_welcome(
         .wrap(Wrap { trim: false });
     frame.render_widget(title, title_area);
 
-    let shortcut_lines = shortcuts
+    let shortcut_lines = welcome
+        .shortcuts
         .iter()
         .map(|(label, value)| Line::raw(format!("{label:<8} {value}")))
         .collect::<Vec<_>>();
@@ -256,15 +273,16 @@ fn draw_welcome(
         );
     frame.render_widget(shortcut_widget, shortcuts_area);
 
-    let recent_lines = if recents.is_empty() {
+    let recent_lines = if welcome.recents.is_empty() {
         vec![Line::raw("No recent files yet.")]
     } else {
-        recents
+        welcome
+            .recents
             .iter()
             .enumerate()
             .map(|(index, (path, age))| {
                 let mut style = theme.background;
-                if Some(index) == meta.selected_row {
+                if Some(index) == welcome.meta.selected_row {
                     style = style.patch(theme.selection);
                 }
                 Line::styled(format!("{path}  {age}"), style)
@@ -283,7 +301,7 @@ fn draw_welcome(
         .wrap(Wrap { trim: false });
     frame.render_widget(recents_widget, recents_area);
 
-    let hint = Paragraph::new(vec![Line::raw(if meta.search_active {
+    let hint = Paragraph::new(vec![Line::raw(if welcome.meta.search_active {
         "/ search active in picker"
     } else {
         "O open picker   N new buffer   Enter open recent   / search files   Q quit"
@@ -295,6 +313,25 @@ fn draw_welcome(
             .border_style(theme.ui_chrome),
     );
     frame.render_widget(hint, hint_area);
+}
+
+fn draw_overlay(frame: &mut Frame, area: Rect, overlay: OverlayView, theme: Theme) {
+    let height = (overlay.lines.len() as u16 + 2).max(6);
+    let dialog_area = centered_rect(area, 60, height);
+    frame.render_widget(Clear, dialog_area);
+
+    let dialog = Paragraph::new(overlay.lines.into_iter().map(Line::raw).collect::<Vec<_>>())
+        .style(theme.background)
+        .block(
+            Block::default()
+                .title(overlay.title)
+                .borders(Borders::ALL)
+                .border_style(theme.ui_chrome)
+                .title_style(theme.ui_chrome),
+        )
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(dialog, dialog_area);
 }
 
 fn two_column(area: Rect) -> [Rect; 2] {
