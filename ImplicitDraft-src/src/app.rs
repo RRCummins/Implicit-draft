@@ -31,6 +31,7 @@ const SEARCH_HELP: &str = "type to filter | backspace delete | enter keep | esc 
 const CONFIG_HELP: &str = "tab switch pane | enter apply | ctrl+, close | s save | esc cancel";
 const SIDEBAR_HELP: &str =
     "sidebar: arrows browse | enter open | space toggle | ctrl+[ ] resize | tab editor";
+const DEFAULT_SAVE_AS_PATH: &str = "untitled.md";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EditorMode {
@@ -235,41 +236,78 @@ impl App {
 
         match &mut self.screen {
             Screen::Editor(editor) => {
-                if let Some(dialog) = editor.dialog {
-                    match key.code {
-                        KeyCode::Enter | KeyCode::Char('y') => match dialog {
-                            EditorDialog::Quit => should_quit_now = true,
-                            EditorDialog::ReturnHome => {
-                                next_screen = Some(Screen::Welcome(Self::load_welcome_state()));
-                                next_status = Some(String::from(HOME_HELP));
+                if let Some(dialog) = editor.dialog.clone() {
+                    if matches!(dialog, EditorDialog::SaveAs(_)) {
+                        match Self::handle_save_as_input(editor, key) {
+                            SaveDialogOutcome::None => {}
+                            SaveDialogOutcome::Saved(after_save) => match after_save {
+                                SaveAfterAction::Stay => {
+                                    next_status = Some(String::from("saved"));
+                                }
+                                SaveAfterAction::Quit => should_quit_now = true,
+                                SaveAfterAction::ReturnHome => {
+                                    next_screen = Some(Screen::Welcome(Self::load_welcome_state()));
+                                    next_status = Some(String::from(HOME_HELP));
+                                }
+                            },
+                            SaveDialogOutcome::Canceled => {
+                                next_status = Some(String::from("save canceled"));
                             }
-                        },
-                        KeyCode::Esc | KeyCode::Char('n') => {
-                            editor.dialog = None;
-                            next_status = Some(String::from("quit canceled"));
+                            SaveDialogOutcome::Error(error) => {
+                                next_status = Some(error.to_string());
+                            }
                         }
-                        _ if keybindings.editor.quit.matches(key) => {
-                            should_quit_now = true;
-                        }
-                        _ if keybindings.editor.save.matches(key) => {
-                            match Self::save_editor(editor) {
-                                Ok(()) => {
-                                    editor.dialog = None;
-                                    match dialog {
-                                        EditorDialog::Quit => {
-                                            next_status = Some(String::from("saved"));
-                                        }
-                                        EditorDialog::ReturnHome => {
-                                            next_screen =
-                                                Some(Screen::Welcome(Self::load_welcome_state()));
-                                            next_status = Some(String::from(HOME_HELP));
+                    } else {
+                        match key.code {
+                            KeyCode::Enter | KeyCode::Char('y') => match dialog {
+                                EditorDialog::Quit => should_quit_now = true,
+                                EditorDialog::ReturnHome => {
+                                    next_screen = Some(Screen::Welcome(Self::load_welcome_state()));
+                                    next_status = Some(String::from(HOME_HELP));
+                                }
+                                EditorDialog::SaveAs(_) => {}
+                            },
+                            KeyCode::Esc | KeyCode::Char('n') => {
+                                editor.dialog = None;
+                                next_status = Some(String::from("quit canceled"));
+                            }
+                            _ if keybindings.editor.quit.matches(key) => {
+                                should_quit_now = true;
+                            }
+                            _ if keybindings.editor.save.matches(key) => {
+                                match Self::save_editor(editor) {
+                                    Ok(SaveOutcome::Saved) => {
+                                        editor.dialog = None;
+                                        match dialog {
+                                            EditorDialog::Quit => {
+                                                next_status = Some(String::from("saved"));
+                                            }
+                                            EditorDialog::ReturnHome => {
+                                                next_screen = Some(Screen::Welcome(
+                                                    Self::load_welcome_state(),
+                                                ));
+                                                next_status = Some(String::from(HOME_HELP));
+                                            }
+                                            EditorDialog::SaveAs(_) => {}
                                         }
                                     }
+                                    Ok(SaveOutcome::NeedsPath) => {
+                                        editor.dialog = Some(EditorDialog::SaveAs(
+                                            SaveAsState::new(match dialog {
+                                                EditorDialog::Quit => SaveAfterAction::Quit,
+                                                EditorDialog::ReturnHome => {
+                                                    SaveAfterAction::ReturnHome
+                                                }
+                                                EditorDialog::SaveAs(_) => SaveAfterAction::Stay,
+                                            }),
+                                        ));
+                                        next_status = Some(String::from("save as"));
+                                    }
+                                    Err(error) => next_status = Some(error.to_string()),
                                 }
-                                Err(error) => next_status = Some(error.to_string()),
                             }
+                            _ => {}
                         }
-                        _ => {}
                     }
                 } else {
                     if keybindings.editor.quit.matches(key) {
@@ -406,7 +444,15 @@ impl App {
                             KeyCode::PageDown => editor.buffer.page_down(editor.viewport_height),
                             _ if keybindings.editor.save.matches(key) => {
                                 match Self::save_editor(editor) {
-                                    Ok(()) => next_status = Some(String::from("saved")),
+                                    Ok(SaveOutcome::Saved) => {
+                                        next_status = Some(String::from("saved"))
+                                    }
+                                    Ok(SaveOutcome::NeedsPath) => {
+                                        editor.dialog = Some(EditorDialog::SaveAs(
+                                            SaveAsState::new(SaveAfterAction::Stay),
+                                        ));
+                                        next_status = Some(String::from("save as"));
+                                    }
                                     Err(error) => next_status = Some(error.to_string()),
                                 }
                             }
@@ -471,7 +517,15 @@ impl App {
                             }
                             _ if keybindings.editor.save.matches(key) => {
                                 match Self::save_editor(editor) {
-                                    Ok(()) => next_status = Some(String::from("saved")),
+                                    Ok(SaveOutcome::Saved) => {
+                                        next_status = Some(String::from("saved"))
+                                    }
+                                    Ok(SaveOutcome::NeedsPath) => {
+                                        editor.dialog = Some(EditorDialog::SaveAs(
+                                            SaveAsState::new(SaveAfterAction::Stay),
+                                        ));
+                                        next_status = Some(String::from("save as"));
+                                    }
                                     Err(error) => next_status = Some(error.to_string()),
                                 }
                             }
@@ -803,7 +857,7 @@ impl App {
                     sidebar_focused: editor.sidebar.is_open()
                         && editor.focus == EditorFocus::Sidebar,
                     sidebar_root: editor.sidebar.root_display(),
-                    dialog: editor.dialog.map(|dialog| match dialog {
+                    dialog: editor.dialog.as_ref().map(|dialog| match dialog {
                         EditorDialog::Quit => DialogView {
                             title: String::from(" Unsaved Changes "),
                             lines: vec![
@@ -818,6 +872,14 @@ impl App {
                                 String::from("Save before returning home?"),
                                 String::from("Enter/y: discard   ctrl+s: save and return"),
                                 String::from("Esc or n: cancel"),
+                            ],
+                        },
+                        EditorDialog::SaveAs(state) => DialogView {
+                            title: String::from(" Save As "),
+                            lines: vec![
+                                String::from("Enter a path and press Enter or Ctrl+S"),
+                                format!("path: {}", state.path),
+                                String::from("Esc cancels"),
                             ],
                         },
                     }),
@@ -971,14 +1033,64 @@ impl App {
         self.should_quit = true;
     }
 
-    fn save_editor(editor: &mut EditorState) -> Result<()> {
+    fn save_editor(editor: &mut EditorState) -> Result<SaveOutcome> {
         let Some(path) = editor.file_path.as_deref() else {
-            return Err(anyhow!("save-as flow not implemented yet"));
+            return Ok(SaveOutcome::NeedsPath);
         };
 
         editor.buffer.save_to_path(path)?;
         editor.dialog = None;
-        Ok(())
+        Ok(SaveOutcome::Saved)
+    }
+
+    fn handle_save_as_input(editor: &mut EditorState, key: KeyEvent) -> SaveDialogOutcome {
+        let Some(EditorDialog::SaveAs(state)) = editor.dialog.as_mut() else {
+            return SaveDialogOutcome::None;
+        };
+
+        match key.code {
+            KeyCode::Esc => {
+                editor.dialog = None;
+                SaveDialogOutcome::Canceled
+            }
+            KeyCode::Enter => Self::save_editor_as(editor),
+            KeyCode::Backspace => {
+                state.path.pop();
+                SaveDialogOutcome::None
+            }
+            KeyCode::Char(ch) if is_insertable(key.modifiers) => {
+                state.path.push(ch);
+                SaveDialogOutcome::None
+            }
+            _ if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('s') => {
+                Self::save_editor_as(editor)
+            }
+            _ => SaveDialogOutcome::None,
+        }
+    }
+
+    fn save_editor_as(editor: &mut EditorState) -> SaveDialogOutcome {
+        let Some(EditorDialog::SaveAs(state)) = editor.dialog.take() else {
+            return SaveDialogOutcome::None;
+        };
+
+        let trimmed = state.path.trim();
+        if trimmed.is_empty() {
+            editor.dialog = Some(EditorDialog::SaveAs(state));
+            return SaveDialogOutcome::Error(anyhow!("path cannot be empty"));
+        }
+
+        let path = PathBuf::from(trimmed);
+        match editor.buffer.save_to_path(&path) {
+            Ok(()) => {
+                editor.file_path = Some(path);
+                SaveDialogOutcome::Saved(state.after_save)
+            }
+            Err(error) => {
+                editor.dialog = Some(EditorDialog::SaveAs(state));
+                SaveDialogOutcome::Error(error)
+            }
+        }
     }
 
     fn apply_edit<F>(editor: &mut EditorState, edit: F)
@@ -1218,10 +1330,47 @@ enum ConfigExit {
     Close,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum EditorDialog {
     Quit,
     ReturnHome,
+    SaveAs(SaveAsState),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SaveAfterAction {
+    Stay,
+    Quit,
+    ReturnHome,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SaveAsState {
+    path: String,
+    after_save: SaveAfterAction,
+}
+
+impl SaveAsState {
+    fn new(after_save: SaveAfterAction) -> Self {
+        Self {
+            path: String::from(DEFAULT_SAVE_AS_PATH),
+            after_save,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SaveOutcome {
+    Saved,
+    NeedsPath,
+}
+
+#[derive(Debug)]
+enum SaveDialogOutcome {
+    None,
+    Saved(SaveAfterAction),
+    Canceled,
+    Error(anyhow::Error),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1246,7 +1395,7 @@ impl Overlay {
         match self {
             Self::Editor(EditorMode::SourceHints) => vec![
                 "Arrows move   Home/End line start/end   Ctrl+Home/End doc start/end",
-                "Ctrl+S save   Ctrl+Z undo   Ctrl+R redo   Ctrl+E sidebar",
+                "Ctrl+S save or save-as   Ctrl+Z undo   Ctrl+R redo   Ctrl+E sidebar",
                 "Ctrl+P preview mode   Ctrl+, settings   Ctrl+W return home",
                 "When sidebar is open: Tab focus   Enter open file   Space/Right toggle dir",
                 "Ctrl+[ narrower   Ctrl+] wider",
@@ -1262,7 +1411,7 @@ impl Overlay {
             ],
             Self::Editor(EditorMode::Source) => vec![
                 "Arrows move   Home/End line start/end   Ctrl+Home/End doc start/end",
-                "Ctrl+S save   Ctrl+Z undo   Ctrl+R redo   Ctrl+E sidebar",
+                "Ctrl+S save or save-as   Ctrl+Z undo   Ctrl+R redo   Ctrl+E sidebar",
                 "Ctrl+P source+hints mode   Ctrl+, settings   Ctrl+W return home",
                 "When sidebar is open: Tab focus   Enter open file   Space/Right toggle dir",
                 "Ctrl+[ narrower   Ctrl+] wider",
@@ -1936,6 +2085,55 @@ mod tests {
         assert!(status.contains("Ln 2/2"));
         assert!(status.contains("Line 4 ch"));
         assert!(status.contains("Doc 9 ch"));
+    }
+
+    #[test]
+    fn ctrl_s_on_untitled_opens_save_as_dialog() {
+        let mut app = editor_app();
+
+        app.handle_event(Event::Key(KeyEvent {
+            code: KeyCode::Char('s'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }));
+
+        let Screen::Editor(editor) = app.screen else {
+            panic!("editor screen");
+        };
+        assert!(matches!(editor.dialog, Some(EditorDialog::SaveAs(_))));
+    }
+
+    #[test]
+    fn save_as_writes_untitled_buffer_to_path() {
+        let root = temp_dir("save-as");
+        fs::create_dir_all(&root).expect("mkdir");
+        let path = root.join("note.md");
+
+        let mut app = editor_app();
+        let Screen::Editor(editor) = &mut app.screen else {
+            panic!("editor screen");
+        };
+        editor.buffer = Buffer::from_text("hello");
+        editor.dialog = Some(EditorDialog::SaveAs(SaveAsState {
+            path: path.display().to_string(),
+            after_save: SaveAfterAction::Stay,
+        }));
+
+        app.handle_event(Event::Key(KeyEvent {
+            code: KeyCode::Enter,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }));
+
+        let Screen::Editor(editor) = app.screen else {
+            panic!("editor screen");
+        };
+        assert_eq!(editor.file_path.as_deref(), Some(path.as_path()));
+        assert_eq!(fs::read_to_string(&path).expect("saved file"), "hello");
+
+        fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]
