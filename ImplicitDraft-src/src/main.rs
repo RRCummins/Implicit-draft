@@ -20,13 +20,13 @@ mod welcome;
 use std::ffi::OsStr;
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::Parser;
 
 use crate::{
     app::{App, StartupTarget},
     config::{AppConfig, RuntimeConfig},
-    export::PrintMode,
+    export::{ExportFormat, PrintMode},
 };
 
 #[derive(Debug, Parser)]
@@ -44,6 +44,10 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = PrintMode::Auto)]
     mode: PrintMode,
 
+    /// Export the file to a shareable format instead of opening the TUI.
+    #[arg(long, value_enum)]
+    export: Option<ExportFormat>,
+
     /// Override the theme used by --print.
     #[arg(long)]
     theme: Option<String>,
@@ -52,12 +56,20 @@ struct Cli {
     #[arg(long)]
     pager: bool,
 
+    /// Output path used by --export.
+    #[arg(long)]
+    output: Option<PathBuf>,
+
     /// File to open. The no-argument picker flow lands in a later phase.
     file: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if cli.print && cli.export.is_some() {
+        bail!("cannot combine --print with --export");
+    }
+
     let runtime = match AppConfig::load_runtime() {
         Ok(config) => config,
         Err(error) => {
@@ -70,9 +82,16 @@ fn main() -> Result<()> {
     };
 
     if cli.print {
-        let path = crate::export::validate_print_path(cli.file.as_deref())?;
+        let path = crate::export::validate_input_path("--print", cli.file.as_deref())?;
         let theme_name = cli.theme.as_deref().unwrap_or(&runtime.app.theme);
         return crate::export::print_path(path, cli.mode, theme_name, cli.pager);
+    }
+
+    if let Some(format) = cli.export {
+        let path = crate::export::validate_input_path("--export", cli.file.as_deref())?;
+        let theme_name = cli.theme.as_deref().unwrap_or(&runtime.app.theme);
+        crate::export::export_path(path, format, cli.mode, theme_name, cli.output.as_deref())?;
+        return Ok(());
     }
 
     let mut terminal = terminal::init()?;
@@ -151,7 +170,7 @@ mod tests {
 
     #[test]
     fn print_requires_a_file() {
-        let error = crate::export::validate_print_path(None).expect_err("missing path");
+        let error = crate::export::validate_input_path("--print", None).expect_err("missing path");
         assert!(error.to_string().contains("--print requires a file path"));
     }
 
@@ -160,6 +179,21 @@ mod tests {
         let cli = Cli::parse_from(["implicit", "--print", "--pager", "notes.md"]);
         assert!(cli.print);
         assert!(cli.pager);
+        assert_eq!(cli.file, Some(PathBuf::from("notes.md")));
+    }
+
+    #[test]
+    fn export_flag_parses_output_path() {
+        let cli = Cli::parse_from([
+            "implicit",
+            "--export",
+            "html",
+            "--output",
+            "notes.html",
+            "notes.md",
+        ]);
+        assert_eq!(cli.export, Some(ExportFormat::Html));
+        assert_eq!(cli.output, Some(PathBuf::from("notes.html")));
         assert_eq!(cli.file, Some(PathBuf::from("notes.md")));
     }
 }
