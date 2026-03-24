@@ -52,6 +52,13 @@ pub enum SidebarAction {
     OpenFile(PathBuf),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SidebarSelection {
+    pub path: PathBuf,
+    pub name: String,
+    pub is_dir: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SidebarCreateKind {
     File,
@@ -282,6 +289,15 @@ impl SidebarState {
         }
     }
 
+    pub fn selected_entry(&self) -> Option<SidebarSelection> {
+        let entry = self.entries.get(self.selected)?;
+        Some(SidebarSelection {
+            path: entry.path.clone(),
+            name: entry.name(),
+            is_dir: entry.is_dir,
+        })
+    }
+
     pub fn create_entry(&mut self, kind: SidebarCreateKind, name: &str) -> Result<PathBuf> {
         let trimmed = name.trim();
         if trimmed.is_empty() {
@@ -308,6 +324,70 @@ impl SidebarState {
         Ok(path)
     }
 
+    pub fn rename_selected(&mut self, name: &str) -> Result<(PathBuf, PathBuf)> {
+        let Some(entry) = self.entries.get(self.selected).cloned() else {
+            anyhow::bail!("nothing selected");
+        };
+        if entry.path == self.root {
+            anyhow::bail!("cannot rename sidebar root");
+        }
+
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!("name cannot be empty");
+        }
+        if trimmed.contains(std::path::MAIN_SEPARATOR) {
+            anyhow::bail!("name must not contain path separators");
+        }
+
+        let parent = entry
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.root.clone());
+        let next_path = parent.join(trimmed);
+        if next_path == entry.path {
+            return Ok((entry.path.clone(), next_path));
+        }
+        if next_path.exists() {
+            anyhow::bail!("{} already exists", next_path.display());
+        }
+
+        fs::rename(&entry.path, &next_path).with_context(|| {
+            format!(
+                "failed to rename {} to {}",
+                entry.path.display(),
+                next_path.display()
+            )
+        })?;
+
+        self.replace_expanded_path(&entry.path, &next_path);
+        self.refresh()?;
+        self.select_path(&next_path);
+        Ok((entry.path, next_path))
+    }
+
+    pub fn delete_selected(&mut self) -> Result<PathBuf> {
+        let Some(entry) = self.entries.get(self.selected).cloned() else {
+            anyhow::bail!("nothing selected");
+        };
+        if entry.path == self.root {
+            anyhow::bail!("cannot delete sidebar root");
+        }
+
+        if entry.is_dir {
+            fs::remove_dir_all(&entry.path)
+                .with_context(|| format!("failed to delete {}", entry.path.display()))?;
+        } else {
+            fs::remove_file(&entry.path)
+                .with_context(|| format!("failed to delete {}", entry.path.display()))?;
+        }
+
+        self.expanded.retain(|path| !path.starts_with(&entry.path));
+        self.refresh()?;
+        Ok(entry.path)
+    }
+
     pub fn root_display(&self) -> String {
         self.root.display().to_string()
     }
@@ -321,6 +401,20 @@ impl SidebarState {
     fn selected_path(&self) -> Option<&PathBuf> {
         self.entries.get(self.selected).map(|entry| &entry.path)
     }
+
+    fn replace_expanded_path(&mut self, old_path: &Path, new_path: &Path) {
+        let mut next = BTreeSet::new();
+        for path in &self.expanded {
+            if path == old_path {
+                next.insert(new_path.to_path_buf());
+            } else if let Ok(suffix) = path.strip_prefix(old_path) {
+                next.insert(new_path.join(suffix));
+            } else {
+                next.insert(path.clone());
+            }
+        }
+        self.expanded = next;
+    }
 }
 
 impl SidebarEntry {
@@ -332,6 +426,14 @@ impl SidebarEntry {
             "  "
         };
         format!("{indent}{prefix}{}", self.label)
+    }
+
+    fn name(&self) -> String {
+        if self.is_dir {
+            self.label.trim_end_matches('/').to_owned()
+        } else {
+            self.label.clone()
+        }
     }
 }
 
@@ -661,6 +763,40 @@ mod tests {
 
         assert_eq!(created, root.join("docs/assets"));
         assert!(created.is_dir());
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn renames_selected_file() {
+        let root = temp_dir("rename-file");
+        fs::create_dir_all(&root).expect("mkdir");
+        fs::write(root.join("note.md"), "body").expect("file");
+
+        let mut sidebar = SidebarState::new(root.clone()).expect("sidebar");
+        sidebar.select_path(&root.join("note.md"));
+        let (from, to) = sidebar.rename_selected("draft.md").expect("rename");
+
+        assert_eq!(from, root.join("note.md"));
+        assert_eq!(to, root.join("draft.md"));
+        assert!(to.exists());
+        assert!(!from.exists());
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn deletes_selected_directory() {
+        let root = temp_dir("delete-dir");
+        fs::create_dir_all(root.join("docs/assets")).expect("mkdir");
+        fs::write(root.join("docs/assets/note.md"), "body").expect("file");
+
+        let mut sidebar = SidebarState::new(root.clone()).expect("sidebar");
+        sidebar.select_path(&root.join("docs"));
+        let deleted = sidebar.delete_selected().expect("delete");
+
+        assert_eq!(deleted, root.join("docs"));
+        assert!(!deleted.exists());
 
         fs::remove_dir_all(root).expect("cleanup");
     }

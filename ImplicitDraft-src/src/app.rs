@@ -15,7 +15,7 @@ use crate::{
     preview, recents, render,
     session::SessionState,
     settings::{ConfigPane, ConfigState},
-    sidebar::{SidebarAction, SidebarCreateKind, SidebarRow, SidebarState},
+    sidebar::{SidebarAction, SidebarCreateKind, SidebarRow, SidebarSelection, SidebarState},
     theme::Theme,
     welcome::{BRAILLE_LOGO, SHORTCUTS, WelcomeState},
 };
@@ -31,7 +31,7 @@ const HOME_HELP: &str = "o open | n new | c settings | enter recent | / search |
 const SEARCH_HELP: &str = "type to filter | backspace delete | enter keep | esc clear";
 const CONFIG_HELP: &str = "tab switch pane | enter apply | ctrl+, close | s save | esc cancel";
 const SIDEBAR_HELP: &str =
-    "sidebar: arrows browse | enter open | space toggle | ctrl+[ ] resize | tab editor";
+    "sidebar: enter open | space toggle | n/e/d ops | ctrl+[ ] resize | tab editor";
 const DEFAULT_SAVE_AS_PATH: &str = "untitled.md";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -301,6 +301,48 @@ impl App {
                                 }
                             }
                         }
+                        EditorDialog::SidebarRename(_) => {
+                            match Self::handle_sidebar_rename_input(editor, key) {
+                                SidebarRenameOutcome::None => {}
+                                SidebarRenameOutcome::Renamed { from, to } => {
+                                    next_status = Some(format!(
+                                        "renamed {} -> {}",
+                                        from.display(),
+                                        to.display()
+                                    ));
+                                }
+                                SidebarRenameOutcome::Canceled => {
+                                    next_status = Some(String::from(SIDEBAR_HELP));
+                                }
+                                SidebarRenameOutcome::Error(error) => {
+                                    next_status = Some(error.to_string());
+                                }
+                            }
+                        }
+                        EditorDialog::SidebarDelete(_) => {
+                            match Self::handle_sidebar_delete_input(editor, key) {
+                                SidebarDeleteOutcome::None => {}
+                                SidebarDeleteOutcome::Deleted {
+                                    path,
+                                    detached_open_buffer,
+                                } => {
+                                    next_status = Some(if detached_open_buffer {
+                                        format!(
+                                            "deleted {} (open buffer kept as untitled)",
+                                            path.display()
+                                        )
+                                    } else {
+                                        format!("deleted {}", path.display())
+                                    });
+                                }
+                                SidebarDeleteOutcome::Canceled => {
+                                    next_status = Some(String::from(SIDEBAR_HELP));
+                                }
+                                SidebarDeleteOutcome::Error(error) => {
+                                    next_status = Some(error.to_string());
+                                }
+                            }
+                        }
                         EditorDialog::Quit | EditorDialog::ReturnHome => match key.code {
                             KeyCode::Enter | KeyCode::Char('y') => match dialog {
                                 EditorDialog::Quit => should_quit_now = true,
@@ -494,6 +536,32 @@ impl App {
                                         editor.sidebar.creation_root(),
                                     )));
                                 next_status = Some(String::from("new folder"));
+                            }
+                            KeyCode::Char('e') if key.modifiers == KeyModifiers::NONE => {
+                                match editor.sidebar.selected_entry() {
+                                    Some(selection) => {
+                                        editor.dialog = Some(EditorDialog::SidebarRename(
+                                            SidebarRenameState::new(selection),
+                                        ));
+                                        next_status = Some(String::from("rename"));
+                                    }
+                                    None => {
+                                        next_status = Some(String::from("nothing selected"));
+                                    }
+                                }
+                            }
+                            KeyCode::Char('d') if key.modifiers == KeyModifiers::NONE => {
+                                match editor.sidebar.selected_entry() {
+                                    Some(selection) => {
+                                        editor.dialog = Some(EditorDialog::SidebarDelete(
+                                            SidebarDeleteState::new(selection),
+                                        ));
+                                        next_status = Some(String::from("delete"));
+                                    }
+                                    None => {
+                                        next_status = Some(String::from("nothing selected"));
+                                    }
+                                }
                             }
                             _ => {}
                         }
@@ -1013,6 +1081,30 @@ impl App {
                                 String::from("Enter creates   Esc cancels"),
                             ],
                         },
+                        EditorDialog::SidebarRename(state) => DialogView {
+                            title: String::from(" Rename "),
+                            lines: vec![
+                                format!("target: {}", state.target.path.display()),
+                                format!("name: {}", state.name),
+                                String::from("Enter renames   Esc cancels"),
+                            ],
+                        },
+                        EditorDialog::SidebarDelete(state) => DialogView {
+                            title: String::from(if state.target.is_dir {
+                                " Delete Folder "
+                            } else {
+                                " Delete File "
+                            }),
+                            lines: vec![
+                                format!("target: {}", state.target.path.display()),
+                                String::from(if state.target.is_dir {
+                                    "Enter deletes folder and contents"
+                                } else {
+                                    "Enter deletes file"
+                                }),
+                                String::from("Esc cancels"),
+                            ],
+                        },
                     }),
                 }
             }
@@ -1299,6 +1391,69 @@ impl App {
         }
     }
 
+    fn handle_sidebar_rename_input(
+        editor: &mut EditorState,
+        key: KeyEvent,
+    ) -> SidebarRenameOutcome {
+        let Some(EditorDialog::SidebarRename(state)) = editor.dialog.as_mut() else {
+            return SidebarRenameOutcome::None;
+        };
+
+        match key.code {
+            KeyCode::Esc => {
+                editor.dialog = None;
+                SidebarRenameOutcome::Canceled
+            }
+            KeyCode::Enter => {
+                let (from, to) = match editor.sidebar.rename_selected(&state.name) {
+                    Ok(paths) => paths,
+                    Err(error) => return SidebarRenameOutcome::Error(error),
+                };
+                Self::remap_open_path_after_rename(editor, &from, &to);
+                editor.dialog = None;
+                SidebarRenameOutcome::Renamed { from, to }
+            }
+            KeyCode::Backspace => {
+                state.name.pop();
+                SidebarRenameOutcome::None
+            }
+            KeyCode::Char(ch) if is_insertable(key.modifiers) => {
+                state.name.push(ch);
+                SidebarRenameOutcome::None
+            }
+            _ => SidebarRenameOutcome::None,
+        }
+    }
+
+    fn handle_sidebar_delete_input(
+        editor: &mut EditorState,
+        key: KeyEvent,
+    ) -> SidebarDeleteOutcome {
+        let Some(EditorDialog::SidebarDelete(_)) = editor.dialog.as_ref() else {
+            return SidebarDeleteOutcome::None;
+        };
+
+        match key.code {
+            KeyCode::Esc => {
+                editor.dialog = None;
+                SidebarDeleteOutcome::Canceled
+            }
+            KeyCode::Enter => {
+                let deleted_path = match editor.sidebar.delete_selected() {
+                    Ok(path) => path,
+                    Err(error) => return SidebarDeleteOutcome::Error(error),
+                };
+                let detached_open_buffer = Self::detach_open_path_if_deleted(editor, &deleted_path);
+                editor.dialog = None;
+                SidebarDeleteOutcome::Deleted {
+                    path: deleted_path,
+                    detached_open_buffer,
+                }
+            }
+            _ => SidebarDeleteOutcome::None,
+        }
+    }
+
     fn handle_save_as_input(editor: &mut EditorState, key: KeyEvent) -> SaveDialogOutcome {
         let Some(EditorDialog::SaveAs(state)) = editor.dialog.as_mut() else {
             return SaveDialogOutcome::None;
@@ -1472,6 +1627,49 @@ impl App {
         self.theme = Theme::load_named(&self.config.theme).unwrap_or_else(|_| {
             Theme::load_named("dark").unwrap_or_else(|_| Theme::source_hints_default())
         });
+    }
+
+    fn remap_open_path_after_rename(
+        editor: &mut EditorState,
+        from: &std::path::Path,
+        to: &std::path::Path,
+    ) {
+        let Some(current_path) = editor.file_path.clone() else {
+            return;
+        };
+
+        if current_path == from {
+            editor.file_type = crate::filetype::detect(to);
+            editor.file_path = Some(to.to_path_buf());
+            editor.refresh_git_changes();
+            return;
+        }
+
+        let Ok(suffix) = current_path.strip_prefix(from) else {
+            return;
+        };
+
+        let next_path = to.join(suffix);
+        editor.file_type = crate::filetype::detect(&next_path);
+        editor.file_path = Some(next_path);
+        editor.refresh_git_changes();
+    }
+
+    fn detach_open_path_if_deleted(
+        editor: &mut EditorState,
+        deleted_path: &std::path::Path,
+    ) -> bool {
+        let Some(current_path) = editor.file_path.as_ref() else {
+            return false;
+        };
+
+        if current_path == deleted_path || current_path.starts_with(deleted_path) {
+            editor.file_path = None;
+            editor.refresh_git_changes();
+            return true;
+        }
+
+        false
     }
 
     fn handle_search_input(&mut self, key: KeyEvent) {
@@ -1738,6 +1936,8 @@ enum EditorDialog {
     Find(FindState),
     GotoLine(GotoLineState),
     SidebarCreate(SidebarCreateState),
+    SidebarRename(SidebarRenameState),
+    SidebarDelete(SidebarDeleteState),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1908,6 +2108,49 @@ enum SidebarCreateOutcome {
     Error(anyhow::Error),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SidebarRenameState {
+    target: SidebarSelection,
+    name: String,
+}
+
+impl SidebarRenameState {
+    fn new(target: SidebarSelection) -> Self {
+        let name = target.name.clone();
+        Self { target, name }
+    }
+}
+
+#[derive(Debug)]
+enum SidebarRenameOutcome {
+    None,
+    Renamed { from: PathBuf, to: PathBuf },
+    Canceled,
+    Error(anyhow::Error),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SidebarDeleteState {
+    target: SidebarSelection,
+}
+
+impl SidebarDeleteState {
+    fn new(target: SidebarSelection) -> Self {
+        Self { target }
+    }
+}
+
+#[derive(Debug)]
+enum SidebarDeleteOutcome {
+    None,
+    Deleted {
+        path: PathBuf,
+        detached_open_buffer: bool,
+    },
+    Canceled,
+    Error(anyhow::Error),
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Overlay {
     Editor(EditorMode),
@@ -1934,7 +2177,7 @@ impl Overlay {
                 "Alt+N next match   Alt+P previous match   Ctrl+Z undo   Ctrl+R redo",
                 "Ctrl+P preview mode   Ctrl+, settings   Ctrl+W return home",
                 "When sidebar is open: Tab focus   Enter open file   N file   Shift+N folder",
-                "Space/Right toggle dir",
+                "E rename   D delete   Space/Right toggle dir",
                 "Ctrl+[ narrower   Ctrl+] wider",
                 "Ctrl+Q quit app   ? or Esc close this dialog",
             ],
@@ -1944,7 +2187,7 @@ impl Overlay {
                 "Alt+N next match   Alt+P previous match",
                 "Ctrl+E sidebar   Ctrl+, settings   Ctrl+W return home",
                 "When sidebar is open: Tab focus   Enter open file   N file   Shift+N folder",
-                "Space/Right toggle dir",
+                "E rename   D delete   Space/Right toggle dir",
                 "Ctrl+[ narrower   Ctrl+] wider",
                 "Ctrl+S save   Ctrl+Q quit app",
                 "? or Esc close this dialog",
@@ -1955,7 +2198,7 @@ impl Overlay {
                 "Alt+N next match   Alt+P previous match   Ctrl+Z undo   Ctrl+R redo",
                 "Ctrl+P source+hints mode   Ctrl+, settings   Ctrl+W return home",
                 "When sidebar is open: Tab focus   Enter open file   N file   Shift+N folder",
-                "Space/Right toggle dir",
+                "E rename   D delete   Space/Right toggle dir",
                 "Ctrl+[ narrower   Ctrl+] wider",
                 "Ctrl+Q quit app   ? or Esc close this dialog",
             ],
@@ -2329,6 +2572,139 @@ mod tests {
 
         assert!(root.join("docs/assets").is_dir());
         assert!(app.status_message.contains("created"));
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn sidebar_e_renames_selected_file_and_updates_open_path() {
+        let root = temp_dir("sidebar-rename-file");
+        fs::create_dir_all(&root).expect("mkdir");
+        fs::write(root.join("a.md"), "a").expect("file");
+
+        let mut app = App::new(
+            StartupTarget::Open(root.join("a.md")),
+            AppConfig::default(),
+            KeyBindings::default(),
+        );
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('e'),
+            KeyModifiers::CONTROL,
+        )));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('e'),
+            KeyModifiers::NONE,
+        )));
+        for _ in 0..6 {
+            app.handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Backspace,
+                KeyModifiers::NONE,
+            )));
+        }
+        for ch in "renamed.md".chars() {
+            app.handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+
+        let Screen::Editor(editor) = app.screen else {
+            panic!("editor screen");
+        };
+        assert_eq!(editor.file_path, Some(root.join("renamed.md")));
+        assert!(root.join("renamed.md").exists());
+        assert!(!root.join("a.md").exists());
+        assert!(app.status_message.contains("renamed"));
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn sidebar_e_renames_selected_directory_and_updates_open_path() {
+        let root = temp_dir("sidebar-rename-dir");
+        fs::create_dir_all(root.join("docs/nested")).expect("mkdir");
+        fs::write(root.join("docs/nested/note.md"), "note").expect("file");
+
+        let mut app = editor_app();
+        let Screen::Editor(editor) = &mut app.screen else {
+            panic!("editor screen");
+        };
+        editor.file_path = Some(root.join("docs/nested/note.md"));
+        editor.file_type = FileType::Markdown;
+        editor.sidebar = SidebarState::new(root.clone()).expect("sidebar");
+        editor.sidebar.open().expect("open");
+        editor.focus = EditorFocus::Sidebar;
+        editor.sidebar.select_path(&root.join("docs"));
+        editor.sidebar.toggle_selected_dir().expect("expand docs");
+        editor.sidebar.select_path(&root.join("docs/nested"));
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('e'),
+            KeyModifiers::NONE,
+        )));
+        for _ in 0..6 {
+            app.handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Backspace,
+                KeyModifiers::NONE,
+            )));
+        }
+        for ch in "notes".chars() {
+            app.handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+
+        let Screen::Editor(editor) = app.screen else {
+            panic!("editor screen");
+        };
+        assert_eq!(editor.file_path, Some(root.join("docs/notes/note.md")));
+        assert!(root.join("docs/notes/note.md").exists());
+        assert!(!root.join("docs/nested").exists());
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn sidebar_d_deletes_selected_file_and_detaches_open_buffer() {
+        let root = temp_dir("sidebar-delete-file");
+        fs::create_dir_all(&root).expect("mkdir");
+        fs::write(root.join("a.md"), "a").expect("file");
+
+        let mut app = App::new(
+            StartupTarget::Open(root.join("a.md")),
+            AppConfig::default(),
+            KeyBindings::default(),
+        );
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('e'),
+            KeyModifiers::CONTROL,
+        )));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('d'),
+            KeyModifiers::NONE,
+        )));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+
+        let Screen::Editor(editor) = app.screen else {
+            panic!("editor screen");
+        };
+        assert_eq!(editor.file_path, None);
+        assert!(!root.join("a.md").exists());
+        assert!(app.status_message.contains("untitled"));
 
         fs::remove_dir_all(root).expect("cleanup");
     }
