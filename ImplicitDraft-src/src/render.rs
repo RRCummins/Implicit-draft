@@ -6,7 +6,7 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, DialogView, EditorSplitView, OverlayView, ViewModel},
+    app::{App, DialogView, EditorSplitView, OverlayView, SelectionRange, ViewModel},
     buffer::SearchMatch,
     gitdiff::LineChange,
     picker::PickerEntry,
@@ -38,6 +38,7 @@ struct EditorView {
     lines: Vec<Line<'static>>,
     search_matches: Vec<SearchMatch>,
     search_current: Option<usize>,
+    selection: Option<SelectionRange>,
     cursor: Option<(usize, usize)>,
     scroll: (usize, usize),
     sidebar_rows: Vec<SidebarRow>,
@@ -45,16 +46,20 @@ struct EditorView {
     sidebar_width: u16,
     sidebar_focused: bool,
     sidebar_root: String,
-    split: Option<EditorSplitView>,
+    split: Option<Box<EditorSplitView>>,
     dialog: Option<DialogView>,
 }
 
 struct EditorPanelView {
     title: String,
     lines: Vec<Line<'static>>,
+    focused: bool,
     line_numbers: bool,
     wrap: bool,
     git_change_markers: Option<Vec<Option<LineChange>>>,
+    search_matches: Vec<SearchMatch>,
+    search_current: Option<usize>,
+    selection: Option<SelectionRange>,
     cursor: Option<(usize, usize)>,
     scroll: (usize, usize),
 }
@@ -88,6 +93,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             lines,
             search_matches,
             search_current,
+            selection,
             cursor,
             scroll,
             sidebar_rows,
@@ -108,6 +114,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 lines,
                 search_matches,
                 search_current,
+                selection,
                 cursor,
                 scroll,
                 sidebar_rows,
@@ -226,17 +233,6 @@ fn fit_status_line(line: &str, width: usize) -> String {
 }
 
 fn draw_editor(frame: &mut Frame, area: Rect, editor: EditorView, theme: Theme) {
-    let mut lines = editor.lines;
-    highlight_search_matches(
-        &mut lines,
-        &editor.search_matches,
-        editor.search_current,
-        theme,
-    );
-    if let Some((_, row)) = editor.cursor.filter(|(_, row)| *row < lines.len()) {
-        lines[row].style = lines[row].style.patch(theme.cursor);
-    }
-
     let editor_area = if editor.sidebar_width > 0 {
         let [sidebar_area, editor_area] =
             Layout::horizontal([Constraint::Length(editor.sidebar_width), Constraint::Min(1)])
@@ -266,10 +262,14 @@ fn draw_editor(frame: &mut Frame, area: Rect, editor: EditorView, theme: Theme) 
             primary_area,
             EditorPanelView {
                 title: editor.title,
-                lines,
+                lines: editor.lines,
+                focused: !split.focused,
                 line_numbers: editor.line_numbers,
                 wrap: editor.wrap,
                 git_change_markers: Some(editor.git_change_markers),
+                search_matches: editor.search_matches,
+                search_current: editor.search_current,
+                selection: editor.selection,
                 cursor: editor.cursor,
                 scroll: editor.scroll,
             },
@@ -281,11 +281,15 @@ fn draw_editor(frame: &mut Frame, area: Rect, editor: EditorView, theme: Theme) 
             EditorPanelView {
                 title: split.title,
                 lines: split.lines,
-                line_numbers: false,
+                focused: split.focused,
+                line_numbers: split.line_numbers,
                 wrap: split.wrap,
-                git_change_markers: None,
-                cursor: None,
-                scroll: editor.scroll,
+                git_change_markers: split.git_change_markers,
+                search_matches: split.search_matches,
+                search_current: split.search_current,
+                selection: split.selection,
+                cursor: split.cursor,
+                scroll: split.scroll,
             },
             theme,
         );
@@ -295,10 +299,14 @@ fn draw_editor(frame: &mut Frame, area: Rect, editor: EditorView, theme: Theme) 
             editor_area,
             EditorPanelView {
                 title: editor.title,
-                lines,
+                lines: editor.lines,
+                focused: true,
                 line_numbers: editor.line_numbers,
                 wrap: editor.wrap,
                 git_change_markers: Some(editor.git_change_markers),
+                search_matches: editor.search_matches,
+                search_current: editor.search_current,
+                selection: editor.selection,
                 cursor: editor.cursor,
                 scroll: editor.scroll,
             },
@@ -326,10 +334,27 @@ fn draw_editor(frame: &mut Frame, area: Rect, editor: EditorView, theme: Theme) 
 }
 
 fn draw_editor_panel(frame: &mut Frame, area: Rect, panel: EditorPanelView, theme: Theme) {
+    let mut lines = panel.lines;
+    highlight_selection(&mut lines, panel.selection, theme);
+    highlight_search_matches(
+        &mut lines,
+        &panel.search_matches,
+        panel.search_current,
+        theme,
+    );
+    if let Some((_, row)) = panel.cursor.filter(|(_, row)| *row < lines.len()) {
+        lines[row].style = lines[row].style.patch(theme.cursor);
+    }
+
     let [title_area, editor_area] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
+    let title_style = if panel.focused {
+        theme.selection.patch(theme.ui_chrome)
+    } else {
+        theme.ui_chrome
+    };
     frame.render_widget(
-        Paragraph::new(Line::styled(format!(" {} ", panel.title), theme.ui_chrome))
+        Paragraph::new(Line::styled(format!(" {} ", panel.title), title_style))
             .style(theme.background),
         title_area,
     );
@@ -342,7 +367,7 @@ fn draw_editor_panel(frame: &mut Frame, area: Rect, panel: EditorPanelView, them
         let [gutter_area, editor_area] =
             Layout::horizontal([Constraint::Length(2), Constraint::Min(1)]).areas(editor_area);
 
-        let gutter_lines = (0..panel.lines.len())
+        let gutter_lines = (0..lines.len())
             .map(|row| {
                 match panel
                     .git_change_markers
@@ -368,12 +393,12 @@ fn draw_editor_panel(frame: &mut Frame, area: Rect, panel: EditorPanelView, them
     };
 
     let editor_area = if panel.line_numbers {
-        let gutter_width = line_number_gutter_width(panel.lines.len());
+        let gutter_width = line_number_gutter_width(lines.len());
         let [gutter_area, editor_area] =
             Layout::horizontal([Constraint::Length(gutter_width), Constraint::Min(1)])
                 .areas(editor_area);
 
-        let gutter_lines = (1..=panel.lines.len())
+        let gutter_lines = (1..=lines.len())
             .map(|number| {
                 Line::styled(
                     format!("{number:>width$} ", width = gutter_width as usize - 1),
@@ -390,7 +415,7 @@ fn draw_editor_panel(frame: &mut Frame, area: Rect, panel: EditorPanelView, them
         editor_area
     };
 
-    let editor_widget = Paragraph::new(panel.lines)
+    let editor_widget = Paragraph::new(lines)
         .block(Block::default())
         .style(theme.background);
     let editor_widget = if panel.wrap {
@@ -807,6 +832,32 @@ fn highlight_search_matches(
     }
 }
 
+fn highlight_selection(
+    lines: &mut [Line<'static>],
+    selection: Option<SelectionRange>,
+    theme: Theme,
+) {
+    let Some(selection) = selection else {
+        return;
+    };
+
+    let ((start_row, start_col), (end_row, end_col)) = (selection.start, selection.end);
+    for row in start_row..=end_row {
+        let Some(line) = lines.get_mut(row) else {
+            continue;
+        };
+
+        let start = if row == start_row { start_col } else { 0 };
+        let end = if row == end_row {
+            end_col
+        } else {
+            line.width()
+        };
+        let len = end.saturating_sub(start);
+        style_line_range(line, start, len.max(1), theme.selection);
+    }
+}
+
 fn style_line_range(
     line: &mut Line<'static>,
     start: usize,
@@ -924,6 +975,29 @@ mod tests {
                 .any(|span| span.content.as_ref() == "beta"
                     && span.style
                         == Style::default().patch(theme.selection.patch(theme.ui_chrome)))
+        );
+    }
+
+    #[test]
+    fn selection_highlight_styles_selected_range() {
+        let theme = Theme::source_hints_default();
+        let mut lines = vec![Line::from(String::from("alpha beta"))];
+
+        highlight_selection(
+            &mut lines,
+            Some(SelectionRange {
+                start: (0, 6),
+                end: (0, 10),
+            }),
+            theme,
+        );
+
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .any(|span| span.content.as_ref() == "beta"
+                    && span.style == Style::default().patch(theme.selection))
         );
     }
 }

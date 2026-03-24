@@ -5,7 +5,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use ratatui::DefaultTerminal;
 
 use crate::{
-    buffer::{Buffer, SearchMatch},
+    buffer::{Buffer, BufferViewState, SearchMatch},
     code,
     config::{AppConfig, DefaultMode, KeyBindings},
     filetype::FileType,
@@ -22,11 +22,9 @@ use crate::{
 
 const FRAME_POLL_INTERVAL: Duration = Duration::from_millis(80);
 const EDITOR_HELP: &str =
-    "ctrl+f find | ctrl+\\ split | alt+n next | alt+p prev | ctrl+g goto | ctrl+s save";
-const PREVIEW_HELP: &str =
-    "ctrl+f find | ctrl+\\ split | alt+n next | alt+p prev | ctrl+g goto | ctrl+p source";
-const SOURCE_HELP: &str =
-    "ctrl+f find | ctrl+\\ split | alt+n next | alt+p prev | ctrl+g goto | ctrl+p source+hints";
+    "ctrl+f find | ctrl+\\ split | tab pane | ctrl+. swap | alt+n next | ctrl+g goto | ctrl+s save";
+const PREVIEW_HELP: &str = "ctrl+f find | ctrl+\\ split | tab pane | ctrl+. swap | alt+n next | ctrl+g goto | ctrl+p source";
+const SOURCE_HELP: &str = "ctrl+f find | ctrl+\\ split | tab pane | ctrl+. swap | alt+n next | ctrl+g goto | ctrl+p source+hints";
 const PICKER_HELP: &str =
     "enter/right open | left/backspace parent | a notes/code filter | esc home";
 const HOME_HELP: &str = "o open | n new | c settings | enter recent | / search | q quit";
@@ -217,7 +215,7 @@ impl App {
                 KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?') => {
                     self.overlay = None;
                     self.status_message = match self.screen {
-                        Screen::Editor(ref editor) => String::from(editor.mode.help()),
+                        Screen::Editor(ref editor) => String::from(editor.focus_help()),
                         Screen::Picker(_) => String::from(PICKER_HELP),
                         Screen::Config(_) => String::from(CONFIG_HELP),
                         Screen::Welcome(_) => String::from(HOME_HELP),
@@ -272,7 +270,7 @@ impl App {
                                 next_status = Some(String::from("no matches"));
                             }
                             FindDialogOutcome::Closed => {
-                                next_status = Some(String::from(editor.mode.help()));
+                                next_status = Some(String::from(editor.focus_help()));
                             }
                         },
                         EditorDialog::GotoLine(_) => {
@@ -282,7 +280,7 @@ impl App {
                                     next_status = Some(format!("line {line}"));
                                 }
                                 GotoLineOutcome::Canceled => {
-                                    next_status = Some(String::from(editor.mode.help()));
+                                    next_status = Some(String::from(editor.focus_help()));
                                 }
                                 GotoLineOutcome::Error(error) => {
                                     next_status = Some(error.to_string());
@@ -404,7 +402,7 @@ impl App {
                         self.overlay = Some(Overlay::Editor(editor.mode));
                         next_status = Some(String::from("controls"));
                     } else if keybindings.editor.find.matches(key) {
-                        editor.dialog = Some(EditorDialog::Find(FindState::for_reopen(editor)));
+                        editor.dialog = Some(EditorDialog::Find(editor.reopen_find_state()));
                         next_status = Some(String::from("find"));
                     } else if keybindings.editor.find_next.matches(key) {
                         next_status = Some(Self::step_editor_search(editor, true));
@@ -426,12 +424,14 @@ impl App {
                     } else if keybindings.editor.toggle_sidebar.matches(key) {
                         if editor.sidebar.is_open() {
                             editor.sidebar.close();
-                            editor.focus = EditorFocus::Editor;
+                            editor.focus = EditorFocus::Primary;
+                            editor.load_focus_viewport();
                             next_status = Some(String::from("sidebar closed"));
                             persist_sidebar = true;
                         } else {
                             match editor.sidebar.open() {
                                 Ok(()) => {
+                                    editor.save_focused_viewport();
                                     editor.focus = EditorFocus::Sidebar;
                                     next_status = Some(String::from(SIDEBAR_HELP));
                                     persist_sidebar = true;
@@ -452,36 +452,34 @@ impl App {
                         next_status = Some(String::from("sidebar wider"));
                         persist_sidebar = true;
                     } else if keybindings.editor.cycle_mode.matches(key) {
-                        editor.mode = editor.mode.cycle();
-                        next_status = Some(String::from(editor.mode.help()));
+                        editor.cycle_active_mode();
+                        next_status = Some(String::from(editor.focus_help()));
                     } else if keybindings.editor.toggle_split.matches(key) {
-                        editor.split_view = !editor.split_view;
+                        editor.toggle_split();
                         next_status = Some(String::from(if editor.split_view {
                             "split view"
                         } else {
-                            editor.mode.help()
+                            editor.focus = if editor.focus == EditorFocus::Sidebar {
+                                EditorFocus::Sidebar
+                            } else {
+                                EditorFocus::Primary
+                            };
+                            editor.focus_help()
                         }));
-                    } else if editor.split_view
-                        && (keybindings.editor.swap_split.matches(key)
-                            || (!editor.sidebar.is_open() && key.code == KeyCode::Tab))
-                    {
-                        editor.mode = editor.companion_mode();
+                    } else if editor.split_view && keybindings.editor.swap_split.matches(key) {
+                        editor.swap_split();
                         next_status = Some(String::from("split swapped"));
-                    } else if editor.sidebar.is_open() && key.code == KeyCode::Tab {
-                        editor.focus = match editor.focus {
-                            EditorFocus::Editor => EditorFocus::Sidebar,
-                            EditorFocus::Sidebar => EditorFocus::Editor,
-                        };
-                        next_status = Some(String::from(if editor.focus == EditorFocus::Sidebar {
-                            SIDEBAR_HELP
-                        } else {
-                            editor.mode.help()
-                        }));
+                    } else if (editor.split_view || editor.sidebar.is_open())
+                        && key.code == KeyCode::Tab
+                    {
+                        editor.cycle_focus();
+                        next_status = Some(String::from(editor.focus_help()));
                     } else if editor.focus == EditorFocus::Sidebar {
                         match key.code {
                             KeyCode::Esc => {
-                                editor.focus = EditorFocus::Editor;
-                                next_status = Some(String::from(editor.mode.help()));
+                                editor.focus = EditorFocus::Primary;
+                                editor.load_focus_viewport();
+                                next_status = Some(String::from(editor.focus_help()));
                             }
                             KeyCode::Up => {
                                 editor.sidebar.move_up();
@@ -580,116 +578,100 @@ impl App {
                             }
                             _ => {}
                         }
-                    } else if editor.mode == EditorMode::Preview {
-                        match key.code {
-                            KeyCode::Left => editor.buffer.move_left(),
-                            KeyCode::Right => editor.buffer.move_right(),
-                            KeyCode::Up => editor.buffer.move_up(),
-                            KeyCode::Down => editor.buffer.move_down(),
-                            KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                editor.buffer.move_doc_start()
-                            }
-                            KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                editor.buffer.move_doc_end()
-                            }
-                            KeyCode::Home => editor.buffer.move_home(),
-                            KeyCode::End => editor.buffer.move_end(),
-                            KeyCode::PageUp => editor.buffer.page_up(editor.viewport_height),
-                            KeyCode::PageDown => editor.buffer.page_down(editor.viewport_height),
-                            _ if keybindings.editor.save.matches(key) => {
-                                match Self::save_editor(editor) {
-                                    Ok(SaveOutcome::Saved) => {
-                                        next_status = Some(String::from("saved"))
+                    } else if editor.active_mode() == EditorMode::Preview {
+                        if Self::handle_editor_motion(editor, key) {
+                            next_status = Some(String::from(editor.focus_help()));
+                        } else {
+                            match key.code {
+                                _ if keybindings.editor.save.matches(key) => {
+                                    match Self::save_editor(editor) {
+                                        Ok(SaveOutcome::Saved) => {
+                                            next_status = Some(String::from("saved"))
+                                        }
+                                        Ok(SaveOutcome::NeedsPath) => {
+                                            editor.dialog = Some(EditorDialog::SaveAs(
+                                                SaveAsState::new(SaveAfterAction::Stay),
+                                            ));
+                                            next_status = Some(String::from("save as"));
+                                        }
+                                        Err(error) => next_status = Some(error.to_string()),
                                     }
-                                    Ok(SaveOutcome::NeedsPath) => {
-                                        editor.dialog = Some(EditorDialog::SaveAs(
-                                            SaveAsState::new(SaveAfterAction::Stay),
-                                        ));
-                                        next_status = Some(String::from("save as"));
-                                    }
-                                    Err(error) => next_status = Some(error.to_string()),
                                 }
+                                KeyCode::Backspace
+                                | KeyCode::Delete
+                                | KeyCode::Enter
+                                | KeyCode::Tab
+                                | KeyCode::Char(_)
+                                    if is_insertable(key.modifiers)
+                                        || key.modifiers.contains(KeyModifiers::CONTROL) =>
+                                {
+                                    next_status = Some(String::from(editor.focus_help()));
+                                }
+                                _ => {}
                             }
-                            KeyCode::Backspace
-                            | KeyCode::Delete
-                            | KeyCode::Enter
-                            | KeyCode::Tab
-                            | KeyCode::Char(_)
-                                if is_insertable(key.modifiers)
-                                    || key.modifiers.contains(KeyModifiers::CONTROL) =>
-                            {
-                                next_status = Some(String::from(PREVIEW_HELP));
-                            }
-                            _ => {}
                         }
                     } else {
-                        match key.code {
-                            KeyCode::Left => editor.buffer.move_left(),
-                            KeyCode::Right => editor.buffer.move_right(),
-                            KeyCode::Up => editor.buffer.move_up(),
-                            KeyCode::Down => editor.buffer.move_down(),
-                            KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                editor.buffer.move_doc_start()
-                            }
-                            KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                editor.buffer.move_doc_end()
-                            }
-                            KeyCode::Home => editor.buffer.move_home(),
-                            KeyCode::End => editor.buffer.move_end(),
-                            KeyCode::PageUp => editor.buffer.page_up(editor.viewport_height),
-                            KeyCode::PageDown => editor.buffer.page_down(editor.viewport_height),
-                            KeyCode::Backspace => {
-                                Self::apply_edit(editor, Buffer::backspace);
-                                next_status = Some(String::from("editing"));
-                            }
-                            KeyCode::Delete => {
-                                Self::apply_edit(editor, Buffer::delete_forward);
-                                next_status = Some(String::from("editing"));
-                            }
-                            KeyCode::Enter => {
-                                Self::apply_edit(editor, Buffer::insert_newline);
-                                next_status = Some(String::from("editing"));
-                            }
-                            KeyCode::Tab => {
-                                let tab_width = self.config.tab_width();
-                                Self::apply_edit(editor, |buffer| buffer.insert_spaces(tab_width));
-                                next_status = Some(String::from("editing"));
-                            }
-                            _ if keybindings.editor.undo.matches(key) => {
-                                next_status = Some(if editor.buffer.undo() {
-                                    editor.refresh_git_changes();
-                                    String::from("undo")
-                                } else {
-                                    String::from("nothing to undo")
-                                });
-                            }
-                            _ if keybindings.editor.redo.matches(key) => {
-                                next_status = Some(if editor.buffer.redo() {
-                                    editor.refresh_git_changes();
-                                    String::from("redo")
-                                } else {
-                                    String::from("nothing to redo")
-                                });
-                            }
-                            _ if keybindings.editor.save.matches(key) => {
-                                match Self::save_editor(editor) {
-                                    Ok(SaveOutcome::Saved) => {
-                                        next_status = Some(String::from("saved"))
-                                    }
-                                    Ok(SaveOutcome::NeedsPath) => {
-                                        editor.dialog = Some(EditorDialog::SaveAs(
-                                            SaveAsState::new(SaveAfterAction::Stay),
-                                        ));
-                                        next_status = Some(String::from("save as"));
-                                    }
-                                    Err(error) => next_status = Some(error.to_string()),
+                        if Self::handle_editor_motion(editor, key) {
+                            next_status = Some(String::from("editing"));
+                        } else {
+                            match key.code {
+                                KeyCode::Backspace => {
+                                    Self::apply_edit(editor, Buffer::backspace);
+                                    next_status = Some(String::from("editing"));
                                 }
+                                KeyCode::Delete => {
+                                    Self::apply_edit(editor, Buffer::delete_forward);
+                                    next_status = Some(String::from("editing"));
+                                }
+                                KeyCode::Enter => {
+                                    Self::apply_edit(editor, Buffer::insert_newline);
+                                    next_status = Some(String::from("editing"));
+                                }
+                                KeyCode::Tab => {
+                                    let tab_width = self.config.tab_width();
+                                    Self::apply_edit(editor, |buffer| {
+                                        buffer.insert_spaces(tab_width)
+                                    });
+                                    next_status = Some(String::from("editing"));
+                                }
+                                _ if keybindings.editor.undo.matches(key) => {
+                                    next_status = Some(if editor.buffer.undo() {
+                                        editor.refresh_git_changes();
+                                        editor.clear_active_selection();
+                                        String::from("undo")
+                                    } else {
+                                        String::from("nothing to undo")
+                                    });
+                                }
+                                _ if keybindings.editor.redo.matches(key) => {
+                                    next_status = Some(if editor.buffer.redo() {
+                                        editor.refresh_git_changes();
+                                        editor.clear_active_selection();
+                                        String::from("redo")
+                                    } else {
+                                        String::from("nothing to redo")
+                                    });
+                                }
+                                _ if keybindings.editor.save.matches(key) => {
+                                    match Self::save_editor(editor) {
+                                        Ok(SaveOutcome::Saved) => {
+                                            next_status = Some(String::from("saved"))
+                                        }
+                                        Ok(SaveOutcome::NeedsPath) => {
+                                            editor.dialog = Some(EditorDialog::SaveAs(
+                                                SaveAsState::new(SaveAfterAction::Stay),
+                                            ));
+                                            next_status = Some(String::from("save as"));
+                                        }
+                                        Err(error) => next_status = Some(error.to_string()),
+                                    }
+                                }
+                                KeyCode::Char(ch) if is_insertable(key.modifiers) => {
+                                    Self::apply_edit(editor, |buffer| buffer.insert_char(ch));
+                                    next_status = Some(String::from("editing"));
+                                }
+                                _ => {}
                             }
-                            KeyCode::Char(ch) if is_insertable(key.modifiers) => {
-                                Self::apply_edit(editor, |buffer| buffer.insert_char(ch));
-                                next_status = Some(String::from("editing"));
-                            }
-                            _ => {}
                         }
                     }
                 }
@@ -921,14 +903,25 @@ impl App {
         match &mut self.screen {
             Screen::Editor(editor) => {
                 editor.viewport_height = height;
-                let editor_width = editor_panel_width(width, &editor.sidebar);
-                let content_width = editor_content_width(
-                    editor_width,
-                    editor.buffer.line_count(),
-                    editor_line_numbers_enabled(editor.mode, self.config.line_numbers),
-                    editor.git_change_markers.iter().any(Option::is_some),
-                );
-                editor.buffer.sync_viewport(height, content_width);
+                if editor.focus != EditorFocus::Sidebar {
+                    let editor_width = editor_panel_width(width, &editor.sidebar);
+                    let active_mode = editor.active_mode();
+                    let active_width = if editor.split_view {
+                        editor_width.saturating_div(2).max(1)
+                    } else {
+                        editor_width
+                    };
+                    let show_git_change_gutter = active_mode != EditorMode::Preview
+                        && editor.git_change_markers.iter().any(Option::is_some);
+                    let content_width = editor_content_width(
+                        active_width,
+                        editor.buffer.line_count(),
+                        editor_line_numbers_enabled(active_mode, self.config.line_numbers),
+                        show_git_change_gutter,
+                    );
+                    editor.buffer.sync_viewport(height, content_width);
+                    editor.save_focused_viewport();
+                }
                 if editor.sidebar.is_open() {
                     editor.sidebar.sync_viewport(height);
                 }
@@ -941,20 +934,26 @@ impl App {
     pub fn current_view(&self, list_height: usize, list_width: usize) -> ViewModel {
         match &self.screen {
             Screen::Editor(editor) => {
-                let line_numbers =
-                    editor_line_numbers_enabled(editor.mode, self.config.line_numbers);
-                let wrap = editor_wrap_enabled(editor.mode, self.config.wrap);
                 let editor_width = editor_panel_width(list_width, &editor.sidebar);
-                let show_git_change_gutter = editor.git_change_markers.iter().any(Option::is_some);
+                let split_width = if editor.split_view {
+                    editor_width.saturating_div(2).max(1)
+                } else {
+                    editor_width
+                };
+                let primary_mode = editor.primary_mode();
+                let primary_line_numbers =
+                    editor_line_numbers_enabled(primary_mode, self.config.line_numbers);
+                let primary_wrap = editor_wrap_enabled(primary_mode, self.config.wrap);
+                let primary_show_git_change_gutter = primary_mode != EditorMode::Preview
+                    && editor.git_change_markers.iter().any(Option::is_some);
                 let content_width = editor_content_width(
-                    editor_width,
+                    split_width,
                     editor.buffer.line_count(),
-                    line_numbers,
-                    show_git_change_gutter,
+                    primary_line_numbers,
+                    primary_show_git_change_gutter,
                 );
                 let split = editor.split_view.then(|| {
-                    let mode = editor.companion_mode();
-                    let split_width = editor_width.saturating_div(2).max(1);
+                    let mode = editor.split_mode();
                     EditorSplitView {
                         title: format!(
                             " {} [{}] ",
@@ -965,7 +964,32 @@ impl App {
                                 .unwrap_or_else(|| String::from("[untitled]")),
                             mode.label()
                         ),
+                        focused: editor.focus == EditorFocus::Secondary,
+                        line_numbers: editor_line_numbers_enabled(mode, self.config.line_numbers),
                         wrap: editor_wrap_enabled(mode, self.config.wrap),
+                        git_change_markers: (mode != EditorMode::Preview)
+                            .then(|| editor.git_change_markers.clone()),
+                        search_matches: editor
+                            .secondary_pane
+                            .search
+                            .as_ref()
+                            .map(|state| state.matches.clone())
+                            .unwrap_or_default(),
+                        search_current: editor
+                            .secondary_pane
+                            .search
+                            .as_ref()
+                            .and_then(|state| state.current_index),
+                        selection: editor.secondary_selection_range(),
+                        cursor: if editor.dialog.is_some()
+                            || mode == EditorMode::Preview
+                            || editor.focus != EditorFocus::Secondary
+                        {
+                            None
+                        } else {
+                            editor.buffer.cursor_screen_position()
+                        },
+                        scroll: editor.secondary_scroll(),
                         lines: self.render_editor_lines(editor, mode, split_width),
                     }
                 });
@@ -976,25 +1000,35 @@ impl App {
                         .as_deref()
                         .map(short_path)
                         .unwrap_or_else(|| String::from("[untitled]")),
-                    line_numbers,
-                    wrap,
-                    git_change_markers: editor.git_change_markers.clone(),
-                    lines: self.render_editor_lines(editor, editor.mode, content_width),
+                    line_numbers: primary_line_numbers,
+                    wrap: primary_wrap,
+                    git_change_markers: if primary_mode == EditorMode::Preview {
+                        Vec::new()
+                    } else {
+                        editor.git_change_markers.clone()
+                    },
+                    lines: self.render_editor_lines(editor, primary_mode, content_width),
                     search_matches: editor
+                        .primary_pane
                         .search
                         .as_ref()
                         .map(|state| state.matches.clone())
                         .unwrap_or_default(),
-                    search_current: editor.search.as_ref().and_then(|state| state.current_index),
+                    search_current: editor
+                        .primary_pane
+                        .search
+                        .as_ref()
+                        .and_then(|state| state.current_index),
+                    selection: editor.primary_selection_range(),
                     cursor: if editor.dialog.is_some()
-                        || editor.mode == EditorMode::Preview
-                        || editor.focus == EditorFocus::Sidebar
+                        || primary_mode == EditorMode::Preview
+                        || editor.focus != EditorFocus::Primary
                     {
                         None
                     } else {
                         editor.buffer.cursor_screen_position()
                     },
-                    scroll: editor.buffer.scroll_offset(),
+                    scroll: editor.primary_scroll(),
                     sidebar_rows: if editor.sidebar.is_open() {
                         editor.sidebar.visible_rows(list_height)
                     } else {
@@ -1013,7 +1047,7 @@ impl App {
                     sidebar_focused: editor.sidebar.is_open()
                         && editor.focus == EditorFocus::Sidebar,
                     sidebar_root: editor.sidebar.root_display(),
-                    split,
+                    split: split.map(Box::new),
                     dialog: editor.dialog.as_ref().map(|dialog| match dialog {
                         EditorDialog::Quit => DialogView {
                             title: String::from(" Unsaved Changes "),
@@ -1308,56 +1342,74 @@ impl App {
     }
 
     fn step_editor_search(editor: &mut EditorState, forward: bool) -> String {
-        let Some(search) = editor.search.as_mut() else {
+        let Some(mut search) = editor.active_search().cloned() else {
             return String::from("no active search");
         };
 
         match search.step(&mut editor.buffer, forward) {
-            FindDialogOutcome::Moved { current, total } => format!("find {current}/{total}"),
+            FindDialogOutcome::Moved { current, total } => {
+                editor.clear_active_selection();
+                editor.set_active_search(search);
+                format!("find {current}/{total}")
+            }
             FindDialogOutcome::NoMatches => String::from("no matches"),
             FindDialogOutcome::None | FindDialogOutcome::Closed => String::from("find"),
         }
     }
 
     fn handle_find_input(editor: &mut EditorState, key: KeyEvent) -> FindDialogOutcome {
-        let Some(EditorDialog::Find(state)) = editor.dialog.as_mut() else {
+        let Some(EditorDialog::Find(mut state)) = editor.dialog.take() else {
             return FindDialogOutcome::None;
         };
 
         match key.code {
             KeyCode::Esc => {
-                editor.search = Some(state.clone());
-                editor.dialog = None;
+                editor.set_active_search(state.clone());
                 FindDialogOutcome::Closed
             }
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 let outcome = state.step(&mut editor.buffer, false);
-                editor.search = Some(state.clone());
+                editor.clear_active_selection();
+                editor.set_active_search(state.clone());
+                editor.dialog = Some(EditorDialog::Find(state));
                 outcome
             }
             KeyCode::Enter | KeyCode::Down => {
                 let outcome = state.step(&mut editor.buffer, true);
-                editor.search = Some(state.clone());
+                editor.clear_active_selection();
+                editor.set_active_search(state.clone());
+                editor.dialog = Some(EditorDialog::Find(state));
                 outcome
             }
             KeyCode::Up => {
                 let outcome = state.step(&mut editor.buffer, false);
-                editor.search = Some(state.clone());
+                editor.clear_active_selection();
+                editor.set_active_search(state.clone());
+                editor.dialog = Some(EditorDialog::Find(state));
                 outcome
             }
             KeyCode::Backspace => {
                 state.query.pop();
                 state.refresh(&mut editor.buffer);
-                editor.search = Some(state.clone());
-                state.outcome()
+                editor.clear_active_selection();
+                editor.set_active_search(state.clone());
+                let outcome = state.outcome();
+                editor.dialog = Some(EditorDialog::Find(state));
+                outcome
             }
             KeyCode::Char(ch) if is_insertable(key.modifiers) => {
                 state.query.push(ch);
                 state.refresh(&mut editor.buffer);
-                editor.search = Some(state.clone());
-                state.outcome()
+                editor.clear_active_selection();
+                editor.set_active_search(state.clone());
+                let outcome = state.outcome();
+                editor.dialog = Some(EditorDialog::Find(state));
+                outcome
             }
-            _ => FindDialogOutcome::None,
+            _ => {
+                editor.dialog = Some(EditorDialog::Find(state));
+                FindDialogOutcome::None
+            }
         }
     }
 
@@ -1380,6 +1432,7 @@ impl App {
                     return GotoLineOutcome::Error(anyhow!("line out of range"));
                 }
 
+                editor.clear_active_selection();
                 editor.dialog = None;
                 GotoLineOutcome::Moved(line_number)
             }
@@ -1611,8 +1664,34 @@ impl App {
     where
         F: FnOnce(&mut Buffer),
     {
+        editor.clear_active_selection();
         edit(&mut editor.buffer);
         editor.refresh_git_changes();
+    }
+
+    fn handle_editor_motion(editor: &mut EditorState, key: KeyEvent) -> bool {
+        let selecting = key.modifiers.contains(KeyModifiers::SHIFT);
+
+        match key.code {
+            KeyCode::Left => editor.buffer.move_left(),
+            KeyCode::Right => editor.buffer.move_right(),
+            KeyCode::Up => editor.buffer.move_up(),
+            KeyCode::Down => editor.buffer.move_down(),
+            KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                editor.buffer.move_doc_start()
+            }
+            KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                editor.buffer.move_doc_end()
+            }
+            KeyCode::Home => editor.buffer.move_home(),
+            KeyCode::End => editor.buffer.move_end(),
+            KeyCode::PageUp => editor.buffer.page_up(editor.viewport_height),
+            KeyCode::PageDown => editor.buffer.page_down(editor.viewport_height),
+            _ => return false,
+        }
+
+        editor.update_selection_after_motion(selecting);
+        true
     }
 
     fn load_welcome_state() -> WelcomeState {
@@ -1869,8 +1948,27 @@ fn longest_common_prefix(values: &[&str]) -> String {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EditorFocus {
-    Editor,
+    Primary,
+    Secondary,
     Sidebar,
+}
+
+#[derive(Clone, Debug, Default)]
+struct PaneState {
+    view_state: BufferViewState,
+    search: Option<FindState>,
+    selection: Option<SelectionState>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SelectionState {
+    anchor: (usize, usize),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SelectionRange {
+    pub start: (usize, usize),
+    pub end: (usize, usize),
 }
 
 #[derive(Debug)]
@@ -1880,10 +1978,12 @@ pub struct EditorState {
     file_type: FileType,
     git_change_markers: Vec<Option<LineChange>>,
     dialog: Option<EditorDialog>,
-    search: Option<FindState>,
     viewport_height: usize,
     mode: EditorMode,
     split_view: bool,
+    split_mode: Option<EditorMode>,
+    primary_pane: PaneState,
+    secondary_pane: PaneState,
     focus: EditorFocus,
     sidebar: SidebarState,
 }
@@ -1894,6 +1994,11 @@ impl EditorState {
         let sidebar =
             SidebarState::for_file(Some(&path)).unwrap_or_else(|_| SidebarState::fallback());
         let file_type = crate::filetype::detect(&path);
+        let primary_pane = PaneState {
+            view_state: buffer.view_state(),
+            search: None,
+            selection: None,
+        };
 
         Ok(Self {
             buffer,
@@ -1901,28 +2006,38 @@ impl EditorState {
             file_type,
             git_change_markers: Vec::new(),
             dialog: None,
-            search: None,
             viewport_height: 1,
             mode,
             split_view: false,
-            focus: EditorFocus::Editor,
+            split_mode: None,
+            primary_pane,
+            secondary_pane: PaneState::default(),
+            focus: EditorFocus::Primary,
             sidebar,
         }
         .with_git_changes())
     }
 
     fn empty(mode: EditorMode) -> Self {
+        let buffer = Buffer::empty();
+        let primary_pane = PaneState {
+            view_state: buffer.view_state(),
+            search: None,
+            selection: None,
+        };
         Self {
-            buffer: Buffer::empty(),
+            buffer,
             file_path: None,
             file_type: FileType::Markdown,
             git_change_markers: Vec::new(),
             dialog: None,
-            search: None,
             viewport_height: 1,
             mode,
             split_view: false,
-            focus: EditorFocus::Editor,
+            split_mode: None,
+            primary_pane,
+            secondary_pane: PaneState::default(),
+            focus: EditorFocus::Primary,
             sidebar: SidebarState::for_file(None).unwrap_or_else(|_| SidebarState::fallback()),
         }
     }
@@ -1934,7 +2049,7 @@ impl EditorState {
         } else {
             self.sidebar.close();
         }
-        self.focus = EditorFocus::Editor;
+        self.focus = EditorFocus::Primary;
         Ok(())
     }
 
@@ -1955,7 +2070,7 @@ impl EditorState {
             crate::gitdiff::markers_for_buffer(self.file_path.as_deref(), self.buffer.lines());
     }
 
-    fn companion_mode(&self) -> EditorMode {
+    fn default_split_mode(&self) -> EditorMode {
         match self.mode {
             EditorMode::Preview => {
                 if self.file_type == FileType::Markdown {
@@ -1965,6 +2080,263 @@ impl EditorState {
                 }
             }
             _ => EditorMode::Preview,
+        }
+    }
+
+    fn split_mode(&self) -> EditorMode {
+        self.split_mode.unwrap_or_else(|| self.default_split_mode())
+    }
+
+    fn toggle_split(&mut self) {
+        self.save_focused_viewport();
+        self.split_view = !self.split_view;
+        if self.split_view {
+            self.sync_split_mode();
+            self.secondary_pane = self.primary_pane.clone();
+            if self.focus == EditorFocus::Secondary {
+                self.focus = EditorFocus::Primary;
+            }
+        } else if self.focus == EditorFocus::Secondary {
+            self.focus = EditorFocus::Primary;
+            self.load_focus_viewport();
+        }
+    }
+
+    fn swap_split(&mut self) {
+        if !self.split_view {
+            return;
+        }
+
+        self.save_focused_viewport();
+        let split_mode = self.split_mode();
+        self.split_mode = Some(self.mode);
+        self.mode = split_mode;
+        std::mem::swap(&mut self.primary_pane, &mut self.secondary_pane);
+        self.load_focus_viewport();
+    }
+
+    fn sync_split_mode(&mut self) {
+        let mut split_mode = self.split_mode();
+        if split_mode == self.mode {
+            split_mode = self.default_split_mode();
+            if split_mode == self.mode {
+                split_mode = self.mode.cycle();
+            }
+        }
+        self.split_mode = Some(split_mode);
+    }
+
+    fn primary_mode(&self) -> EditorMode {
+        self.mode
+    }
+
+    fn active_mode(&self) -> EditorMode {
+        match self.focus {
+            EditorFocus::Primary | EditorFocus::Sidebar => self.primary_mode(),
+            EditorFocus::Secondary if self.split_view => self.split_mode(),
+            EditorFocus::Secondary => self.primary_mode(),
+        }
+    }
+
+    fn cycle_active_mode(&mut self) {
+        if self.focus == EditorFocus::Secondary && self.split_view {
+            let mut split_mode = self.split_mode().cycle();
+            if split_mode == self.mode {
+                split_mode = split_mode.cycle();
+            }
+            self.split_mode = Some(split_mode);
+        } else {
+            self.mode = self.mode.cycle();
+            self.sync_split_mode();
+        }
+    }
+
+    fn cycle_focus(&mut self) {
+        self.save_focused_viewport();
+        self.focus = match (self.focus, self.split_view, self.sidebar.is_open()) {
+            (EditorFocus::Primary, true, true) => EditorFocus::Secondary,
+            (EditorFocus::Primary, true, false) => EditorFocus::Secondary,
+            (EditorFocus::Primary, false, true) => EditorFocus::Sidebar,
+            (EditorFocus::Primary, false, false) => EditorFocus::Primary,
+            (EditorFocus::Secondary, true, true) => EditorFocus::Sidebar,
+            (EditorFocus::Secondary, true, false) => EditorFocus::Primary,
+            (EditorFocus::Secondary, false, true) => EditorFocus::Sidebar,
+            (EditorFocus::Secondary, false, false) => EditorFocus::Primary,
+            (EditorFocus::Sidebar, _, _) => EditorFocus::Primary,
+        };
+        self.load_focus_viewport();
+    }
+
+    fn focus_help(&self) -> &'static str {
+        match self.focus {
+            EditorFocus::Sidebar => SIDEBAR_HELP,
+            EditorFocus::Primary | EditorFocus::Secondary => self.active_mode().help(),
+        }
+    }
+
+    fn active_selection(&self) -> Option<&SelectionState> {
+        match self.focus {
+            EditorFocus::Primary | EditorFocus::Sidebar => self.primary_pane.selection.as_ref(),
+            EditorFocus::Secondary if self.split_view => self.secondary_pane.selection.as_ref(),
+            EditorFocus::Secondary => self.primary_pane.selection.as_ref(),
+        }
+    }
+
+    fn clear_active_selection(&mut self) {
+        match self.focus {
+            EditorFocus::Primary | EditorFocus::Sidebar => self.primary_pane.selection = None,
+            EditorFocus::Secondary if self.split_view => self.secondary_pane.selection = None,
+            EditorFocus::Secondary => self.primary_pane.selection = None,
+        }
+    }
+
+    fn begin_or_update_selection(&mut self) {
+        let anchor = self
+            .active_selection()
+            .map(|selection| selection.anchor)
+            .unwrap_or_else(|| self.buffer.cursor());
+        let selection = SelectionState { anchor };
+        match self.focus {
+            EditorFocus::Primary | EditorFocus::Sidebar => {
+                self.primary_pane.selection = Some(selection);
+            }
+            EditorFocus::Secondary if self.split_view => {
+                self.secondary_pane.selection = Some(selection);
+            }
+            EditorFocus::Secondary => {
+                self.primary_pane.selection = Some(selection);
+            }
+        }
+    }
+
+    fn update_selection_after_motion(&mut self, selecting: bool) {
+        if selecting {
+            self.begin_or_update_selection();
+            if self.selection_cursor_for_focus() == self.active_selection().map(|s| s.anchor) {
+                self.clear_active_selection();
+            }
+        } else {
+            self.clear_active_selection();
+        }
+    }
+
+    fn selection_cursor_for_focus(&self) -> Option<(usize, usize)> {
+        match self.focus {
+            EditorFocus::Primary => Some(self.buffer.cursor()),
+            EditorFocus::Secondary if self.split_view => Some(self.buffer.cursor()),
+            EditorFocus::Secondary | EditorFocus::Sidebar => None,
+        }
+    }
+
+    fn selection_range(
+        selection: Option<&SelectionState>,
+        cursor: (usize, usize),
+    ) -> Option<SelectionRange> {
+        let selection = selection?;
+        if selection.anchor == cursor {
+            return None;
+        }
+
+        let (start, end) = if selection.anchor <= cursor {
+            (selection.anchor, cursor)
+        } else {
+            (cursor, selection.anchor)
+        };
+
+        Some(SelectionRange { start, end })
+    }
+
+    fn primary_selection_range(&self) -> Option<SelectionRange> {
+        let cursor = if self.focus == EditorFocus::Primary {
+            self.buffer.cursor()
+        } else {
+            (
+                self.primary_pane.view_state.cursor_row,
+                self.primary_pane.view_state.cursor_col,
+            )
+        };
+        Self::selection_range(self.primary_pane.selection.as_ref(), cursor)
+    }
+
+    fn secondary_selection_range(&self) -> Option<SelectionRange> {
+        let cursor = if self.focus == EditorFocus::Secondary {
+            self.buffer.cursor()
+        } else {
+            (
+                self.secondary_pane.view_state.cursor_row,
+                self.secondary_pane.view_state.cursor_col,
+            )
+        };
+        Self::selection_range(self.secondary_pane.selection.as_ref(), cursor)
+    }
+
+    fn primary_scroll(&self) -> (usize, usize) {
+        if self.focus == EditorFocus::Primary {
+            self.buffer.scroll_offset()
+        } else {
+            (
+                self.primary_pane.view_state.scroll_row,
+                self.primary_pane.view_state.scroll_col,
+            )
+        }
+    }
+
+    fn secondary_scroll(&self) -> (usize, usize) {
+        if self.focus == EditorFocus::Secondary {
+            self.buffer.scroll_offset()
+        } else {
+            (
+                self.secondary_pane.view_state.scroll_row,
+                self.secondary_pane.view_state.scroll_col,
+            )
+        }
+    }
+
+    fn save_focused_viewport(&mut self) {
+        let view_state = self.buffer.view_state();
+        match self.focus {
+            EditorFocus::Primary => self.primary_pane.view_state = view_state,
+            EditorFocus::Secondary => self.secondary_pane.view_state = view_state,
+            EditorFocus::Sidebar => {}
+        }
+    }
+
+    fn load_focus_viewport(&mut self) {
+        let view_state = match self.focus {
+            EditorFocus::Primary => Some(self.primary_pane.view_state),
+            EditorFocus::Secondary if self.split_view => Some(self.secondary_pane.view_state),
+            EditorFocus::Secondary | EditorFocus::Sidebar => None,
+        };
+
+        if let Some(view_state) = view_state {
+            self.buffer.set_view_state(view_state);
+        }
+    }
+
+    fn active_search(&self) -> Option<&FindState> {
+        match self.focus {
+            EditorFocus::Primary | EditorFocus::Sidebar => self.primary_pane.search.as_ref(),
+            EditorFocus::Secondary if self.split_view => self.secondary_pane.search.as_ref(),
+            EditorFocus::Secondary => self.primary_pane.search.as_ref(),
+        }
+    }
+
+    fn set_active_search(&mut self, search: FindState) {
+        match self.focus {
+            EditorFocus::Primary | EditorFocus::Sidebar => self.primary_pane.search = Some(search),
+            EditorFocus::Secondary if self.split_view => self.secondary_pane.search = Some(search),
+            EditorFocus::Secondary => self.primary_pane.search = Some(search),
+        }
+    }
+
+    fn reopen_find_state(&self) -> FindState {
+        match self.active_search() {
+            Some(state) => {
+                let mut reopened = state.clone();
+                reopened.anchor = self.buffer.cursor();
+                reopened
+            }
+            None => FindState::new(self),
         }
     }
 }
@@ -2050,17 +2422,6 @@ impl FindState {
             matches: Vec::new(),
             current_index: None,
             anchor: editor.buffer.cursor(),
-        }
-    }
-
-    fn for_reopen(editor: &EditorState) -> Self {
-        match &editor.search {
-            Some(state) => {
-                let mut reopened = state.clone();
-                reopened.anchor = editor.buffer.cursor();
-                reopened
-            }
-            None => Self::new(editor),
         }
     }
 
@@ -2229,9 +2590,11 @@ impl Overlay {
         match self {
             Self::Editor(EditorMode::SourceHints) => vec![
                 "Arrows move   Home/End line start/end   Ctrl+Home/End doc start/end",
+                "Shift+Arrows/Home/End/Page select text in the focused pane",
                 "Ctrl+S save or save-as   Ctrl+F find   Ctrl+G goto line   Ctrl+E sidebar",
                 "Alt+N next match   Alt+P previous match   Ctrl+Z undo   Ctrl+R redo",
-                "Ctrl+P preview mode   Ctrl+\\ split   Ctrl+. swap pane   Ctrl+, settings",
+                "Ctrl+P preview mode   Ctrl+\\ split   Tab pane focus   Ctrl+. swap pane",
+                "Ctrl+, settings",
                 "Ctrl+W return home",
                 "When sidebar is open: Tab focus   Enter open file   N file   Shift+N folder",
                 "E rename   D delete   Space/Right toggle dir",
@@ -2240,8 +2603,9 @@ impl Overlay {
             ],
             Self::Editor(EditorMode::Preview) => vec![
                 "Arrows move   Home/End line start/end   Ctrl+Home/End doc start/end",
+                "Shift+Arrows/Home/End/Page select text in the focused pane",
                 "Ctrl+F find   Ctrl+G goto line   Ctrl+P source mode   Ctrl+\\ split",
-                "Ctrl+. swap pane   Ctrl+W return home",
+                "Tab pane focus   Ctrl+. swap pane   Ctrl+W return home",
                 "Alt+N next match   Alt+P previous match",
                 "Ctrl+E sidebar   Ctrl+, settings",
                 "When sidebar is open: Tab focus   Enter open file   N file   Shift+N folder",
@@ -2252,9 +2616,11 @@ impl Overlay {
             ],
             Self::Editor(EditorMode::Source) => vec![
                 "Arrows move   Home/End line start/end   Ctrl+Home/End doc start/end",
+                "Shift+Arrows/Home/End/Page select text in the focused pane",
                 "Ctrl+S save or save-as   Ctrl+F find   Ctrl+G goto line   Ctrl+E sidebar",
                 "Alt+N next match   Alt+P previous match   Ctrl+Z undo   Ctrl+R redo",
-                "Ctrl+P source+hints mode   Ctrl+\\ split   Ctrl+. swap pane   Ctrl+, settings",
+                "Ctrl+P source+hints mode   Ctrl+\\ split   Tab pane focus   Ctrl+. swap pane",
+                "Ctrl+, settings",
                 "Ctrl+W return home",
                 "When sidebar is open: Tab focus   Enter open file   N file   Shift+N folder",
                 "E rename   D delete   Space/Right toggle dir",
@@ -2299,7 +2665,15 @@ pub struct OverlayView {
 #[derive(Debug)]
 pub struct EditorSplitView {
     pub title: String,
+    pub focused: bool,
+    pub line_numbers: bool,
     pub wrap: bool,
+    pub git_change_markers: Option<Vec<Option<LineChange>>>,
+    pub search_matches: Vec<SearchMatch>,
+    pub search_current: Option<usize>,
+    pub selection: Option<SelectionRange>,
+    pub cursor: Option<(usize, usize)>,
+    pub scroll: (usize, usize),
     pub lines: Vec<ratatui::text::Line<'static>>,
 }
 
@@ -2313,6 +2687,7 @@ pub enum ViewModel {
         lines: Vec<ratatui::text::Line<'static>>,
         search_matches: Vec<SearchMatch>,
         search_current: Option<usize>,
+        selection: Option<SelectionRange>,
         cursor: Option<(usize, usize)>,
         scroll: (usize, usize),
         sidebar_rows: Vec<SidebarRow>,
@@ -2320,7 +2695,7 @@ pub enum ViewModel {
         sidebar_width: u16,
         sidebar_focused: bool,
         sidebar_root: String,
-        split: Option<EditorSplitView>,
+        split: Option<Box<EditorSplitView>>,
         dialog: Option<DialogView>,
     },
     Picker {
@@ -2562,7 +2937,7 @@ mod tests {
         };
         assert!(editor.file_name().ends_with("b.md"));
         assert!(editor.sidebar.is_open());
-        assert_eq!(editor.focus, EditorFocus::Editor);
+        assert_eq!(editor.focus, EditorFocus::Primary);
 
         fs::remove_dir_all(root).expect("cleanup");
     }
@@ -2843,6 +3218,252 @@ mod tests {
     }
 
     #[test]
+    fn tab_focuses_secondary_split_pane() {
+        let mut app = editor_app();
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('\\'),
+            KeyModifiers::CONTROL,
+        )));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('.'),
+            KeyModifiers::CONTROL,
+        )));
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+
+        let ViewModel::Editor { cursor, split, .. } = app.current_view(10, 80) else {
+            panic!("editor view");
+        };
+        let split = split.expect("split view");
+
+        assert_eq!(cursor, None);
+        assert_eq!(split.cursor, Some((0, 0)));
+        assert!(split.focused);
+    }
+
+    #[test]
+    fn cycling_primary_mode_preserves_split_pairing() {
+        let mut app = editor_app();
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('\\'),
+            KeyModifiers::CONTROL,
+        )));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('.'),
+            KeyModifiers::CONTROL,
+        )));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('p'),
+            KeyModifiers::CONTROL,
+        )));
+
+        let ViewModel::Editor { split, .. } = app.current_view(10, 80) else {
+            panic!("editor view");
+        };
+        let split = split.expect("split view");
+
+        assert!(split.title.contains("[Source+Hints]"));
+
+        let Screen::Editor(editor) = app.screen else {
+            panic!("editor screen");
+        };
+
+        assert_eq!(editor.mode, EditorMode::Source);
+    }
+
+    #[test]
+    fn cycling_mode_on_secondary_pane_updates_split_mode() {
+        let mut app = editor_app();
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('\\'),
+            KeyModifiers::CONTROL,
+        )));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('.'),
+            KeyModifiers::CONTROL,
+        )));
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('p'),
+            KeyModifiers::CONTROL,
+        )));
+
+        let ViewModel::Editor { split, .. } = app.current_view(10, 80) else {
+            panic!("editor view");
+        };
+        let split = split.expect("split view");
+
+        assert!(split.title.contains("[Source]"));
+
+        let Screen::Editor(editor) = app.screen else {
+            panic!("editor screen");
+        };
+
+        assert_eq!(editor.mode, EditorMode::Preview);
+    }
+
+    #[test]
+    fn split_panes_keep_independent_scroll_offsets() {
+        let mut app = editor_app();
+        let Screen::Editor(editor) = &mut app.screen else {
+            panic!("editor screen");
+        };
+        editor.buffer = Buffer::from_text(
+            &(0..30)
+                .map(|index| format!("line {index}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('\\'),
+            KeyModifiers::CONTROL,
+        )));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::PageDown,
+            KeyModifiers::NONE,
+        )));
+        app.sync_viewport(5, 80);
+
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        app.sync_viewport(5, 80);
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::PageDown,
+            KeyModifiers::NONE,
+        )));
+        app.sync_viewport(5, 80);
+
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+
+        let ViewModel::Editor { scroll, split, .. } = app.current_view(5, 80) else {
+            panic!("editor view");
+        };
+        let split = split.expect("split view");
+
+        assert!(split.scroll.0 > scroll.0);
+        assert_ne!(scroll.0, split.scroll.0);
+    }
+
+    #[test]
+    fn split_panes_keep_independent_cursor_positions() {
+        let mut app = editor_app();
+        let Screen::Editor(editor) = &mut app.screen else {
+            panic!("editor screen");
+        };
+        editor.file_type = FileType::Code;
+        editor.mode = EditorMode::Source;
+        editor.buffer = Buffer::from_text("abcd\nwxyz");
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('\\'),
+            KeyModifiers::CONTROL,
+        )));
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('p'),
+            KeyModifiers::CONTROL,
+        )));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Right,
+            KeyModifiers::NONE,
+        )));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Right,
+            KeyModifiers::NONE,
+        )));
+
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+
+        let ViewModel::Editor { split, .. } = app.current_view(5, 80) else {
+            panic!("editor view");
+        };
+        let split = split.expect("split view");
+        assert_eq!(split.cursor, Some((2, 0)));
+
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+
+        let ViewModel::Editor { cursor, .. } = app.current_view(5, 80) else {
+            panic!("editor view");
+        };
+        assert_eq!(cursor, Some((0, 1)));
+    }
+
+    #[test]
+    fn split_panes_keep_independent_search_context() {
+        let mut app = editor_app();
+        let Screen::Editor(editor) = &mut app.screen else {
+            panic!("editor screen");
+        };
+        editor.buffer = Buffer::from_text("alpha\nbeta\nalphabet\nbeta");
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('\\'),
+            KeyModifiers::CONTROL,
+        )));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        )));
+        for ch in "alpha".chars() {
+            app.handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        )));
+        for ch in "beta".chars() {
+            app.handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+
+        let Screen::Editor(editor) = &app.screen else {
+            panic!("editor screen");
+        };
+        assert_eq!(
+            editor
+                .primary_pane
+                .search
+                .as_ref()
+                .map(|state| state.query.as_str()),
+            Some("alpha")
+        );
+        assert_eq!(
+            editor
+                .secondary_pane
+                .search
+                .as_ref()
+                .map(|state| state.query.as_str()),
+            Some("beta")
+        );
+
+        let ViewModel::Editor {
+            search_matches,
+            split,
+            ..
+        } = app.current_view(10, 80)
+        else {
+            panic!("editor view");
+        };
+        let split = split.expect("split view");
+        assert_eq!(search_matches.len(), 2);
+        assert_eq!(split.search_matches.len(), 2);
+    }
+
+    #[test]
     fn ctrl_left_bracket_narrows_sidebar() {
         let mut app = editor_app();
 
@@ -3021,7 +3642,7 @@ mod tests {
 
         assert!(editor.sidebar.is_open());
         assert_eq!(editor.sidebar.width(), 30);
-        assert_eq!(editor.focus, EditorFocus::Editor);
+        assert_eq!(editor.focus, EditorFocus::Primary);
     }
 
     #[test]

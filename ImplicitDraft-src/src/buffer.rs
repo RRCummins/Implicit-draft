@@ -9,6 +9,15 @@ pub struct SearchMatch {
     pub len: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BufferViewState {
+    pub cursor_row: usize,
+    pub cursor_col: usize,
+    pub desired_col: usize,
+    pub scroll_row: usize,
+    pub scroll_col: usize,
+}
+
 #[derive(Clone, Debug)]
 struct Snapshot {
     lines: Vec<String>,
@@ -247,6 +256,24 @@ impl Buffer {
 
     pub fn cursor(&self) -> (usize, usize) {
         (self.cursor_row, self.cursor_col)
+    }
+
+    pub fn view_state(&self) -> BufferViewState {
+        BufferViewState {
+            cursor_row: self.cursor_row,
+            cursor_col: self.cursor_col,
+            desired_col: self.desired_col,
+            scroll_row: self.scroll_row,
+            scroll_col: self.scroll_col,
+        }
+    }
+
+    pub fn set_view_state(&mut self, state: BufferViewState) {
+        self.cursor_row = state.cursor_row.min(self.lines.len().saturating_sub(1));
+        self.cursor_col = state.cursor_col.min(self.current_line_len());
+        self.desired_col = state.desired_col.min(self.current_line_len());
+        self.scroll_row = state.scroll_row;
+        self.scroll_col = state.scroll_col;
     }
 
     pub fn is_dirty(&self) -> bool {

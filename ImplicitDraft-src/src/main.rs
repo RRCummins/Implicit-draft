@@ -2,6 +2,7 @@ mod app;
 mod buffer;
 mod code;
 mod config;
+mod export;
 mod filetype;
 mod gitdiff;
 mod markdown;
@@ -25,6 +26,7 @@ use clap::Parser;
 use crate::{
     app::{App, StartupTarget},
     config::{AppConfig, RuntimeConfig},
+    export::PrintMode,
 };
 
 #[derive(Debug, Parser)]
@@ -33,6 +35,22 @@ struct Cli {
     /// Open the settings screen instead of a file or welcome flow.
     #[arg(long)]
     config: bool,
+
+    /// Render the file to stdout using ANSI styling instead of opening the TUI.
+    #[arg(long)]
+    print: bool,
+
+    /// Render mode used by --print.
+    #[arg(long, value_enum, default_value_t = PrintMode::Auto)]
+    mode: PrintMode,
+
+    /// Override the theme used by --print.
+    #[arg(long)]
+    theme: Option<String>,
+
+    /// Send --print output through a pager instead of writing directly to stdout.
+    #[arg(long)]
+    pager: bool,
 
     /// File to open. The no-argument picker flow lands in a later phase.
     file: Option<PathBuf>,
@@ -50,6 +68,13 @@ fn main() -> Result<()> {
             }
         }
     };
+
+    if cli.print {
+        let path = crate::export::validate_print_path(cli.file.as_deref())?;
+        let theme_name = cli.theme.as_deref().unwrap_or(&runtime.app.theme);
+        return crate::export::print_path(path, cli.mode, theme_name, cli.pager);
+    }
+
     let mut terminal = terminal::init()?;
     let mut app = App::new(
         resolve_startup_target(cli.file, cli.config),
@@ -122,5 +147,19 @@ mod tests {
             StartupTarget::Browse(path) => panic!("unexpected browse target: {}", path.display()),
             StartupTarget::Welcome => panic!("unexpected welcome target"),
         }
+    }
+
+    #[test]
+    fn print_requires_a_file() {
+        let error = crate::export::validate_print_path(None).expect_err("missing path");
+        assert!(error.to_string().contains("--print requires a file path"));
+    }
+
+    #[test]
+    fn pager_flag_parses_for_print_mode() {
+        let cli = Cli::parse_from(["implicit", "--print", "--pager", "notes.md"]);
+        assert!(cli.print);
+        assert!(cli.pager);
+        assert_eq!(cli.file, Some(PathBuf::from("notes.md")));
     }
 }
