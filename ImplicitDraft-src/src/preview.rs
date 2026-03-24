@@ -34,6 +34,10 @@ pub fn render_document(lines: &[String], theme: &Theme, width: usize) -> Vec<Lin
 }
 
 fn render_line(line: &str, theme: &Theme, width: usize) -> Line<'static> {
+    if is_conflict_marker(line) {
+        return Line::from(vec![Span::styled(line.to_owned(), theme.conflict_marker)]);
+    }
+
     if is_rule(line) {
         return Line::from(vec![Span::styled("─".repeat(width.max(3)), theme.rule)]);
     }
@@ -579,6 +583,14 @@ fn heading_level(line: &str) -> Option<usize> {
     }
 }
 
+fn is_conflict_marker(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("<<<<<<<")
+        || trimmed.starts_with("=======")
+        || trimmed.starts_with(">>>>>>>")
+        || trimmed.starts_with("|||||||")
+}
+
 #[derive(Clone, Copy)]
 enum InlineKind {
     Styled(Style),
@@ -795,5 +807,13 @@ mod tests {
             rendered[1].spans.last().expect("right border").style,
             theme.ui_chrome
         );
+    }
+
+    #[test]
+    fn styles_conflict_marker_lines() {
+        let theme = Theme::source_hints_default();
+        let rendered = render_document(&[String::from("<<<<<<< theirs")], &theme, 24);
+
+        assert_eq!(rendered[0].spans[0].style, theme.conflict_marker);
     }
 }

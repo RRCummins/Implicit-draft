@@ -70,6 +70,10 @@ impl FenceBlock {
 }
 
 fn style_line(line: &str, theme: &Theme) -> Line<'static> {
+    if is_conflict_marker(line) {
+        return Line::from(vec![Span::styled(line.to_owned(), theme.conflict_marker)]);
+    }
+
     if is_rule(line) {
         return Line::from(vec![Span::styled(line.to_owned(), theme.rule)]);
     }
@@ -256,6 +260,14 @@ fn split_list_marker(line: &str) -> Option<(&str, &str)> {
     None
 }
 
+fn is_conflict_marker(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("<<<<<<<")
+        || trimmed.starts_with("=======")
+        || trimmed.starts_with(">>>>>>>")
+        || trimmed.starts_with("|||||||")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,5 +368,13 @@ mod tests {
                 .iter()
                 .any(|span| span.content.as_ref() == "return" && span.style == theme.code_keyword)
         );
+    }
+
+    #[test]
+    fn styles_conflict_marker_lines() {
+        let theme = Theme::source_hints_default();
+        let rendered = style_document(&[String::from("<<<<<<< HEAD")], &theme);
+
+        assert_eq!(rendered[0].spans[0].style, theme.conflict_marker);
     }
 }

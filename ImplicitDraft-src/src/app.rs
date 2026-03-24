@@ -3460,6 +3460,24 @@ mod tests {
     }
 
     #[test]
+    fn current_view_preserves_deleted_git_change_markers() {
+        let mut app = editor_app();
+        let Screen::Editor(editor) = &mut app.screen else {
+            panic!("expected editor");
+        };
+        editor.git_change_markers = vec![Some(LineChange::Deleted)];
+
+        let ViewModel::Editor {
+            git_change_markers, ..
+        } = app.current_view(10, 40)
+        else {
+            panic!("expected editor view");
+        };
+
+        assert_eq!(git_change_markers[0], Some(LineChange::Deleted));
+    }
+
+    #[test]
     fn preview_mode_enables_soft_wrap_from_config() {
         let mut app = editor_app();
         app.config.wrap = true;

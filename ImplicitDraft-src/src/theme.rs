@@ -26,9 +26,11 @@ pub struct Theme {
     pub blockquote: Style,
     pub link: Style,
     pub rule: Style,
+    pub conflict_marker: Style,
     pub list_marker: Style,
     pub ui_chrome: Style,
     pub git_added: Style,
+    pub git_deleted: Style,
     pub git_modified: Style,
     pub git_untracked: Style,
     pub cursor: Style,
@@ -57,9 +59,11 @@ struct ThemeFile {
     blockquote: Option<String>,
     link: Option<String>,
     rule: Option<String>,
+    conflict_marker: Option<String>,
     list_marker: Option<String>,
     ui_chrome: Option<String>,
     git_added: Option<String>,
+    git_deleted: Option<String>,
     git_modified: Option<String>,
     git_untracked: Option<String>,
     cursor: Option<String>,
@@ -436,6 +440,9 @@ impl Theme {
                 .fg(palette.link)
                 .add_modifier(Modifier::UNDERLINED),
             rule: Style::default().fg(palette.rule),
+            conflict_marker: Style::default()
+                .fg(Color::LightRed)
+                .add_modifier(Modifier::BOLD),
             list_marker: Style::default().fg(palette.list_marker),
             ui_chrome: Style::default()
                 .fg(palette.ui_chrome)
@@ -443,6 +450,7 @@ impl Theme {
             git_added: Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
+            git_deleted: Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             git_modified: Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -475,9 +483,11 @@ impl Theme {
         apply_fg(&mut self.blockquote, file.blockquote)?;
         apply_fg(&mut self.link, file.link)?;
         apply_fg(&mut self.rule, file.rule)?;
+        apply_fg(&mut self.conflict_marker, file.conflict_marker)?;
         apply_fg(&mut self.list_marker, file.list_marker)?;
         apply_fg(&mut self.ui_chrome, file.ui_chrome)?;
         apply_fg(&mut self.git_added, file.git_added)?;
+        apply_fg(&mut self.git_deleted, file.git_deleted)?;
         apply_fg(&mut self.git_modified, file.git_modified)?;
         apply_fg(&mut self.git_untracked, file.git_untracked)?;
         apply_bg(&mut self.cursor, file.cursor)?;

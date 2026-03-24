@@ -9,6 +9,7 @@ use std::{
 pub enum LineChange {
     Added,
     Modified,
+    Deleted,
 }
 
 pub fn markers_for_buffer(path: Option<&Path>, lines: &[String]) -> Vec<Option<LineChange>> {
@@ -63,7 +64,7 @@ fn apply_diff_markers(
                 .0
                 .saturating_sub(1)
                 .min(markers.len().saturating_sub(1));
-            merge_marker(&mut markers[row], LineChange::Modified);
+            merge_marker(&mut markers[row], LineChange::Deleted);
             continue;
         }
 
@@ -83,6 +84,7 @@ fn apply_diff_markers(
 fn merge_marker(slot: &mut Option<LineChange>, next: LineChange) {
     *slot = Some(match (*slot, next) {
         (Some(LineChange::Modified), _) | (_, LineChange::Modified) => LineChange::Modified,
+        (Some(LineChange::Deleted), _) | (_, LineChange::Deleted) => LineChange::Deleted,
         _ => LineChange::Added,
     });
 }
@@ -233,5 +235,39 @@ mod tests {
                 None,
             ]
         );
+    }
+
+    #[test]
+    fn marks_deleted_rows() {
+        let mut markers = vec![None; 3];
+        apply_diff_markers(
+            &mut markers,
+            &[
+                String::from("a"),
+                String::from("b"),
+                String::from("c"),
+                String::new(),
+            ],
+            &[String::from("a"), String::from("c"), String::new()],
+        );
+
+        assert_eq!(markers, vec![Some(LineChange::Deleted), None, None]);
+    }
+
+    #[test]
+    fn marks_deleted_rows_at_end_of_file() {
+        let mut markers = vec![None; 3];
+        apply_diff_markers(
+            &mut markers,
+            &[
+                String::from("a"),
+                String::from("b"),
+                String::from("c"),
+                String::new(),
+            ],
+            &[String::from("a"), String::from("b"), String::new()],
+        );
+
+        assert_eq!(markers, vec![None, Some(LineChange::Deleted), None]);
     }
 }

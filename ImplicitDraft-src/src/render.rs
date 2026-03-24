@@ -261,6 +261,7 @@ fn draw_editor(frame: &mut Frame, area: Rect, editor: EditorView, theme: Theme) 
             .map(
                 |row| match editor.git_change_markers.get(row).copied().flatten() {
                     Some(LineChange::Added) => Line::styled("▏ ".to_owned(), theme.git_added),
+                    Some(LineChange::Deleted) => Line::styled("▔ ".to_owned(), theme.git_deleted),
                     Some(LineChange::Modified) => Line::styled("▏ ".to_owned(), theme.git_modified),
                     None => Line::styled("  ".to_owned(), theme.background),
                 },

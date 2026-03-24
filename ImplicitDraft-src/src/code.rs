@@ -474,6 +474,10 @@ fn render_source_line(
     language: Language,
     state: &mut RenderState,
 ) -> Line<'static> {
+    if is_conflict_marker(line) {
+        return Line::from(vec![Span::styled(line.to_owned(), theme.conflict_marker)]);
+    }
+
     Line::from(render_spans(line, theme, language, state))
 }
 
@@ -491,6 +495,10 @@ fn render_spans(
     language: Language,
     state: &mut RenderState,
 ) -> Vec<Span<'static>> {
+    if is_conflict_marker(line) {
+        return vec![Span::styled(line.to_owned(), theme.conflict_marker)];
+    }
+
     let grammar = language.grammar();
     let chars = line.char_indices().collect::<Vec<_>>();
     let mut spans = Vec::new();
@@ -648,6 +656,14 @@ fn render_spans(
     }
 
     spans
+}
+
+fn is_conflict_marker(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("<<<<<<<")
+        || trimmed.starts_with("=======")
+        || trimmed.starts_with(">>>>>>>")
+        || trimmed.starts_with("|||||||")
 }
 
 fn find_string_end(
@@ -1505,5 +1521,18 @@ mod tests {
                     && span.style == theme.code_string)
         );
         assert_eq!(rendered[1].spans[0].style, theme.code_string);
+    }
+
+    #[test]
+    fn styles_conflict_marker_lines() {
+        let theme = Theme::source_hints_default();
+        let rendered = render_document(
+            &[String::from("<<<<<<< ours")],
+            &theme,
+            Some(Path::new("main.rs")),
+            FileType::Code,
+        );
+
+        assert_eq!(rendered[0].spans[0].style, theme.conflict_marker);
     }
 }
