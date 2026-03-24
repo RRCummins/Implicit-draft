@@ -461,6 +461,12 @@ impl App {
                         } else {
                             editor.mode.help()
                         }));
+                    } else if editor.split_view
+                        && (keybindings.editor.swap_split.matches(key)
+                            || (!editor.sidebar.is_open() && key.code == KeyCode::Tab))
+                    {
+                        editor.mode = editor.companion_mode();
+                        next_status = Some(String::from("split swapped"));
                     } else if editor.sidebar.is_open() && key.code == KeyCode::Tab {
                         editor.focus = match editor.focus {
                             EditorFocus::Editor => EditorFocus::Sidebar,
@@ -2225,7 +2231,8 @@ impl Overlay {
                 "Arrows move   Home/End line start/end   Ctrl+Home/End doc start/end",
                 "Ctrl+S save or save-as   Ctrl+F find   Ctrl+G goto line   Ctrl+E sidebar",
                 "Alt+N next match   Alt+P previous match   Ctrl+Z undo   Ctrl+R redo",
-                "Ctrl+P preview mode   Ctrl+\\ split   Ctrl+, settings   Ctrl+W return home",
+                "Ctrl+P preview mode   Ctrl+\\ split   Ctrl+. swap pane   Ctrl+, settings",
+                "Ctrl+W return home",
                 "When sidebar is open: Tab focus   Enter open file   N file   Shift+N folder",
                 "E rename   D delete   Space/Right toggle dir",
                 "Ctrl+[ narrower   Ctrl+] wider",
@@ -2234,8 +2241,9 @@ impl Overlay {
             Self::Editor(EditorMode::Preview) => vec![
                 "Arrows move   Home/End line start/end   Ctrl+Home/End doc start/end",
                 "Ctrl+F find   Ctrl+G goto line   Ctrl+P source mode   Ctrl+\\ split",
+                "Ctrl+. swap pane   Ctrl+W return home",
                 "Alt+N next match   Alt+P previous match",
-                "Ctrl+E sidebar   Ctrl+, settings   Ctrl+W return home",
+                "Ctrl+E sidebar   Ctrl+, settings",
                 "When sidebar is open: Tab focus   Enter open file   N file   Shift+N folder",
                 "E rename   D delete   Space/Right toggle dir",
                 "Ctrl+[ narrower   Ctrl+] wider",
@@ -2246,7 +2254,8 @@ impl Overlay {
                 "Arrows move   Home/End line start/end   Ctrl+Home/End doc start/end",
                 "Ctrl+S save or save-as   Ctrl+F find   Ctrl+G goto line   Ctrl+E sidebar",
                 "Alt+N next match   Alt+P previous match   Ctrl+Z undo   Ctrl+R redo",
-                "Ctrl+P source+hints mode   Ctrl+\\ split   Ctrl+, settings   Ctrl+W return home",
+                "Ctrl+P source+hints mode   Ctrl+\\ split   Ctrl+. swap pane   Ctrl+, settings",
+                "Ctrl+W return home",
                 "When sidebar is open: Tab focus   Enter open file   N file   Shift+N folder",
                 "E rename   D delete   Space/Right toggle dir",
                 "Ctrl+[ narrower   Ctrl+] wider",
@@ -2811,6 +2820,26 @@ mod tests {
         };
 
         assert!(split.is_some());
+    }
+
+    #[test]
+    fn ctrl_period_swaps_split_primary_mode() {
+        let mut app = editor_app();
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('\\'),
+            KeyModifiers::CONTROL,
+        )));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('.'),
+            KeyModifiers::CONTROL,
+        )));
+
+        let Screen::Editor(editor) = app.screen else {
+            panic!("editor screen");
+        };
+
+        assert_eq!(editor.mode, EditorMode::Preview);
     }
 
     #[test]
