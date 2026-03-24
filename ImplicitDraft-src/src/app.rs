@@ -21,10 +21,12 @@ use crate::{
 };
 
 const FRAME_POLL_INTERVAL: Duration = Duration::from_millis(80);
-const EDITOR_HELP: &str = "ctrl+f find | alt+n next | alt+p prev | ctrl+g goto | ctrl+s save";
-const PREVIEW_HELP: &str = "ctrl+f find | alt+n next | alt+p prev | ctrl+g goto | ctrl+p source";
+const EDITOR_HELP: &str =
+    "ctrl+f find | ctrl+\\ split | alt+n next | alt+p prev | ctrl+g goto | ctrl+s save";
+const PREVIEW_HELP: &str =
+    "ctrl+f find | ctrl+\\ split | alt+n next | alt+p prev | ctrl+g goto | ctrl+p source";
 const SOURCE_HELP: &str =
-    "ctrl+f find | alt+n next | alt+p prev | ctrl+g goto | ctrl+p source+hints";
+    "ctrl+f find | ctrl+\\ split | alt+n next | alt+p prev | ctrl+g goto | ctrl+p source+hints";
 const PICKER_HELP: &str =
     "enter/right open | left/backspace parent | a notes/code filter | esc home";
 const HOME_HELP: &str = "o open | n new | c settings | enter recent | / search | q quit";
@@ -452,6 +454,13 @@ impl App {
                     } else if keybindings.editor.cycle_mode.matches(key) {
                         editor.mode = editor.mode.cycle();
                         next_status = Some(String::from(editor.mode.help()));
+                    } else if keybindings.editor.toggle_split.matches(key) {
+                        editor.split_view = !editor.split_view;
+                        next_status = Some(String::from(if editor.split_view {
+                            "split view"
+                        } else {
+                            editor.mode.help()
+                        }));
                     } else if editor.sidebar.is_open() && key.code == KeyCode::Tab {
                         editor.focus = match editor.focus {
                             EditorFocus::Editor => EditorFocus::Sidebar,
@@ -937,6 +946,23 @@ impl App {
                     line_numbers,
                     show_git_change_gutter,
                 );
+                let split = editor.split_view.then(|| {
+                    let mode = editor.companion_mode();
+                    let split_width = editor_width.saturating_div(2).max(1);
+                    EditorSplitView {
+                        title: format!(
+                            " {} [{}] ",
+                            editor
+                                .file_path
+                                .as_deref()
+                                .map(short_path)
+                                .unwrap_or_else(|| String::from("[untitled]")),
+                            mode.label()
+                        ),
+                        wrap: editor_wrap_enabled(mode, self.config.wrap),
+                        lines: self.render_editor_lines(editor, mode, split_width),
+                    }
+                });
 
                 ViewModel::Editor {
                     title: editor
@@ -947,37 +973,7 @@ impl App {
                     line_numbers,
                     wrap,
                     git_change_markers: editor.git_change_markers.clone(),
-                    lines: match (editor.file_type, editor.mode) {
-                        (FileType::Code, EditorMode::SourceHints | EditorMode::Source)
-                        | (FileType::Unknown, EditorMode::SourceHints) => code::render_document(
-                            editor.buffer.lines(),
-                            &self.theme,
-                            editor.file_path.as_deref(),
-                            editor.file_type,
-                        ),
-                        (_, EditorMode::SourceHints) => {
-                            markdown::style_document(editor.buffer.lines(), &self.theme)
-                        }
-                        (FileType::Code, EditorMode::Preview) => code::render_preview_document(
-                            editor.buffer.lines(),
-                            &self.theme,
-                            editor.file_path.as_deref(),
-                            editor.file_type,
-                            content_width,
-                        ),
-                        (_, EditorMode::Preview) => preview::render_document(
-                            editor.buffer.lines(),
-                            &self.theme,
-                            content_width,
-                        ),
-                        (_, EditorMode::Source) => editor
-                            .buffer
-                            .lines()
-                            .iter()
-                            .cloned()
-                            .map(ratatui::text::Line::raw)
-                            .collect(),
-                    },
+                    lines: self.render_editor_lines(editor, editor.mode, content_width),
                     search_matches: editor
                         .search
                         .as_ref()
@@ -1011,6 +1007,7 @@ impl App {
                     sidebar_focused: editor.sidebar.is_open()
                         && editor.focus == EditorFocus::Sidebar,
                     sidebar_root: editor.sidebar.root_display(),
+                    split,
                     dialog: editor.dialog.as_ref().map(|dialog| match dialog {
                         EditorDialog::Quit => DialogView {
                             title: String::from(" Unsaved Changes "),
@@ -1199,6 +1196,43 @@ impl App {
 
     fn default_mode(&self) -> EditorMode {
         EditorMode::from(self.config.default_mode)
+    }
+
+    fn render_editor_lines(
+        &self,
+        editor: &EditorState,
+        mode: EditorMode,
+        width: usize,
+    ) -> Vec<ratatui::text::Line<'static>> {
+        match (editor.file_type, mode) {
+            (FileType::Code, EditorMode::SourceHints | EditorMode::Source)
+            | (FileType::Unknown, EditorMode::SourceHints) => code::render_document(
+                editor.buffer.lines(),
+                &self.theme,
+                editor.file_path.as_deref(),
+                editor.file_type,
+            ),
+            (_, EditorMode::SourceHints) => {
+                markdown::style_document(editor.buffer.lines(), &self.theme)
+            }
+            (FileType::Code, EditorMode::Preview) => code::render_preview_document(
+                editor.buffer.lines(),
+                &self.theme,
+                editor.file_path.as_deref(),
+                editor.file_type,
+                width,
+            ),
+            (_, EditorMode::Preview) => {
+                preview::render_document(editor.buffer.lines(), &self.theme, width)
+            }
+            (_, EditorMode::Source) => editor
+                .buffer
+                .lines()
+                .iter()
+                .cloned()
+                .map(ratatui::text::Line::raw)
+                .collect(),
+        }
     }
 
     fn editor_mode_for_path(path: &std::path::Path, configured: EditorMode) -> EditorMode {
@@ -1843,6 +1877,7 @@ pub struct EditorState {
     search: Option<FindState>,
     viewport_height: usize,
     mode: EditorMode,
+    split_view: bool,
     focus: EditorFocus,
     sidebar: SidebarState,
 }
@@ -1863,6 +1898,7 @@ impl EditorState {
             search: None,
             viewport_height: 1,
             mode,
+            split_view: false,
             focus: EditorFocus::Editor,
             sidebar,
         }
@@ -1879,6 +1915,7 @@ impl EditorState {
             search: None,
             viewport_height: 1,
             mode,
+            split_view: false,
             focus: EditorFocus::Editor,
             sidebar: SidebarState::for_file(None).unwrap_or_else(|_| SidebarState::fallback()),
         }
@@ -1910,6 +1947,19 @@ impl EditorState {
     fn refresh_git_changes(&mut self) {
         self.git_change_markers =
             crate::gitdiff::markers_for_buffer(self.file_path.as_deref(), self.buffer.lines());
+    }
+
+    fn companion_mode(&self) -> EditorMode {
+        match self.mode {
+            EditorMode::Preview => {
+                if self.file_type == FileType::Markdown {
+                    EditorMode::SourceHints
+                } else {
+                    EditorMode::Source
+                }
+            }
+            _ => EditorMode::Preview,
+        }
     }
 }
 
@@ -2175,7 +2225,7 @@ impl Overlay {
                 "Arrows move   Home/End line start/end   Ctrl+Home/End doc start/end",
                 "Ctrl+S save or save-as   Ctrl+F find   Ctrl+G goto line   Ctrl+E sidebar",
                 "Alt+N next match   Alt+P previous match   Ctrl+Z undo   Ctrl+R redo",
-                "Ctrl+P preview mode   Ctrl+, settings   Ctrl+W return home",
+                "Ctrl+P preview mode   Ctrl+\\ split   Ctrl+, settings   Ctrl+W return home",
                 "When sidebar is open: Tab focus   Enter open file   N file   Shift+N folder",
                 "E rename   D delete   Space/Right toggle dir",
                 "Ctrl+[ narrower   Ctrl+] wider",
@@ -2183,7 +2233,7 @@ impl Overlay {
             ],
             Self::Editor(EditorMode::Preview) => vec![
                 "Arrows move   Home/End line start/end   Ctrl+Home/End doc start/end",
-                "Ctrl+F find   Ctrl+G goto line   Ctrl+P source mode",
+                "Ctrl+F find   Ctrl+G goto line   Ctrl+P source mode   Ctrl+\\ split",
                 "Alt+N next match   Alt+P previous match",
                 "Ctrl+E sidebar   Ctrl+, settings   Ctrl+W return home",
                 "When sidebar is open: Tab focus   Enter open file   N file   Shift+N folder",
@@ -2196,7 +2246,7 @@ impl Overlay {
                 "Arrows move   Home/End line start/end   Ctrl+Home/End doc start/end",
                 "Ctrl+S save or save-as   Ctrl+F find   Ctrl+G goto line   Ctrl+E sidebar",
                 "Alt+N next match   Alt+P previous match   Ctrl+Z undo   Ctrl+R redo",
-                "Ctrl+P source+hints mode   Ctrl+, settings   Ctrl+W return home",
+                "Ctrl+P source+hints mode   Ctrl+\\ split   Ctrl+, settings   Ctrl+W return home",
                 "When sidebar is open: Tab focus   Enter open file   N file   Shift+N folder",
                 "E rename   D delete   Space/Right toggle dir",
                 "Ctrl+[ narrower   Ctrl+] wider",
@@ -2238,6 +2288,13 @@ pub struct OverlayView {
 }
 
 #[derive(Debug)]
+pub struct EditorSplitView {
+    pub title: String,
+    pub wrap: bool,
+    pub lines: Vec<ratatui::text::Line<'static>>,
+}
+
+#[derive(Debug)]
 pub enum ViewModel {
     Editor {
         title: String,
@@ -2254,6 +2311,7 @@ pub enum ViewModel {
         sidebar_width: u16,
         sidebar_focused: bool,
         sidebar_root: String,
+        split: Option<EditorSplitView>,
         dialog: Option<DialogView>,
     },
     Picker {
@@ -2737,6 +2795,22 @@ mod tests {
         };
 
         assert_eq!(after, before + 2);
+    }
+
+    #[test]
+    fn ctrl_backslash_toggles_split_view() {
+        let mut app = editor_app();
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('\\'),
+            KeyModifiers::CONTROL,
+        )));
+
+        let ViewModel::Editor { split, .. } = app.current_view(10, 80) else {
+            panic!("editor view");
+        };
+
+        assert!(split.is_some());
     }
 
     #[test]

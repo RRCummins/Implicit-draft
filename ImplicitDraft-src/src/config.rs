@@ -51,6 +51,7 @@ pub struct EditorKeys {
     pub find_prev: Shortcut,
     pub goto_line: Shortcut,
     pub cycle_mode: Shortcut,
+    pub toggle_split: Shortcut,
     pub toggle_sidebar: Shortcut,
     pub sidebar_narrower: Shortcut,
     pub sidebar_wider: Shortcut,
@@ -138,6 +139,7 @@ struct EditorKeysFile {
     find_prev: Option<String>,
     goto_line: Option<String>,
     cycle_mode: Option<String>,
+    toggle_split: Option<String>,
     toggle_sidebar: Option<String>,
     sidebar_narrower: Option<String>,
     sidebar_wider: Option<String>,
@@ -308,6 +310,7 @@ impl Default for KeyBindings {
                 find_prev: Shortcut::parse("alt+p").expect("default shortcut"),
                 goto_line: Shortcut::parse("ctrl+g").expect("default shortcut"),
                 cycle_mode: Shortcut::parse("ctrl+p").expect("default shortcut"),
+                toggle_split: Shortcut::parse("ctrl+\\").expect("default shortcut"),
                 toggle_sidebar: Shortcut::parse("ctrl+e").expect("default shortcut"),
                 sidebar_narrower: Shortcut::parse("ctrl+[").expect("default shortcut"),
                 sidebar_wider: Shortcut::parse("ctrl+]").expect("default shortcut"),
@@ -367,6 +370,10 @@ impl KeyBindings {
                 find_prev: parse_or_default(file.editor.find_prev, defaults.editor.find_prev)?,
                 goto_line: parse_or_default(file.editor.goto_line, defaults.editor.goto_line)?,
                 cycle_mode: parse_or_default(file.editor.cycle_mode, defaults.editor.cycle_mode)?,
+                toggle_split: parse_or_default(
+                    file.editor.toggle_split,
+                    defaults.editor.toggle_split,
+                )?,
                 toggle_sidebar: parse_or_default(
                     file.editor.toggle_sidebar,
                     defaults.editor.toggle_sidebar,
@@ -565,6 +572,7 @@ find_next = "alt+n"
 find_prev = "alt+p"
 goto_line = "ctrl+g"
 cycle_mode = "ctrl+p"
+toggle_split = "ctrl+\\"
 toggle_sidebar = "ctrl+e"
 sidebar_narrower = "ctrl+["
 sidebar_wider = "ctrl+]"

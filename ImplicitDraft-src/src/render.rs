@@ -6,7 +6,7 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, DialogView, OverlayView, ViewModel},
+    app::{App, DialogView, EditorSplitView, OverlayView, ViewModel},
     buffer::SearchMatch,
     gitdiff::LineChange,
     picker::PickerEntry,
@@ -45,7 +45,18 @@ struct EditorView {
     sidebar_width: u16,
     sidebar_focused: bool,
     sidebar_root: String,
+    split: Option<EditorSplitView>,
     dialog: Option<DialogView>,
+}
+
+struct EditorPanelView {
+    title: String,
+    lines: Vec<Line<'static>>,
+    line_numbers: bool,
+    wrap: bool,
+    git_change_markers: Option<Vec<Option<LineChange>>>,
+    cursor: Option<(usize, usize)>,
+    scroll: (usize, usize),
 }
 
 struct ConfigView {
@@ -84,6 +95,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             sidebar_width,
             sidebar_focused,
             sidebar_root,
+            split,
             dialog,
         } => draw_editor(
             frame,
@@ -103,6 +115,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 sidebar_width,
                 sidebar_focused,
                 sidebar_root,
+                split,
                 dialog,
             },
             theme,
@@ -244,75 +257,53 @@ fn draw_editor(frame: &mut Frame, area: Rect, editor: EditorView, theme: Theme) 
         area
     };
 
-    let [title_area, editor_area] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(editor_area);
-    frame.render_widget(
-        Paragraph::new(Line::styled(format!(" {} ", editor.title), theme.ui_chrome))
-            .style(theme.background),
-        title_area,
-    );
-
-    let show_git_change_gutter = editor.git_change_markers.iter().any(Option::is_some);
-    let editor_area = if show_git_change_gutter {
-        let [gutter_area, editor_area] =
-            Layout::horizontal([Constraint::Length(2), Constraint::Min(1)]).areas(editor_area);
-
-        let gutter_lines = (0..lines.len())
-            .map(
-                |row| match editor.git_change_markers.get(row).copied().flatten() {
-                    Some(LineChange::Added) => Line::styled("▏ ".to_owned(), theme.git_added),
-                    Some(LineChange::Deleted) => Line::styled("▔ ".to_owned(), theme.git_deleted),
-                    Some(LineChange::Modified) => Line::styled("▏ ".to_owned(), theme.git_modified),
-                    None => Line::styled("  ".to_owned(), theme.background),
-                },
-            )
-            .collect::<Vec<_>>();
-        let gutter = Paragraph::new(gutter_lines)
-            .style(theme.background)
-            .scroll((editor.scroll.0 as u16, 0));
-        frame.render_widget(gutter, gutter_area);
-        editor_area
-    } else {
-        editor_area
-    };
-
-    let editor_area = if editor.line_numbers {
-        let gutter_width = line_number_gutter_width(lines.len());
-        let [gutter_area, editor_area] =
-            Layout::horizontal([Constraint::Length(gutter_width), Constraint::Min(1)])
+    if let Some(split) = editor.split {
+        let [primary_area, secondary_area] =
+            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .areas(editor_area);
-
-        let gutter_lines = (1..=lines.len())
-            .map(|number| {
-                Line::styled(
-                    format!("{number:>width$} ", width = gutter_width as usize - 1),
-                    theme.ui_chrome,
-                )
-            })
-            .collect::<Vec<_>>();
-        let gutter = Paragraph::new(gutter_lines)
-            .style(theme.background)
-            .scroll((editor.scroll.0 as u16, 0));
-        frame.render_widget(gutter, gutter_area);
-        editor_area
+        draw_editor_panel(
+            frame,
+            primary_area,
+            EditorPanelView {
+                title: editor.title,
+                lines,
+                line_numbers: editor.line_numbers,
+                wrap: editor.wrap,
+                git_change_markers: Some(editor.git_change_markers),
+                cursor: editor.cursor,
+                scroll: editor.scroll,
+            },
+            theme,
+        );
+        draw_editor_panel(
+            frame,
+            secondary_area,
+            EditorPanelView {
+                title: split.title,
+                lines: split.lines,
+                line_numbers: false,
+                wrap: split.wrap,
+                git_change_markers: None,
+                cursor: None,
+                scroll: editor.scroll,
+            },
+            theme,
+        );
     } else {
-        editor_area
-    };
-
-    let editor_widget = Paragraph::new(lines)
-        .block(Block::default())
-        .style(theme.background);
-    let editor_widget = if editor.wrap {
-        editor_widget
-            .wrap(Wrap { trim: false })
-            .scroll((editor.scroll.0 as u16, 0))
-    } else {
-        editor_widget.scroll((editor.scroll.0 as u16, editor.scroll.1 as u16))
-    };
-    frame.render_widget(editor_widget, editor_area);
-
-    if let Some((column, row)) = editor.cursor {
-        frame.set_cursor_position((editor_area.x + column as u16, editor_area.y + row as u16));
+        draw_editor_panel(
+            frame,
+            editor_area,
+            EditorPanelView {
+                title: editor.title,
+                lines,
+                line_numbers: editor.line_numbers,
+                wrap: editor.wrap,
+                git_change_markers: Some(editor.git_change_markers),
+                cursor: editor.cursor,
+                scroll: editor.scroll,
+            },
+            theme,
+        );
     }
 
     if let Some(dialog) = editor.dialog {
@@ -331,6 +322,88 @@ fn draw_editor(frame: &mut Frame, area: Rect, editor: EditorView, theme: Theme) 
             .wrap(Wrap { trim: false });
 
         frame.render_widget(dialog, dialog_area);
+    }
+}
+
+fn draw_editor_panel(frame: &mut Frame, area: Rect, panel: EditorPanelView, theme: Theme) {
+    let [title_area, editor_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
+    frame.render_widget(
+        Paragraph::new(Line::styled(format!(" {} ", panel.title), theme.ui_chrome))
+            .style(theme.background),
+        title_area,
+    );
+
+    let show_git_change_gutter = panel
+        .git_change_markers
+        .as_ref()
+        .is_some_and(|markers| markers.iter().any(Option::is_some));
+    let editor_area = if show_git_change_gutter {
+        let [gutter_area, editor_area] =
+            Layout::horizontal([Constraint::Length(2), Constraint::Min(1)]).areas(editor_area);
+
+        let gutter_lines = (0..panel.lines.len())
+            .map(|row| {
+                match panel
+                    .git_change_markers
+                    .as_ref()
+                    .and_then(|markers| markers.get(row))
+                    .copied()
+                    .flatten()
+                {
+                    Some(LineChange::Added) => Line::styled("▏ ".to_owned(), theme.git_added),
+                    Some(LineChange::Deleted) => Line::styled("▔ ".to_owned(), theme.git_deleted),
+                    Some(LineChange::Modified) => Line::styled("▏ ".to_owned(), theme.git_modified),
+                    None => Line::styled("  ".to_owned(), theme.background),
+                }
+            })
+            .collect::<Vec<_>>();
+        let gutter = Paragraph::new(gutter_lines)
+            .style(theme.background)
+            .scroll((panel.scroll.0 as u16, 0));
+        frame.render_widget(gutter, gutter_area);
+        editor_area
+    } else {
+        editor_area
+    };
+
+    let editor_area = if panel.line_numbers {
+        let gutter_width = line_number_gutter_width(panel.lines.len());
+        let [gutter_area, editor_area] =
+            Layout::horizontal([Constraint::Length(gutter_width), Constraint::Min(1)])
+                .areas(editor_area);
+
+        let gutter_lines = (1..=panel.lines.len())
+            .map(|number| {
+                Line::styled(
+                    format!("{number:>width$} ", width = gutter_width as usize - 1),
+                    theme.ui_chrome,
+                )
+            })
+            .collect::<Vec<_>>();
+        let gutter = Paragraph::new(gutter_lines)
+            .style(theme.background)
+            .scroll((panel.scroll.0 as u16, 0));
+        frame.render_widget(gutter, gutter_area);
+        editor_area
+    } else {
+        editor_area
+    };
+
+    let editor_widget = Paragraph::new(panel.lines)
+        .block(Block::default())
+        .style(theme.background);
+    let editor_widget = if panel.wrap {
+        editor_widget
+            .wrap(Wrap { trim: false })
+            .scroll((panel.scroll.0 as u16, 0))
+    } else {
+        editor_widget.scroll((panel.scroll.0 as u16, panel.scroll.1 as u16))
+    };
+    frame.render_widget(editor_widget, editor_area);
+
+    if let Some((column, row)) = panel.cursor {
+        frame.set_cursor_position((editor_area.x + column as u16, editor_area.y + row as u16));
     }
 }
 
