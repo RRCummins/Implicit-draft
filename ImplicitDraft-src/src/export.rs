@@ -5,6 +5,7 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -29,9 +30,45 @@ pub enum PrintMode {
 #[value(rename_all = "kebab-case")]
 pub enum ExportFormat {
     Html,
+    Pdf,
 }
 
-pub fn print_path(path: &Path, mode: PrintMode, theme_name: &str, pager: bool) -> Result<()> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LineRange {
+    pub start: usize,
+    pub end: usize,
+}
+
+pub fn parse_line_range(value: &str) -> std::result::Result<LineRange, String> {
+    let trimmed = value.trim();
+    let (start, end) = match trimmed.split_once('-') {
+        Some((start, end)) => (start, end),
+        None => (trimmed, trimmed),
+    };
+
+    let start = start
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| format!("invalid line range `{value}`"))?;
+    let end = end
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| format!("invalid line range `{value}`"))?;
+
+    if start == 0 || end == 0 || end < start {
+        return Err(format!("invalid line range `{value}`"));
+    }
+
+    Ok(LineRange { start, end })
+}
+
+pub fn print_path(
+    path: &Path,
+    mode: PrintMode,
+    theme_name: &str,
+    pager: bool,
+    line_range: Option<LineRange>,
+) -> Result<()> {
     let theme = Theme::load_named(theme_name)
         .with_context(|| format!("failed to load theme {theme_name}"))?;
     let text =
@@ -40,6 +77,7 @@ pub fn print_path(path: &Path, mode: PrintMode, theme_name: &str, pager: bool) -
         .split('\n')
         .map(|line| line.strip_suffix('\r').unwrap_or(line).to_owned())
         .collect::<Vec<_>>();
+    let lines = slice_lines(&lines, line_range)?;
     let file_type = crate::filetype::detect(path);
     let width = print_width();
     let rendered = render_for_mode(&lines, path, file_type, mode, &theme, width);
@@ -61,6 +99,7 @@ pub fn export_path(
     mode: PrintMode,
     theme_name: &str,
     output_path: Option<&Path>,
+    line_range: Option<LineRange>,
 ) -> Result<PathBuf> {
     let theme = Theme::load_named(theme_name)
         .with_context(|| format!("failed to load theme {theme_name}"))?;
@@ -70,20 +109,64 @@ pub fn export_path(
         .split('\n')
         .map(|line| line.strip_suffix('\r').unwrap_or(line).to_owned())
         .collect::<Vec<_>>();
+    let lines = slice_lines(&lines, line_range)?;
     let file_type = crate::filetype::detect(path);
     let width = print_width();
     let rendered = render_for_mode(&lines, path, file_type, mode, &theme, width);
+    let title = html_title(&lines, path);
+    let html = render_lines_to_html_document(
+        &rendered,
+        &theme,
+        &title,
+        HtmlDocumentOptions {
+            paper_size: default_paper_size(),
+            source_label: source_label(path, line_range),
+        },
+    );
 
     match format {
         ExportFormat::Html => {
             let output_path = resolve_html_output_path(path, output_path);
-            let title = html_title(&lines, path);
-            let html = render_lines_to_html_document(&rendered, &theme, &title);
             fs::write(&output_path, html)
                 .with_context(|| format!("failed to write {}", output_path.display()))?;
             Ok(output_path)
         }
+        ExportFormat::Pdf => export_pdf_document(path, output_path, &html),
     }
+}
+
+pub fn snapshot_path(
+    path: &Path,
+    mode: PrintMode,
+    theme_name: &str,
+    output_path: Option<&Path>,
+    line_range: Option<LineRange>,
+    line_numbers: bool,
+) -> Result<PathBuf> {
+    let theme = Theme::load_named(theme_name)
+        .with_context(|| format!("failed to load theme {theme_name}"))?;
+    let text =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let lines = text
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line).to_owned())
+        .collect::<Vec<_>>();
+    let lines = slice_lines(&lines, line_range)?;
+    let file_type = crate::filetype::detect(path);
+    let rendered = render_for_mode(&lines, path, file_type, mode, &theme, print_width());
+    let output_path = resolve_snapshot_output_path(path, output_path)?;
+    let title = source_label(path, line_range);
+    let svg = render_lines_to_svg_document(
+        &rendered,
+        &theme,
+        SnapshotOptions {
+            title,
+            line_numbers,
+        },
+    );
+    fs::write(&output_path, svg)
+        .with_context(|| format!("failed to write {}", output_path.display()))?;
+    Ok(output_path)
 }
 
 fn render_for_mode(
@@ -219,6 +302,25 @@ fn base_color(code: u8, background: bool) -> String {
     code.to_string()
 }
 
+fn slice_lines(lines: &[String], range: Option<LineRange>) -> Result<Vec<String>> {
+    let Some(range) = range else {
+        return Ok(lines.to_vec());
+    };
+
+    if range.start > lines.len() {
+        return Err(anyhow!(
+            "line range {}-{} starts past the end of the document ({})",
+            range.start,
+            range.end,
+            lines.len()
+        ));
+    }
+
+    let start = range.start.saturating_sub(1);
+    let end = range.end.min(lines.len());
+    Ok(lines[start..end].to_vec())
+}
+
 pub fn validate_input_path<'a>(action: &str, path: Option<&'a Path>) -> Result<&'a Path> {
     let Some(path) = path else {
         return Err(anyhow!("{action} requires a file path"));
@@ -262,6 +364,35 @@ fn resolve_html_output_path(input_path: &Path, output_path: Option<&Path>) -> Pa
         .unwrap_or_else(|| input_path.with_extension("html"))
 }
 
+fn resolve_pdf_output_path(input_path: &Path, output_path: Option<&Path>) -> PathBuf {
+    output_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| input_path.with_extension("pdf"))
+}
+
+fn resolve_pdf_fallback_path(pdf_output_path: &Path) -> PathBuf {
+    pdf_output_path.with_extension("html")
+}
+
+fn resolve_snapshot_output_path(input_path: &Path, output_path: Option<&Path>) -> Result<PathBuf> {
+    let output_path = output_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| input_path.with_extension("svg"));
+    match output_path.extension().and_then(|ext| ext.to_str()) {
+        None | Some("svg") => Ok(output_path),
+        Some(_) => Err(anyhow!(
+            "snapshot output currently writes SVG; use a .svg path or omit --output"
+        )),
+    }
+}
+
+fn source_label(path: &Path, line_range: Option<LineRange>) -> String {
+    match line_range {
+        Some(range) => format!("{} [{}-{}]", path.display(), range.start, range.end),
+        None => path.display().to_string(),
+    }
+}
+
 fn html_title(lines: &[String], path: &Path) -> String {
     extract_frontmatter_title(lines)
         .or_else(|| {
@@ -295,18 +426,31 @@ fn extract_frontmatter_title(lines: &[String]) -> Option<String> {
     None
 }
 
-fn render_lines_to_html_document(lines: &[Line<'static>], theme: &Theme, title: &str) -> String {
+#[derive(Clone, Debug)]
+struct HtmlDocumentOptions {
+    paper_size: &'static str,
+    source_label: String,
+}
+
+fn render_lines_to_html_document(
+    lines: &[Line<'static>],
+    theme: &Theme,
+    title: &str,
+    options: HtmlDocumentOptions,
+) -> String {
     let mut html = String::new();
     html.push_str("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n");
     html.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
     html.push_str("<title>");
     html.push_str(&html_escape(title));
     html.push_str("</title>\n<style>\n");
-    html.push_str(&html_css(theme));
+    html.push_str(&html_css(theme, options.paper_size));
     html.push_str("</style>\n</head>\n<body>\n<main class=\"document\">\n");
     html.push_str("<header class=\"export-header\"><h1>");
     html.push_str(&html_escape(title));
-    html.push_str("</h1></header>\n");
+    html.push_str("</h1><p class=\"export-meta\">");
+    html.push_str(&html_escape(&options.source_label));
+    html.push_str("</p></header>\n");
 
     for line in lines {
         html.push_str("<div class=\"line\">");
@@ -346,7 +490,152 @@ fn render_lines_to_html_document(lines: &[Line<'static>], theme: &Theme, title: 
     html
 }
 
-fn html_css(theme: &Theme) -> String {
+#[derive(Clone, Debug)]
+struct SnapshotOptions {
+    title: String,
+    line_numbers: bool,
+}
+
+fn render_lines_to_svg_document(
+    lines: &[Line<'static>],
+    theme: &Theme,
+    options: SnapshotOptions,
+) -> String {
+    let char_width = 8.4_f32;
+    let font_size = 16.0_f32;
+    let line_height = 24.0_f32;
+    let outer_padding = 24.0_f32;
+    let frame_height = 34.0_f32;
+    let content_padding_x = 24.0_f32;
+    let content_padding_y = 22.0_f32;
+
+    let base_fg = color_or_default(base_text_style(theme).fg, "#e5e7eb");
+    let background = color_or_default(theme.code.bg.or(theme.background.bg), "#111827");
+    let frame_fill = color_or_default(theme.background.bg.or(theme.code.bg), "#111827");
+    let border = color_or_default(theme.ui_chrome.fg, "#7dd3fc");
+    let line_number_color = color_or_default(theme.rule.fg.or(theme.ui_chrome.fg), "#6b7280");
+
+    let max_line_len = lines
+        .iter()
+        .map(plain_line_width)
+        .max()
+        .unwrap_or(0)
+        .max(options.title.chars().count());
+    let gutter_digits = lines.len().max(1).to_string().len();
+    let gutter_width = if options.line_numbers {
+        (gutter_digits as f32 * char_width) + 18.0
+    } else {
+        0.0
+    };
+
+    let content_width =
+        (max_line_len as f32 * char_width) + gutter_width + (content_padding_x * 2.0);
+    let content_height =
+        (lines.len().max(1) as f32 * line_height) + frame_height + (content_padding_y * 2.0);
+    let width = (outer_padding * 2.0) + content_width;
+    let height = (outer_padding * 2.0) + content_height;
+    let text_start_x = outer_padding + content_padding_x + gutter_width;
+    let line_number_x = outer_padding + content_padding_x;
+    let first_line_y = outer_padding + frame_height + content_padding_y;
+
+    let mut svg = String::new();
+    svg.push_str(&format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width:.0}\" height=\"{height:.0}\" viewBox=\"0 0 {width:.0} {height:.0}\" fill=\"none\">"
+    ));
+    svg.push_str(
+        "<defs><filter id=\"shadow\" x=\"-20%\" y=\"-20%\" width=\"140%\" height=\"140%\">\
+         <feDropShadow dx=\"0\" dy=\"12\" stdDeviation=\"18\" flood-opacity=\"0.28\"/>\
+         </filter></defs>",
+    );
+    svg.push_str(&format!(
+        "<rect x=\"{outer_padding}\" y=\"{outer_padding}\" width=\"{content_width}\" height=\"{content_height}\" rx=\"18\" fill=\"{background}\" filter=\"url(#shadow)\"/>"
+    ));
+    svg.push_str(&format!(
+        "<rect x=\"{outer_padding}\" y=\"{outer_padding}\" width=\"{content_width}\" height=\"{frame_height}\" rx=\"18\" fill=\"{frame_fill}\" stroke=\"{border}\" stroke-opacity=\"0.35\"/>"
+    ));
+    svg.push_str(&format!(
+        "<rect x=\"{outer_padding}\" y=\"{}\" width=\"{content_width}\" height=\"{}\" fill=\"{background}\"/>",
+        outer_padding + frame_height - 18.0,
+        content_height - frame_height + 18.0,
+    ));
+    svg.push_str(&format!(
+        "<circle cx=\"{}\" cy=\"{}\" r=\"6\" fill=\"#ff5f57\"/><circle cx=\"{}\" cy=\"{}\" r=\"6\" fill=\"#febc2e\"/><circle cx=\"{}\" cy=\"{}\" r=\"6\" fill=\"#28c840\"/>",
+        outer_padding + 20.0,
+        outer_padding + 17.0,
+        outer_padding + 38.0,
+        outer_padding + 17.0,
+        outer_padding + 56.0,
+        outer_padding + 17.0
+    ));
+    svg.push_str(&format!(
+        "<text x=\"{}\" y=\"{}\" fill=\"{}\" fill-opacity=\"0.9\" font-family=\"SFMono-Regular, Menlo, Consolas, monospace\" font-size=\"13\">{}</text>",
+        outer_padding + 78.0,
+        outer_padding + 21.0,
+        border,
+        html_escape(&options.title)
+    ));
+
+    for (index, line) in lines.iter().enumerate() {
+        let y = first_line_y + (index as f32 * line_height);
+        if options.line_numbers {
+            svg.push_str(&format!(
+                "<text x=\"{line_number_x}\" y=\"{y}\" fill=\"{line_number_color}\" fill-opacity=\"0.75\" font-family=\"SFMono-Regular, Menlo, Consolas, monospace\" font-size=\"13\">{}</text>",
+                index + 1
+            ));
+        }
+
+        let mut x = text_start_x;
+        let line_style = line.style;
+        for span in &line.spans {
+            if span.content.is_empty() {
+                continue;
+            }
+
+            let style = line_style.patch(span.style);
+            let text = span.content.as_ref();
+            let span_width = visible_width(text) as f32 * char_width;
+            if let Some(bg) = style.bg.and_then(color_to_css) {
+                svg.push_str(&format!(
+                    "<rect x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"18\" rx=\"4\" fill=\"{}\"/>",
+                    x - 1.0,
+                    y - 13.0,
+                    span_width.max(1.0) + 2.0,
+                    bg
+                ));
+            }
+
+            let fill = style
+                .fg
+                .and_then(color_to_css)
+                .unwrap_or_else(|| base_fg.clone());
+            let weight = if style.add_modifier.contains(Modifier::BOLD) {
+                " font-weight=\"700\""
+            } else {
+                ""
+            };
+            let font_style = if style.add_modifier.contains(Modifier::ITALIC) {
+                " font-style=\"italic\""
+            } else {
+                ""
+            };
+            let text_decoration = if style.add_modifier.contains(Modifier::UNDERLINED) {
+                " text-decoration=\"underline\""
+            } else {
+                ""
+            };
+            svg.push_str(&format!(
+                "<text x=\"{x:.1}\" y=\"{y:.1}\" fill=\"{fill}\" font-family=\"SFMono-Regular, Menlo, Consolas, monospace\" font-size=\"{font_size}\"{weight}{font_style}{text_decoration}>{}</text>",
+                html_escape(text)
+            ));
+            x += span_width;
+        }
+    }
+
+    svg.push_str("</svg>\n");
+    svg
+}
+
+fn html_css(theme: &Theme, paper_size: &str) -> String {
     format!(
         concat!(
             ":root {{",
@@ -361,16 +650,19 @@ fn html_css(theme: &Theme) -> String {
             ".document {{ max-width: 1100px; margin: 0 auto; border: 1px solid color-mix(in srgb, var(--implicit-chrome) 35%, transparent); border-radius: 16px; overflow: hidden; background: color-mix(in srgb, var(--implicit-bg) 94%, var(--implicit-chrome)); }}\n",
             ".export-header {{ padding: 20px 24px; border-bottom: 1px solid color-mix(in srgb, var(--implicit-chrome) 35%, transparent); }}\n",
             ".export-header h1 {{ margin: 0; font-size: 18px; color: var(--implicit-chrome); }}\n",
+            ".export-meta {{ margin: 6px 0 0; color: color-mix(in srgb, var(--implicit-fg) 78%, transparent); font-size: 12px; }}\n",
             ".line {{ white-space: pre-wrap; padding: 0 24px; min-height: 1.45em; }}\n",
             ".line:first-of-type {{ padding-top: 20px; }}\n",
             ".line:last-of-type {{ padding-bottom: 24px; }}\n",
-            "@media print {{ body {{ padding: 0; background: white; }} .document {{ border: none; border-radius: 0; max-width: none; }} }}\n"
+            "@page {{ size: {}; margin: 18mm; }}\n",
+            "@media print {{ body {{ padding: 0; background: white; }} .document {{ border: none; border-radius: 0; max-width: none; }} .export-header {{ break-after: avoid; }} }}\n"
         ),
         color_or_default(theme.background.bg, "#111827"),
         color_or_default(base_text_style(theme).fg, "#e5e7eb"),
         color_or_default(theme.ui_chrome.fg, "#7dd3fc"),
         color_or_default(theme.selection.bg, "#374151"),
         color_or_default(theme.code.bg, "#1f2937"),
+        paper_size,
     )
 }
 
@@ -487,6 +779,163 @@ fn html_escape(text: &str) -> String {
     escaped
 }
 
+fn plain_line_width(line: &Line<'static>) -> usize {
+    line.spans
+        .iter()
+        .map(|span| visible_width(span.content.as_ref()))
+        .sum()
+}
+
+fn visible_width(text: &str) -> usize {
+    text.chars().count()
+}
+
+fn default_paper_size() -> &'static str {
+    let locale = env::var("LC_PAPER").ok().or_else(|| env::var("LANG").ok());
+    paper_size_for_locale(locale.as_deref())
+}
+
+fn paper_size_for_locale(locale: Option<&str>) -> &'static str {
+    let Some(locale) = locale.map(str::trim).filter(|locale| !locale.is_empty()) else {
+        return "Letter";
+    };
+
+    let upper = locale.to_ascii_uppercase();
+    if upper.contains("US") || upper.contains("CA") || upper.contains("MX") {
+        "Letter"
+    } else {
+        "A4"
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PdfTool {
+    Wkhtmltopdf,
+    Chromium,
+    ChromiumBrowser,
+    GoogleChrome,
+    GoogleChromeStable,
+}
+
+impl PdfTool {
+    fn program(self) -> &'static str {
+        match self {
+            PdfTool::Wkhtmltopdf => "wkhtmltopdf",
+            PdfTool::Chromium => "chromium",
+            PdfTool::ChromiumBrowser => "chromium-browser",
+            PdfTool::GoogleChrome => "google-chrome",
+            PdfTool::GoogleChromeStable => "google-chrome-stable",
+        }
+    }
+}
+
+fn export_pdf_document(
+    input_path: &Path,
+    output_path: Option<&Path>,
+    html: &str,
+) -> Result<PathBuf> {
+    let pdf_output_path = resolve_pdf_output_path(input_path, output_path);
+    if let Some(tool) = detect_pdf_tool() {
+        let temp_html_path = temp_html_export_path(&pdf_output_path);
+        fs::write(&temp_html_path, html)
+            .with_context(|| format!("failed to write {}", temp_html_path.display()))?;
+
+        let render_result = render_pdf_with_tool(tool, &temp_html_path, &pdf_output_path);
+        let cleanup_result = fs::remove_file(&temp_html_path);
+        if let Err(error) = cleanup_result {
+            eprintln!(
+                "implicit: warning: failed to clean up temporary export {}: {error}",
+                temp_html_path.display()
+            );
+        }
+
+        render_result?;
+        return Ok(pdf_output_path);
+    }
+
+    let fallback_path = resolve_pdf_fallback_path(&pdf_output_path);
+    fs::write(&fallback_path, html)
+        .with_context(|| format!("failed to write {}", fallback_path.display()))?;
+    eprintln!(
+        "implicit: no PDF renderer found; wrote HTML fallback to {}",
+        fallback_path.display()
+    );
+    Ok(fallback_path)
+}
+
+fn detect_pdf_tool() -> Option<PdfTool> {
+    select_pdf_tool(command_exists)
+}
+
+fn select_pdf_tool<F>(mut command_exists: F) -> Option<PdfTool>
+where
+    F: FnMut(&str) -> bool,
+{
+    [
+        PdfTool::Wkhtmltopdf,
+        PdfTool::Chromium,
+        PdfTool::ChromiumBrowser,
+        PdfTool::GoogleChrome,
+        PdfTool::GoogleChromeStable,
+    ]
+    .into_iter()
+    .find(|tool| command_exists(tool.program()))
+}
+
+fn command_exists(program: &str) -> bool {
+    env::var_os("PATH")
+        .map(|paths| env::split_paths(&paths).any(|path| path.join(program).exists()))
+        .unwrap_or(false)
+}
+
+fn temp_html_export_path(pdf_output_path: &Path) -> PathBuf {
+    let stem = pdf_output_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("implicit-export");
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    env::temp_dir().join(format!("{stem}-{unique}.implicit-export.html"))
+}
+
+fn render_pdf_with_tool(tool: PdfTool, html_path: &Path, pdf_path: &Path) -> Result<()> {
+    let status = match tool {
+        PdfTool::Wkhtmltopdf => Command::new(tool.program())
+            .arg(html_path)
+            .arg(pdf_path)
+            .status(),
+        PdfTool::Chromium
+        | PdfTool::ChromiumBrowser
+        | PdfTool::GoogleChrome
+        | PdfTool::GoogleChromeStable => Command::new(tool.program())
+            .arg("--headless")
+            .arg("--disable-gpu")
+            .arg(format!("--print-to-pdf={}", pdf_path.display()))
+            .arg(file_url(html_path)?)
+            .status(),
+    }
+    .with_context(|| format!("failed to launch PDF renderer `{}`", tool.program()))?;
+
+    if !status.success() {
+        return Err(anyhow!(
+            "PDF renderer `{}` exited with status {status}",
+            tool.program()
+        ));
+    }
+
+    Ok(())
+}
+
+fn file_url(path: &Path) -> Result<String> {
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("failed to resolve {}", path.display()))?;
+    let encoded = canonical.to_string_lossy().replace(' ', "%20");
+    Ok(format!("file://{encoded}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,6 +984,16 @@ mod tests {
     }
 
     #[test]
+    fn pdf_output_defaults_to_input_stem() {
+        let output = resolve_pdf_output_path(Path::new("notes.md"), None);
+        assert_eq!(output, PathBuf::from("notes.pdf"));
+        assert_eq!(
+            resolve_pdf_fallback_path(Path::new("notes.pdf")),
+            PathBuf::from("notes.html")
+        );
+    }
+
+    #[test]
     fn html_title_prefers_frontmatter_title() {
         let lines = vec![
             String::from("---"),
@@ -557,10 +1016,114 @@ mod tests {
                 .fg(Color::LightBlue)
                 .add_modifier(Modifier::BOLD),
         )];
-        let html = render_lines_to_html_document(&lines, &theme, "Demo");
+        let html = render_lines_to_html_document(
+            &lines,
+            &theme,
+            "Demo",
+            HtmlDocumentOptions {
+                paper_size: "Letter",
+                source_label: String::from("demo.md"),
+            },
+        );
         assert!(html.contains("<title>Demo</title>"));
         assert!(html.contains("&lt;hello&gt;"));
         assert!(html.contains("--implicit-bg"));
         assert!(html.contains("font-weight:700"));
+        assert!(html.contains("demo.md"));
+        assert!(html.contains("@page { size: Letter; margin: 18mm; }"));
+    }
+
+    #[test]
+    fn pdf_tool_selection_prefers_wkhtmltopdf_first() {
+        let tool = select_pdf_tool(|program| matches!(program, "chromium" | "wkhtmltopdf"));
+        assert_eq!(tool, Some(PdfTool::Wkhtmltopdf));
+    }
+
+    #[test]
+    fn pdf_tool_selection_falls_back_to_chrome_family() {
+        let tool = select_pdf_tool(|program| program == "google-chrome");
+        assert_eq!(tool, Some(PdfTool::GoogleChrome));
+    }
+
+    #[test]
+    fn paper_size_defaults_to_letter_for_us_locale() {
+        assert_eq!(paper_size_for_locale(Some("en_US.UTF-8")), "Letter");
+        assert_eq!(paper_size_for_locale(Some("en_CA.UTF-8")), "Letter");
+    }
+
+    #[test]
+    fn paper_size_defaults_to_a4_outside_letter_regions() {
+        assert_eq!(paper_size_for_locale(Some("en_GB.UTF-8")), "A4");
+        assert_eq!(paper_size_for_locale(Some("de_DE.UTF-8")), "A4");
+    }
+
+    #[test]
+    fn line_range_parser_accepts_single_line_or_range() {
+        assert_eq!(parse_line_range("7"), Ok(LineRange { start: 7, end: 7 }));
+        assert_eq!(
+            parse_line_range("10-25"),
+            Ok(LineRange { start: 10, end: 25 })
+        );
+    }
+
+    #[test]
+    fn slice_lines_applies_requested_range() {
+        let lines = vec![
+            String::from("one"),
+            String::from("two"),
+            String::from("three"),
+            String::from("four"),
+        ];
+        let slice = slice_lines(&lines, Some(LineRange { start: 2, end: 3 })).expect("slice");
+        assert_eq!(slice, vec![String::from("two"), String::from("three")]);
+    }
+
+    #[test]
+    fn source_label_includes_range_when_present() {
+        assert_eq!(
+            source_label(
+                Path::new("notes.md"),
+                Some(LineRange { start: 10, end: 25 })
+            ),
+            String::from("notes.md [10-25]")
+        );
+    }
+
+    #[test]
+    fn snapshot_output_defaults_to_svg() {
+        let output = resolve_snapshot_output_path(Path::new("main.rs"), None).expect("svg path");
+        assert_eq!(output, PathBuf::from("main.svg"));
+    }
+
+    #[test]
+    fn snapshot_output_rejects_non_svg_extensions() {
+        let error = resolve_snapshot_output_path(Path::new("main.rs"), Some(Path::new("main.png")))
+            .expect_err("png should be rejected for now");
+        assert!(
+            error
+                .to_string()
+                .contains("snapshot output currently writes SVG")
+        );
+    }
+
+    #[test]
+    fn svg_snapshot_includes_window_chrome_and_code() {
+        let theme = Theme::source_hints_default();
+        let lines = vec![Line::styled(
+            "fn main() {}",
+            Style::default().fg(Color::LightBlue),
+        )];
+        let svg = render_lines_to_svg_document(
+            &lines,
+            &theme,
+            SnapshotOptions {
+                title: String::from("main.rs [1-1]"),
+                line_numbers: true,
+            },
+        );
+        assert!(svg.contains("<svg"));
+        assert!(svg.contains("<circle"));
+        assert!(svg.contains("main.rs [1-1]"));
+        assert!(svg.contains("fn main() {}"));
     }
 }

@@ -26,7 +26,7 @@ use clap::Parser;
 use crate::{
     app::{App, StartupTarget},
     config::{AppConfig, RuntimeConfig},
-    export::{ExportFormat, PrintMode},
+    export::{ExportFormat, LineRange, PrintMode, parse_line_range},
 };
 
 #[derive(Debug, Parser)]
@@ -56,9 +56,17 @@ struct Cli {
     #[arg(long)]
     pager: bool,
 
+    /// Export a code-oriented image snapshot instead of opening the TUI.
+    #[arg(long)]
+    snapshot: bool,
+
     /// Output path used by --export.
     #[arg(long)]
     output: Option<PathBuf>,
+
+    /// Restrict --print or --export to a 1-based line range like 10-25.
+    #[arg(long, value_parser = parse_line_range)]
+    lines: Option<LineRange>,
 
     /// File to open. The no-argument picker flow lands in a later phase.
     file: Option<PathBuf>,
@@ -66,8 +74,10 @@ struct Cli {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    if cli.print && cli.export.is_some() {
-        bail!("cannot combine --print with --export");
+    let mode_count =
+        usize::from(cli.print) + usize::from(cli.export.is_some()) + usize::from(cli.snapshot);
+    if mode_count > 1 {
+        bail!("cannot combine --print, --export, and --snapshot");
     }
 
     let runtime = match AppConfig::load_runtime() {
@@ -84,13 +94,34 @@ fn main() -> Result<()> {
     if cli.print {
         let path = crate::export::validate_input_path("--print", cli.file.as_deref())?;
         let theme_name = cli.theme.as_deref().unwrap_or(&runtime.app.theme);
-        return crate::export::print_path(path, cli.mode, theme_name, cli.pager);
+        return crate::export::print_path(path, cli.mode, theme_name, cli.pager, cli.lines);
     }
 
     if let Some(format) = cli.export {
         let path = crate::export::validate_input_path("--export", cli.file.as_deref())?;
         let theme_name = cli.theme.as_deref().unwrap_or(&runtime.app.theme);
-        crate::export::export_path(path, format, cli.mode, theme_name, cli.output.as_deref())?;
+        crate::export::export_path(
+            path,
+            format,
+            cli.mode,
+            theme_name,
+            cli.output.as_deref(),
+            cli.lines,
+        )?;
+        return Ok(());
+    }
+
+    if cli.snapshot {
+        let path = crate::export::validate_input_path("--snapshot", cli.file.as_deref())?;
+        let theme_name = cli.theme.as_deref().unwrap_or(&runtime.app.theme);
+        crate::export::snapshot_path(
+            path,
+            cli.mode,
+            theme_name,
+            cli.output.as_deref(),
+            cli.lines,
+            runtime.app.line_numbers,
+        )?;
         return Ok(());
     }
 
@@ -188,12 +219,32 @@ mod tests {
             "implicit",
             "--export",
             "html",
+            "--lines",
+            "10-25",
             "--output",
             "notes.html",
             "notes.md",
         ]);
         assert_eq!(cli.export, Some(ExportFormat::Html));
         assert_eq!(cli.output, Some(PathBuf::from("notes.html")));
+        assert_eq!(cli.lines, Some(LineRange { start: 10, end: 25 }));
         assert_eq!(cli.file, Some(PathBuf::from("notes.md")));
+    }
+
+    #[test]
+    fn snapshot_flag_parses_output_path() {
+        let cli = Cli::parse_from([
+            "implicit",
+            "--snapshot",
+            "--lines",
+            "12-18",
+            "--output",
+            "snippet.svg",
+            "main.rs",
+        ]);
+        assert!(cli.snapshot);
+        assert_eq!(cli.output, Some(PathBuf::from("snippet.svg")));
+        assert_eq!(cli.lines, Some(LineRange { start: 12, end: 18 }));
+        assert_eq!(cli.file, Some(PathBuf::from("main.rs")));
     }
 }
