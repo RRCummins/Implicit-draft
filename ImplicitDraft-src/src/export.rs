@@ -153,7 +153,7 @@ pub fn snapshot_path(
         .collect::<Vec<_>>();
     let lines = slice_lines(&lines, line_range)?;
     let file_type = crate::filetype::detect(path);
-    let output_path = resolve_snapshot_output_path(path, output_path)?;
+    let output = resolve_snapshot_output_path(path, output_path)?;
     let snapshot = prepare_snapshot_render(
         &lines,
         path,
@@ -171,9 +171,14 @@ pub fn snapshot_path(
             line_numbers: snapshot.line_numbers,
         },
     );
-    fs::write(&output_path, svg)
-        .with_context(|| format!("failed to write {}", output_path.display()))?;
-    Ok(output_path)
+    match output.format {
+        SnapshotOutputFormat::Svg => {
+            fs::write(&output.path, svg)
+                .with_context(|| format!("failed to write {}", output.path.display()))?;
+            Ok(output.path)
+        }
+        SnapshotOutputFormat::Png => export_png_snapshot(&svg, &output.path),
+    }
 }
 
 fn render_for_mode(
@@ -426,15 +431,35 @@ fn resolve_pdf_fallback_path(pdf_output_path: &Path) -> PathBuf {
     pdf_output_path.with_extension("html")
 }
 
-fn resolve_snapshot_output_path(input_path: &Path, output_path: Option<&Path>) -> Result<PathBuf> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SnapshotOutputFormat {
+    Svg,
+    Png,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SnapshotOutputTarget {
+    path: PathBuf,
+    format: SnapshotOutputFormat,
+}
+
+fn resolve_snapshot_output_path(
+    input_path: &Path,
+    output_path: Option<&Path>,
+) -> Result<SnapshotOutputTarget> {
     let output_path = output_path
         .map(Path::to_path_buf)
         .unwrap_or_else(|| input_path.with_extension("svg"));
     match output_path.extension().and_then(|ext| ext.to_str()) {
-        None | Some("svg") => Ok(output_path),
-        Some(_) => Err(anyhow!(
-            "snapshot output currently writes SVG; use a .svg path or omit --output"
-        )),
+        None | Some("svg") => Ok(SnapshotOutputTarget {
+            path: output_path,
+            format: SnapshotOutputFormat::Svg,
+        }),
+        Some("png") => Ok(SnapshotOutputTarget {
+            path: output_path,
+            format: SnapshotOutputFormat::Png,
+        }),
+        Some(_) => Err(anyhow!("snapshot output supports only .svg or .png paths")),
     }
 }
 
@@ -443,6 +468,87 @@ fn source_label(path: &Path, line_range: Option<LineRange>) -> String {
         Some(range) => format!("{} [{}-{}]", path.display(), range.start, range.end),
         None => path.display().to_string(),
     }
+}
+
+fn export_png_snapshot(svg: &str, png_path: &Path) -> Result<PathBuf> {
+    let temp_svg = temp_snapshot_svg_path(png_path);
+    fs::write(&temp_svg, svg).with_context(|| format!("failed to write {}", temp_svg.display()))?;
+
+    let convert_result = convert_svg_to_png(&temp_svg, png_path);
+    let cleanup_result = fs::remove_file(&temp_svg);
+    if let Err(error) = cleanup_result {
+        eprintln!(
+            "implicit: warning: failed to clean up temporary snapshot {}: {error}",
+            temp_svg.display()
+        );
+    }
+
+    convert_result?;
+    Ok(png_path.to_path_buf())
+}
+
+fn temp_snapshot_svg_path(output_path: &Path) -> PathBuf {
+    let stem = output_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("implicit-snapshot");
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    env::temp_dir().join(format!("{stem}-{unique}.implicit-snapshot.svg"))
+}
+
+fn convert_svg_to_png(svg_path: &Path, png_path: &Path) -> Result<()> {
+    let temp_dir = temp_snapshot_output_dir(png_path);
+    fs::create_dir_all(&temp_dir)
+        .with_context(|| format!("failed to create {}", temp_dir.display()))?;
+
+    let status = Command::new("qlmanage")
+        .arg("-t")
+        .arg("-s")
+        .arg("2000")
+        .arg("-o")
+        .arg(&temp_dir)
+        .arg(svg_path)
+        .status()
+        .context("failed to launch qlmanage for PNG snapshot conversion")?;
+
+    if !status.success() {
+        return Err(anyhow!("qlmanage exited with status {status}"));
+    }
+
+    let generated_name = format!(
+        "{}.png",
+        svg_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("snapshot.svg")
+    );
+    let generated_path = temp_dir.join(generated_name);
+    fs::copy(&generated_path, png_path).with_context(|| {
+        format!(
+            "failed to copy generated PNG {} to {}",
+            generated_path.display(),
+            png_path.display()
+        )
+    })?;
+    fs::remove_file(&generated_path).ok();
+    fs::remove_dir_all(&temp_dir).ok();
+
+    Ok(())
+}
+
+fn temp_snapshot_output_dir(output_path: &Path) -> PathBuf {
+    let stem = output_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("implicit-snapshot");
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    env::temp_dir().join(format!("{stem}-{unique}.implicit-png"))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1234,18 +1340,34 @@ mod tests {
     #[test]
     fn snapshot_output_defaults_to_svg() {
         let output = resolve_snapshot_output_path(Path::new("main.rs"), None).expect("svg path");
-        assert_eq!(output, PathBuf::from("main.svg"));
+        assert_eq!(
+            output,
+            SnapshotOutputTarget {
+                path: PathBuf::from("main.svg"),
+                format: SnapshotOutputFormat::Svg
+            }
+        );
     }
 
     #[test]
-    fn snapshot_output_rejects_non_svg_extensions() {
-        let error = resolve_snapshot_output_path(Path::new("main.rs"), Some(Path::new("main.png")))
-            .expect_err("png should be rejected for now");
-        assert!(
-            error
-                .to_string()
-                .contains("snapshot output currently writes SVG")
+    fn snapshot_output_accepts_png_extensions() {
+        let output =
+            resolve_snapshot_output_path(Path::new("main.rs"), Some(Path::new("main.png")))
+                .expect("png path");
+        assert_eq!(
+            output,
+            SnapshotOutputTarget {
+                path: PathBuf::from("main.png"),
+                format: SnapshotOutputFormat::Png
+            }
         );
+    }
+
+    #[test]
+    fn snapshot_output_rejects_other_extensions() {
+        let error = resolve_snapshot_output_path(Path::new("main.rs"), Some(Path::new("main.jpg")))
+            .expect_err("jpg should be rejected");
+        assert!(error.to_string().contains("supports only .svg or .png"));
     }
 
     #[test]
