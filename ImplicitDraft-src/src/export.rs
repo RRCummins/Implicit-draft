@@ -153,15 +153,22 @@ pub fn snapshot_path(
         .collect::<Vec<_>>();
     let lines = slice_lines(&lines, line_range)?;
     let file_type = crate::filetype::detect(path);
-    let rendered = render_for_mode(&lines, path, file_type, mode, &theme, print_width());
     let output_path = resolve_snapshot_output_path(path, output_path)?;
-    let title = source_label(path, line_range);
+    let snapshot = prepare_snapshot_render(
+        &lines,
+        path,
+        file_type,
+        mode,
+        &theme,
+        line_range,
+        line_numbers,
+    );
     let svg = render_lines_to_svg_document(
-        &rendered,
+        &snapshot.rendered,
         &theme,
         SnapshotOptions {
-            title,
-            line_numbers,
+            title: snapshot.title,
+            line_numbers: snapshot.line_numbers,
         },
     );
     fs::write(&output_path, svg)
@@ -195,6 +202,51 @@ fn render_for_mode(
             _ => preview::render_document(lines, theme, width),
         },
         PrintMode::Auto => unreachable!("auto resolved before rendering"),
+    }
+}
+
+#[derive(Clone, Debug)]
+struct SnapshotRender {
+    rendered: Vec<Line<'static>>,
+    title: String,
+    line_numbers: bool,
+}
+
+fn prepare_snapshot_render(
+    lines: &[String],
+    path: &Path,
+    file_type: FileType,
+    mode: PrintMode,
+    theme: &Theme,
+    line_range: Option<LineRange>,
+    line_numbers: bool,
+) -> SnapshotRender {
+    let base_title = source_label(path, line_range);
+    if matches!(file_type, FileType::Markdown | FileType::Text)
+        && let Some(fenced) = extract_fenced_code_block(lines)
+    {
+        let rendered = code::render_fenced_document(&fenced.lines, theme, fenced.info.as_deref());
+        let title = fenced
+            .info
+            .as_deref()
+            .filter(|info| !info.is_empty())
+            .map(|info| format!("{base_title} · {info}"))
+            .unwrap_or_else(|| format!("{base_title} · code"));
+        return SnapshotRender {
+            rendered,
+            title,
+            line_numbers,
+        };
+    }
+
+    let resolved_mode = resolve_mode(file_type, mode);
+    let rendered = render_for_mode(lines, path, file_type, mode, theme, print_width());
+    let line_numbers =
+        line_numbers && matches!(resolved_mode, PrintMode::Source | PrintMode::SourceHints);
+    SnapshotRender {
+        rendered,
+        title: base_title,
+        line_numbers,
     }
 }
 
@@ -393,6 +445,39 @@ fn source_label(path: &Path, line_range: Option<LineRange>) -> String {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FencedCodeBlock {
+    info: Option<String>,
+    lines: Vec<String>,
+}
+
+fn extract_fenced_code_block(lines: &[String]) -> Option<FencedCodeBlock> {
+    let start = lines.iter().position(|line| !line.trim().is_empty())?;
+    let end = lines.iter().rposition(|line| !line.trim().is_empty())?;
+    if start >= end {
+        return None;
+    }
+
+    let opening = lines[start].trim();
+    let (marker, info) = if let Some(rest) = opening.strip_prefix("```") {
+        ("```", rest.trim())
+    } else if let Some(rest) = opening.strip_prefix("~~~") {
+        ("~~~", rest.trim())
+    } else {
+        return None;
+    };
+
+    let closing = lines[end].trim();
+    if !closing.starts_with(marker) {
+        return None;
+    }
+
+    Some(FencedCodeBlock {
+        info: (!info.is_empty()).then(|| info.to_owned()),
+        lines: lines[start + 1..end].to_vec(),
+    })
+}
+
 fn html_title(lines: &[String], path: &Path) -> String {
     extract_frontmatter_title(lines)
         .or_else(|| {
@@ -505,7 +590,7 @@ fn render_lines_to_svg_document(
     let font_size = 16.0_f32;
     let line_height = 24.0_f32;
     let outer_padding = 24.0_f32;
-    let frame_height = 34.0_f32;
+    let frame_height = 38.0_f32;
     let content_padding_x = 24.0_f32;
     let content_padding_y = 22.0_f32;
 
@@ -514,13 +599,15 @@ fn render_lines_to_svg_document(
     let frame_fill = color_or_default(theme.background.bg.or(theme.code.bg), "#111827");
     let border = color_or_default(theme.ui_chrome.fg, "#7dd3fc");
     let line_number_color = color_or_default(theme.rule.fg.or(theme.ui_chrome.fg), "#6b7280");
+    let gutter_fill = color_or_default(theme.background.bg, "#111827");
+    let title = abbreviate_middle(&options.title, 52);
 
     let max_line_len = lines
         .iter()
         .map(plain_line_width)
         .max()
         .unwrap_or(0)
-        .max(options.title.chars().count());
+        .max(title.chars().count().min(52));
     let gutter_digits = lines.len().max(1).to_string().len();
     let gutter_width = if options.line_numbers {
         (gutter_digits as f32 * char_width) + 18.0
@@ -543,10 +630,20 @@ fn render_lines_to_svg_document(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width:.0}\" height=\"{height:.0}\" viewBox=\"0 0 {width:.0} {height:.0}\" fill=\"none\">"
     ));
     svg.push_str(
-        "<defs><filter id=\"shadow\" x=\"-20%\" y=\"-20%\" width=\"140%\" height=\"140%\">\
+        "<defs>\
+         <linearGradient id=\"frameGradient\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\">\
+         <stop offset=\"0%\" stop-color=\"#ffffff\" stop-opacity=\"0.05\"/>\
+         <stop offset=\"100%\" stop-color=\"#ffffff\" stop-opacity=\"0.01\"/>\
+         </linearGradient>\
+         <filter id=\"shadow\" x=\"-20%\" y=\"-20%\" width=\"140%\" height=\"140%\">\
          <feDropShadow dx=\"0\" dy=\"12\" stdDeviation=\"18\" flood-opacity=\"0.28\"/>\
-         </filter></defs>",
+         </filter>\
+         </defs>",
     );
+    svg.push_str(&format!(
+        "<rect width=\"{width:.0}\" height=\"{height:.0}\" rx=\"28\" fill=\"{}\" fill-opacity=\"0.18\"/>",
+        background
+    ));
     svg.push_str(&format!(
         "<rect x=\"{outer_padding}\" y=\"{outer_padding}\" width=\"{content_width}\" height=\"{content_height}\" rx=\"18\" fill=\"{background}\" filter=\"url(#shadow)\"/>"
     ));
@@ -557,6 +654,9 @@ fn render_lines_to_svg_document(
         "<rect x=\"{outer_padding}\" y=\"{}\" width=\"{content_width}\" height=\"{}\" fill=\"{background}\"/>",
         outer_padding + frame_height - 18.0,
         content_height - frame_height + 18.0,
+    ));
+    svg.push_str(&format!(
+        "<rect x=\"{outer_padding}\" y=\"{outer_padding}\" width=\"{content_width}\" height=\"{content_height}\" rx=\"18\" fill=\"url(#frameGradient)\" stroke=\"{border}\" stroke-opacity=\"0.18\"/>"
     ));
     svg.push_str(&format!(
         "<circle cx=\"{}\" cy=\"{}\" r=\"6\" fill=\"#ff5f57\"/><circle cx=\"{}\" cy=\"{}\" r=\"6\" fill=\"#febc2e\"/><circle cx=\"{}\" cy=\"{}\" r=\"6\" fill=\"#28c840\"/>",
@@ -570,13 +670,40 @@ fn render_lines_to_svg_document(
     svg.push_str(&format!(
         "<text x=\"{}\" y=\"{}\" fill=\"{}\" fill-opacity=\"0.9\" font-family=\"SFMono-Regular, Menlo, Consolas, monospace\" font-size=\"13\">{}</text>",
         outer_padding + 78.0,
-        outer_padding + 21.0,
+        outer_padding + 23.0,
         border,
-        html_escape(&options.title)
+        html_escape(&title)
     ));
+    if options.line_numbers {
+        svg.push_str(&format!(
+            "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"{}\" fill-opacity=\"0.42\"/>",
+            outer_padding,
+            outer_padding + frame_height,
+            content_padding_x + gutter_width - 4.0,
+            content_height - frame_height,
+            gutter_fill
+        ));
+        svg.push_str(&format!(
+            "<line x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"{}\" stroke-opacity=\"0.24\"/>",
+            text_start_x - 10.0,
+            outer_padding + frame_height + 8.0,
+            text_start_x - 10.0,
+            outer_padding + content_height - 10.0,
+            border
+        ));
+    }
 
     for (index, line) in lines.iter().enumerate() {
         let y = first_line_y + (index as f32 * line_height);
+        if index % 2 == 1 {
+            svg.push_str(&format!(
+                "<rect x=\"{}\" y=\"{:.1}\" width=\"{}\" height=\"{}\" fill=\"#ffffff\" fill-opacity=\"0.018\"/>",
+                outer_padding + 1.0,
+                y - 17.0,
+                content_width - 2.0,
+                line_height
+            ));
+        }
         if options.line_numbers {
             svg.push_str(&format!(
                 "<text x=\"{line_number_x}\" y=\"{y}\" fill=\"{line_number_color}\" fill-opacity=\"0.75\" font-family=\"SFMono-Regular, Menlo, Consolas, monospace\" font-size=\"13\">{}</text>",
@@ -788,6 +915,21 @@ fn plain_line_width(line: &Line<'static>) -> usize {
 
 fn visible_width(text: &str) -> usize {
     text.chars().count()
+}
+
+fn abbreviate_middle(text: &str, max_chars: usize) -> String {
+    let chars = text.chars().collect::<Vec<_>>();
+    if chars.len() <= max_chars {
+        return text.to_owned();
+    }
+
+    let keep = max_chars.saturating_sub(1);
+    let front = keep / 2;
+    let back = keep - front;
+    let mut shortened = chars[..front].iter().collect::<String>();
+    shortened.push('…');
+    shortened.push_str(&chars[chars.len() - back..].iter().collect::<String>());
+    shortened
 }
 
 fn default_paper_size() -> &'static str {
@@ -1125,5 +1267,71 @@ mod tests {
         assert!(svg.contains("<circle"));
         assert!(svg.contains("main.rs [1-1]"));
         assert!(svg.contains("fn main() {}"));
+    }
+
+    #[test]
+    fn fenced_code_block_is_extracted_from_markdown_selection() {
+        let lines = vec![
+            String::from("```python"),
+            String::from("print('hi')"),
+            String::from("```"),
+        ];
+        let fenced = extract_fenced_code_block(&lines).expect("fenced block");
+        assert_eq!(fenced.info.as_deref(), Some("python"));
+        assert_eq!(fenced.lines, vec![String::from("print('hi')")]);
+    }
+
+    #[test]
+    fn snapshot_prefers_fenced_code_render_for_markdown_selection() {
+        let lines = vec![
+            String::from("```rust"),
+            String::from("fn main() {}"),
+            String::from("```"),
+        ];
+        let theme = Theme::source_hints_default();
+        let snapshot = prepare_snapshot_render(
+            &lines,
+            Path::new("notes.md"),
+            FileType::Markdown,
+            PrintMode::Auto,
+            &theme,
+            Some(LineRange { start: 5, end: 7 }),
+            true,
+        );
+        assert!(snapshot.title.contains("rust"));
+        assert!(snapshot.line_numbers);
+        let text = snapshot
+            .rendered
+            .iter()
+            .flat_map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref().to_owned())
+            })
+            .collect::<String>();
+        assert!(text.contains("fn"));
+        assert!(!text.contains("```"));
+    }
+
+    #[test]
+    fn preview_snapshots_disable_line_numbers() {
+        let lines = vec![String::from("# Heading")];
+        let theme = Theme::source_hints_default();
+        let snapshot = prepare_snapshot_render(
+            &lines,
+            Path::new("notes.md"),
+            FileType::Markdown,
+            PrintMode::Auto,
+            &theme,
+            None,
+            true,
+        );
+        assert!(!snapshot.line_numbers);
+    }
+
+    #[test]
+    fn title_abbreviation_preserves_ends() {
+        let text = abbreviate_middle("abcdefghijklmnopqrstuvwxyz", 10);
+        assert_eq!(text, "abcd…vwxyz");
     }
 }
