@@ -30,7 +30,7 @@ const SOURCE_HELP: &str = "ctrl+f find | ctrl+shift+e export | ctrl+\\ split | t
 const PICKER_HELP: &str =
     "enter/right open | left/backspace parent | a notes/code filter | esc home";
 const HOME_HELP: &str =
-    "o open | n new | c settings | i install | u update | enter recent | / search | q quit";
+    "o open | n new | c settings | i install | u install/update | enter recent | / search | q quit";
 const SEARCH_HELP: &str = "type to filter | backspace delete | enter keep | esc clear";
 const CONFIG_HELP: &str = "tab switch pane | enter apply | ctrl+, close | s save | esc cancel";
 const SIDEBAR_HELP: &str =
@@ -79,6 +79,9 @@ enum UpdateBadge {
     Unavailable,
 }
 
+type UpdateCheckResult = Result<Option<updater::UpdateInfo>, String>;
+type UpdateCheckRx = mpsc::Receiver<UpdateCheckResult>;
+
 impl From<DefaultMode> for EditorMode {
     fn from(value: DefaultMode) -> Self {
         match value {
@@ -114,7 +117,7 @@ pub struct App {
     first_run: bool,
     install_status: InstallStatus,
     update_badge: UpdateBadge,
-    update_rx: Option<mpsc::Receiver<Result<Option<updater::UpdateInfo>, String>>>,
+    update_rx: Option<UpdateCheckRx>,
 }
 
 #[derive(Debug)]
@@ -144,17 +147,7 @@ impl App {
             Theme::load_named("dark").unwrap_or_else(|_| Theme::source_hints_default())
         });
         let install_status = install::current_status();
-        let (update_badge, update_rx) = if install_status.installed && !cfg!(test) {
-            let (tx, rx) = mpsc::channel();
-            thread::spawn(move || {
-                let result = updater::latest_available(env!("CARGO_PKG_VERSION"))
-                    .map_err(|error| error.to_string());
-                let _ = tx.send(result);
-            });
-            (UpdateBadge::Checking, Some(rx))
-        } else {
-            (UpdateBadge::Idle, None)
-        };
+        let (update_badge, update_rx) = Self::spawn_update_check();
         let (screen, status_message) = match startup {
             StartupTarget::Browse(path) => match Picker::new(path.clone()) {
                 Ok(picker) => (Screen::Picker(picker), String::from(PICKER_HELP)),
@@ -260,6 +253,30 @@ impl App {
                 self.update_rx = None;
             }
         }
+    }
+
+    fn spawn_update_check() -> (UpdateBadge, Option<UpdateCheckRx>) {
+        if cfg!(test) {
+            return (UpdateBadge::Idle, None);
+        }
+
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let result = updater::latest_available(env!("CARGO_PKG_VERSION"))
+                .map_err(|error| error.to_string());
+            let _ = tx.send(result);
+        });
+        (UpdateBadge::Checking, Some(rx))
+    }
+
+    fn refresh_install_status(&mut self) {
+        self.install_status = install::current_status();
+    }
+
+    fn restart_update_check(&mut self) {
+        let (badge, rx) = Self::spawn_update_check();
+        self.update_badge = badge;
+        self.update_rx = rx;
     }
 
     fn handle_event(&mut self, event: Event) {
@@ -892,8 +909,17 @@ impl App {
                 _ if keybindings.home.install.matches(key) => {
                     match install::install_current_exe() {
                         Ok(result) => {
-                            self.install_status = install::current_status();
-                            next_status = Some(if result.on_path {
+                            self.refresh_install_status();
+                            self.restart_update_check();
+                            next_status = Some(if result.already_current && result.on_path {
+                                format!("already installed at {}", short_path(&result.target))
+                            } else if result.already_current {
+                                format!(
+                                    "already installed at {} · add {} to PATH",
+                                    short_path(&result.target),
+                                    install::path_export_hint()
+                                )
+                            } else if result.on_path {
                                 format!("installed to {}", short_path(&result.target))
                             } else {
                                 format!(
@@ -909,7 +935,7 @@ impl App {
                 _ if keybindings.home.update.matches(key) => {
                     match updater::self_update(env!("CARGO_PKG_VERSION")) {
                         Ok(Some(result)) => {
-                            self.install_status = install::current_status();
+                            self.refresh_install_status();
                             self.update_badge = UpdateBadge::Current;
                             self.update_rx = None;
                             next_status = Some(format!(
@@ -918,10 +944,35 @@ impl App {
                             ));
                         }
                         Ok(None) => {
-                            self.update_badge = UpdateBadge::Current;
-                            self.update_rx = None;
-                            next_status =
-                                Some(format!("already current ({})", env!("CARGO_PKG_VERSION")));
+                            if self.install_status.installed {
+                                self.update_badge = UpdateBadge::Current;
+                                self.update_rx = None;
+                                next_status = Some(format!(
+                                    "already current ({})",
+                                    env!("CARGO_PKG_VERSION")
+                                ));
+                            } else {
+                                match install::install_current_exe() {
+                                    Ok(result) => {
+                                        self.refresh_install_status();
+                                        self.update_badge = UpdateBadge::Current;
+                                        self.update_rx = None;
+                                        next_status = Some(if result.on_path {
+                                            format!(
+                                                "installed current release to {}",
+                                                short_path(&result.target)
+                                            )
+                                        } else {
+                                            format!(
+                                                "installed current release to {} · add {} to PATH",
+                                                short_path(&result.target),
+                                                install::path_export_hint()
+                                            )
+                                        });
+                                    }
+                                    Err(error) => next_status = Some(error.to_string()),
+                                }
+                            }
                         }
                         Err(error) => next_status = Some(error.to_string()),
                     }
@@ -1350,23 +1401,47 @@ impl App {
     }
 
     fn welcome_badge(&self) -> Option<String> {
-        if self.first_run {
-            return Some(if self.install_status.installed {
-                String::from("First run · defaults ready")
-            } else {
-                String::from("First run · use `implicit --install`")
-            });
+        if !self.install_status.installed {
+            return match &self.update_badge {
+                UpdateBadge::Available(version) => Some(format!(
+                    "{} · latest {} ready · press U",
+                    if self.first_run {
+                        "First run"
+                    } else {
+                        "Not installed"
+                    },
+                    version
+                )),
+                UpdateBadge::Checking => Some(format!(
+                    "{} · checking latest release…",
+                    if self.first_run {
+                        "First run"
+                    } else {
+                        "Not installed"
+                    }
+                )),
+                UpdateBadge::Current | UpdateBadge::Idle | UpdateBadge::Unavailable => {
+                    Some(String::from(if self.first_run {
+                        "First run · press I to install"
+                    } else {
+                        "Not installed · press I to install"
+                    }))
+                }
+            };
         }
 
-        if !self.install_status.installed {
-            return Some(String::from("Not installed · run `implicit --install`"));
+        if !self.install_status.on_path {
+            return Some(String::from("Installed · add ~/.local/bin to PATH"));
+        }
+
+        if self.first_run {
+            return Some(String::from("First run · defaults ready"));
         }
 
         match &self.update_badge {
-            UpdateBadge::Available(version) => Some(format!(
-                "Update available · {} · `implicit --update`",
-                version
-            )),
+            UpdateBadge::Available(version) => {
+                Some(format!("Update available · {} · press U", version))
+            }
             UpdateBadge::Checking => Some(String::from("Checking for updates…")),
             UpdateBadge::Current | UpdateBadge::Idle | UpdateBadge::Unavailable => None,
         }
@@ -3195,7 +3270,7 @@ impl Overlay {
             ],
             Self::Home => vec![
                 "O open file picker   N new untitled buffer   C settings",
-                "I install to ~/.local/bin   U update from latest release",
+                "I install to ~/.local/bin   U install latest release / update",
                 "Enter open selected recent   Up/Down move",
                 "/ search files   Q quit",
                 "? or Esc close this dialog",
@@ -4194,15 +4269,13 @@ mod tests {
         let mut app = home_app();
         app.first_run = true;
         app.install_status.installed = false;
+        app.update_badge = UpdateBadge::Idle;
 
         let ViewModel::Welcome { badge, .. } = app.current_view(20, 80) else {
             panic!("welcome view");
         };
 
-        assert_eq!(
-            badge.as_deref(),
-            Some("First run · use `implicit --install`")
-        );
+        assert_eq!(badge.as_deref(), Some("First run · press I to install"));
     }
 
     #[test]
@@ -4215,9 +4288,38 @@ mod tests {
             panic!("welcome view");
         };
 
+        assert_eq!(badge.as_deref(), Some("Update available · 0.2.1 · press U"));
+    }
+
+    #[test]
+    fn home_view_shows_install_latest_badge_when_not_installed_and_update_exists() {
+        let mut app = home_app();
+        app.install_status.installed = false;
+        app.update_badge = UpdateBadge::Available(String::from("0.2.1"));
+
+        let ViewModel::Welcome { badge, .. } = app.current_view(20, 80) else {
+            panic!("welcome view");
+        };
+
         assert_eq!(
             badge.as_deref(),
-            Some("Update available · 0.2.1 · `implicit --update`")
+            Some("Not installed · latest 0.2.1 ready · press U")
+        );
+    }
+
+    #[test]
+    fn home_view_shows_path_badge_when_installed_off_path() {
+        let mut app = home_app();
+        app.install_status.installed = true;
+        app.install_status.on_path = false;
+
+        let ViewModel::Welcome { badge, .. } = app.current_view(20, 80) else {
+            panic!("welcome view");
+        };
+
+        assert_eq!(
+            badge.as_deref(),
+            Some("Installed · add ~/.local/bin to PATH")
         );
     }
 

@@ -51,17 +51,26 @@ pub fn install_current_exe() -> Result<InstallResult> {
 }
 
 pub fn install_binary(source: &Path, target: &Path) -> Result<InstallResult> {
+    let parent = target
+        .parent()
+        .context("install target is missing a parent directory")?;
+
     if source == target {
         return Ok(InstallResult {
             target: target.to_path_buf(),
             already_current: true,
-            on_path: is_dir_on_path(target.parent().unwrap_or_else(|| Path::new("."))),
+            on_path: is_dir_on_path(parent),
         });
     }
 
-    let parent = target
-        .parent()
-        .context("install target is missing a parent directory")?;
+    if target.exists() && files_match(source, target)? {
+        return Ok(InstallResult {
+            target: target.to_path_buf(),
+            already_current: true,
+            on_path: is_dir_on_path(parent),
+        });
+    }
+
     fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
 
     let temp_path = target.with_extension("tmp");
@@ -90,6 +99,22 @@ pub fn install_binary(source: &Path, target: &Path) -> Result<InstallResult> {
         already_current: false,
         on_path: is_dir_on_path(parent),
     })
+}
+
+fn files_match(left: &Path, right: &Path) -> Result<bool> {
+    let left_meta =
+        fs::metadata(left).with_context(|| format!("failed to read {}", left.display()))?;
+    let right_meta =
+        fs::metadata(right).with_context(|| format!("failed to read {}", right.display()))?;
+    if left_meta.len() != right_meta.len() {
+        return Ok(false);
+    }
+
+    let left_bytes =
+        fs::read(left).with_context(|| format!("failed to read {}", left.display()))?;
+    let right_bytes =
+        fs::read(right).with_context(|| format!("failed to read {}", right.display()))?;
+    Ok(left_bytes == right_bytes)
 }
 
 fn is_dir_on_path(dir: &Path) -> bool {
@@ -123,6 +148,23 @@ mod tests {
 
         assert_eq!(result.target, target);
         assert_eq!(fs::read_to_string(result.target).expect("target"), "binary");
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn install_binary_marks_identical_target_as_current() {
+        let root = temp_dir("current");
+        fs::create_dir_all(root.join("bin")).expect("mkdir");
+        let source = root.join("source-bin");
+        let target = root.join("bin/implicit");
+        fs::write(&source, "binary").expect("seed source");
+        fs::write(&target, "binary").expect("seed target");
+
+        let result = install_binary(&source, &target).expect("install");
+
+        assert!(result.already_current);
+        assert_eq!(fs::read_to_string(&target).expect("target"), "binary");
 
         fs::remove_dir_all(root).expect("cleanup");
     }

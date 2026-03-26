@@ -107,7 +107,14 @@ fn main() -> Result<()> {
 
     if cli.install {
         let result = crate::install::install_current_exe()?;
-        println!("installed implicit to {}", result.target.display());
+        if result.already_current {
+            println!(
+                "implicit is already installed at {}",
+                result.target.display()
+            );
+        } else {
+            println!("installed implicit to {}", result.target.display());
+        }
         if !result.on_path {
             println!("add this to your shell profile:");
             println!("{}", crate::install::path_export_hint());
@@ -130,7 +137,27 @@ fn main() -> Result<()> {
                 }
             }
             None => {
-                println!("implicit {} is already current", env!("CARGO_PKG_VERSION"));
+                if crate::install::current_status().installed {
+                    println!("implicit {} is already current", env!("CARGO_PKG_VERSION"));
+                } else {
+                    let result = crate::install::install_current_exe()?;
+                    if result.already_current {
+                        println!(
+                            "implicit is already installed at {}",
+                            result.target.display()
+                        );
+                    } else {
+                        println!(
+                            "installed current implicit {} to {}",
+                            env!("CARGO_PKG_VERSION"),
+                            result.target.display()
+                        );
+                    }
+                    if !result.on_path {
+                        println!("add this to your shell profile:");
+                        println!("{}", crate::install::path_export_hint());
+                    }
+                }
             }
         }
         return Ok(());
