@@ -39,6 +39,26 @@ pub struct LineRange {
     pub end: usize,
 }
 
+pub struct SnapshotRequest<'a> {
+    pub lines: &'a [String],
+    pub source_path: &'a Path,
+    pub file_type: FileType,
+    pub mode: PrintMode,
+    pub output_path: Option<&'a Path>,
+    pub source_label: String,
+    pub line_numbers: bool,
+}
+
+pub struct ExportRequest<'a> {
+    pub lines: &'a [String],
+    pub source_path: &'a Path,
+    pub file_type: FileType,
+    pub mode: PrintMode,
+    pub format: ExportFormat,
+    pub output_path: Option<&'a Path>,
+    pub source_label: String,
+}
+
 pub fn parse_line_range(value: &str) -> std::result::Result<LineRange, String> {
     let trimmed = value.trim();
     let (start, end) = match trimmed.split_once('-') {
@@ -101,8 +121,6 @@ pub fn export_path(
     output_path: Option<&Path>,
     line_range: Option<LineRange>,
 ) -> Result<PathBuf> {
-    let theme = Theme::load_named(theme_name)
-        .with_context(|| format!("failed to load theme {theme_name}"))?;
     let text =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     let lines = text
@@ -110,28 +128,51 @@ pub fn export_path(
         .map(|line| line.strip_suffix('\r').unwrap_or(line).to_owned())
         .collect::<Vec<_>>();
     let lines = slice_lines(&lines, line_range)?;
-    let file_type = crate::filetype::detect(path);
+    export_lines(
+        ExportRequest {
+            lines: &lines,
+            source_path: path,
+            file_type: crate::filetype::detect(path),
+            mode,
+            format,
+            output_path,
+            source_label: source_label(path, line_range),
+        },
+        theme_name,
+    )
+}
+
+pub fn export_lines(request: ExportRequest<'_>, theme_name: &str) -> Result<PathBuf> {
+    let theme = Theme::load_named(theme_name)
+        .with_context(|| format!("failed to load theme {theme_name}"))?;
     let width = print_width();
-    let rendered = render_for_mode(&lines, path, file_type, mode, &theme, width);
-    let title = html_title(&lines, path);
+    let rendered = render_for_mode(
+        request.lines,
+        request.source_path,
+        request.file_type,
+        request.mode,
+        &theme,
+        width,
+    );
+    let title = html_title(request.lines, request.source_path);
     let html = render_lines_to_html_document(
         &rendered,
         &theme,
         &title,
         HtmlDocumentOptions {
             paper_size: default_paper_size(),
-            source_label: source_label(path, line_range),
+            source_label: request.source_label,
         },
     );
 
-    match format {
+    match request.format {
         ExportFormat::Html => {
-            let output_path = resolve_html_output_path(path, output_path);
+            let output_path = resolve_html_output_path(request.source_path, request.output_path);
             fs::write(&output_path, html)
                 .with_context(|| format!("failed to write {}", output_path.display()))?;
             Ok(output_path)
         }
-        ExportFormat::Pdf => export_pdf_document(path, output_path, &html),
+        ExportFormat::Pdf => export_pdf_document(request.source_path, request.output_path, &html),
     }
 }
 
@@ -152,20 +193,40 @@ pub fn snapshot_path(
         .map(|line| line.strip_suffix('\r').unwrap_or(line).to_owned())
         .collect::<Vec<_>>();
     let lines = slice_lines(&lines, line_range)?;
-    let file_type = crate::filetype::detect(path);
-    let output = resolve_snapshot_output_path(path, output_path)?;
-    let snapshot = prepare_snapshot_render(
-        &lines,
-        path,
-        file_type,
-        mode,
+    snapshot_lines_with_theme(
+        SnapshotRequest {
+            lines: &lines,
+            source_path: path,
+            file_type: crate::filetype::detect(path),
+            mode,
+            output_path,
+            source_label: source_label(path, line_range),
+            line_numbers,
+        },
         &theme,
-        line_range,
-        line_numbers,
+    )
+}
+
+pub fn snapshot_lines(request: SnapshotRequest<'_>, theme_name: &str) -> Result<PathBuf> {
+    let theme = Theme::load_named(theme_name)
+        .with_context(|| format!("failed to load theme {theme_name}"))?;
+    snapshot_lines_with_theme(request, &theme)
+}
+
+fn snapshot_lines_with_theme(request: SnapshotRequest<'_>, theme: &Theme) -> Result<PathBuf> {
+    let output = resolve_snapshot_output_path(request.source_path, request.output_path)?;
+    let snapshot = prepare_snapshot_render(
+        request.lines,
+        request.source_path,
+        request.file_type,
+        request.mode,
+        theme,
+        Some(request.source_label),
+        request.line_numbers,
     );
     let svg = render_lines_to_svg_document(
         &snapshot.rendered,
-        &theme,
+        theme,
         SnapshotOptions {
             title: snapshot.title,
             line_numbers: snapshot.line_numbers,
@@ -223,10 +284,10 @@ fn prepare_snapshot_render(
     file_type: FileType,
     mode: PrintMode,
     theme: &Theme,
-    line_range: Option<LineRange>,
+    source_title: Option<String>,
     line_numbers: bool,
 ) -> SnapshotRender {
-    let base_title = source_label(path, line_range);
+    let base_title = source_title.unwrap_or_else(|| source_label(path, None));
     if matches!(file_type, FileType::Markdown | FileType::Text)
         && let Some(fenced) = extract_fenced_code_block(lines)
     {
@@ -1417,7 +1478,7 @@ mod tests {
             FileType::Markdown,
             PrintMode::Auto,
             &theme,
-            Some(LineRange { start: 5, end: 7 }),
+            Some(String::from("notes.md [5-7]")),
             true,
         );
         assert!(snapshot.title.contains("rust"));

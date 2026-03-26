@@ -44,6 +44,7 @@ pub struct GlobalKeys {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EditorKeys {
     pub save: Shortcut,
+    pub export: Shortcut,
     pub quit: Shortcut,
     pub home: Shortcut,
     pub find: Shortcut,
@@ -133,6 +134,7 @@ struct GlobalKeysFile {
 #[serde(default)]
 struct EditorKeysFile {
     save: Option<String>,
+    export: Option<String>,
     quit: Option<String>,
     home: Option<String>,
     find: Option<String>,
@@ -305,6 +307,7 @@ impl Default for KeyBindings {
             },
             editor: EditorKeys {
                 save: Shortcut::parse("ctrl+s").expect("default shortcut"),
+                export: Shortcut::parse("ctrl+shift+e").expect("default shortcut"),
                 quit: Shortcut::parse("ctrl+q").expect("default shortcut"),
                 home: Shortcut::parse("ctrl+w").expect("default shortcut"),
                 find: Shortcut::parse("ctrl+f").expect("default shortcut"),
@@ -366,6 +369,7 @@ impl KeyBindings {
             },
             editor: EditorKeys {
                 save: parse_or_default(file.editor.save, defaults.editor.save)?,
+                export: parse_or_default(file.editor.export, defaults.editor.export)?,
                 quit: parse_or_default(file.editor.quit, defaults.editor.quit)?,
                 home: parse_or_default(file.editor.home, defaults.editor.home)?,
                 find: parse_or_default(file.editor.find, defaults.editor.find)?,
@@ -471,14 +475,17 @@ impl Shortcut {
     }
 
     pub fn matches(&self, key: KeyEvent) -> bool {
-        let modifiers = normalize_modifiers(key);
-        if modifiers != self.modifiers {
-            return false;
-        }
-
         match (&self.code, key.code) {
             (ShortcutCode::Char(expected), KeyCode::Char(actual)) => {
-                expected.eq_ignore_ascii_case(&actual)
+                let modifiers = key.modifiers;
+                if modifiers == self.modifiers && expected.eq_ignore_ascii_case(&actual) {
+                    return true;
+                }
+
+                !self.modifiers.contains(KeyModifiers::SHIFT)
+                    && modifiers == (self.modifiers | KeyModifiers::SHIFT)
+                    && !expected.is_ascii_alphanumeric()
+                    && *expected == actual
             }
             (ShortcutCode::Enter, KeyCode::Enter)
             | (ShortcutCode::Esc, KeyCode::Esc)
@@ -492,7 +499,7 @@ impl Shortcut {
             | (ShortcutCode::Up, KeyCode::Up)
             | (ShortcutCode::Down, KeyCode::Down)
             | (ShortcutCode::PageUp, KeyCode::PageUp)
-            | (ShortcutCode::PageDown, KeyCode::PageDown) => true,
+            | (ShortcutCode::PageDown, KeyCode::PageDown) => key.modifiers == self.modifiers,
             _ => false,
         }
     }
@@ -503,14 +510,6 @@ fn parse_or_default(value: Option<String>, default: Shortcut) -> Result<Shortcut
         Some(value) => Shortcut::parse(&value),
         None => Ok(default),
     }
-}
-
-fn normalize_modifiers(key: KeyEvent) -> KeyModifiers {
-    let mut modifiers = key.modifiers;
-    if matches!(key.code, KeyCode::Char(_)) {
-        modifiers.remove(KeyModifiers::SHIFT);
-    }
-    modifiers
 }
 
 fn ensure_default_files(dir: &Path) -> Result<()> {
@@ -569,6 +568,7 @@ settings = "ctrl+,"
 
 [editor]
 save = "ctrl+s"
+export = "ctrl+shift+e"
 quit = "ctrl+q"
 home = "ctrl+w"
 find = "ctrl+f"
@@ -697,6 +697,24 @@ line_numbers = true
         let shortcut = Shortcut::parse("?").expect("shortcut");
 
         assert!(shortcut.matches(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT)));
+    }
+
+    #[test]
+    fn ctrl_shift_shortcut_matches_shifted_letter() {
+        let shortcut = Shortcut::parse("ctrl+shift+e").expect("shortcut");
+
+        assert!(shortcut.matches(KeyEvent::new(
+            KeyCode::Char('E'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )));
+        assert!(!shortcut.matches(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL,)));
+    }
+
+    #[test]
+    fn plain_letter_shortcut_does_not_match_shifted_letter() {
+        let shortcut = Shortcut::parse("n").expect("shortcut");
+
+        assert!(!shortcut.matches(KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT,)));
     }
 
     #[test]

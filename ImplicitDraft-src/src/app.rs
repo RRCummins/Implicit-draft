@@ -8,6 +8,7 @@ use crate::{
     buffer::{Buffer, BufferViewState, SearchMatch},
     code,
     config::{AppConfig, DefaultMode, KeyBindings},
+    export,
     filetype::FileType,
     gitdiff::LineChange,
     markdown,
@@ -21,10 +22,9 @@ use crate::{
 };
 
 const FRAME_POLL_INTERVAL: Duration = Duration::from_millis(80);
-const EDITOR_HELP: &str =
-    "ctrl+f find | ctrl+\\ split | tab pane | ctrl+. swap | alt+n next | ctrl+g goto | ctrl+s save";
-const PREVIEW_HELP: &str = "ctrl+f find | ctrl+\\ split | tab pane | ctrl+. swap | alt+n next | ctrl+g goto | ctrl+p source";
-const SOURCE_HELP: &str = "ctrl+f find | ctrl+\\ split | tab pane | ctrl+. swap | alt+n next | ctrl+g goto | ctrl+p source+hints";
+const EDITOR_HELP: &str = "ctrl+f find | ctrl+shift+e export | ctrl+\\ split | tab pane | ctrl+. swap | alt+n next | ctrl+g goto | ctrl+s save";
+const PREVIEW_HELP: &str = "ctrl+f find | ctrl+shift+e export | ctrl+\\ split | tab pane | ctrl+. swap | alt+n next | ctrl+g goto | ctrl+p source";
+const SOURCE_HELP: &str = "ctrl+f find | ctrl+shift+e export | ctrl+\\ split | tab pane | ctrl+. swap | alt+n next | ctrl+g goto | ctrl+p source+hints";
 const PICKER_HELP: &str =
     "enter/right open | left/backspace parent | a notes/code filter | esc home";
 const HOME_HELP: &str = "o open | n new | c settings | enter recent | / search | q quit";
@@ -74,6 +74,14 @@ impl From<DefaultMode> for EditorMode {
             DefaultMode::Preview => Self::Preview,
             DefaultMode::Source => Self::Source,
         }
+    }
+}
+
+fn print_mode_for_editor_mode(mode: EditorMode) -> export::PrintMode {
+    match mode {
+        EditorMode::SourceHints => export::PrintMode::SourceHints,
+        EditorMode::Preview => export::PrintMode::Preview,
+        EditorMode::Source => export::PrintMode::Source,
     }
 }
 
@@ -343,6 +351,26 @@ impl App {
                                 }
                             }
                         }
+                        EditorDialog::Export(_) => match Self::handle_export_input(
+                            editor,
+                            key,
+                            self.config.line_numbers,
+                            &self.config.theme,
+                        ) {
+                            ExportDialogOutcome::None => {}
+                            ExportDialogOutcome::Exported(path) => {
+                                next_status = Some(format!("exported {}", short_path(&path)));
+                            }
+                            ExportDialogOutcome::Canceled => {
+                                next_status = Some(String::from(editor.focus_help()));
+                            }
+                            ExportDialogOutcome::Status(message) => {
+                                next_status = Some(message);
+                            }
+                            ExportDialogOutcome::Error(error) => {
+                                next_status = Some(error.to_string());
+                            }
+                        },
                         EditorDialog::Quit | EditorDialog::ReturnHome => match key.code {
                             KeyCode::Enter | KeyCode::Char('y') => match dialog {
                                 EditorDialog::Quit => should_quit_now = true,
@@ -413,6 +441,9 @@ impl App {
                             editor.buffer.cursor().0 + 1,
                         )));
                         next_status = Some(String::from("goto line"));
+                    } else if keybindings.editor.export.matches(key) {
+                        editor.dialog = Some(EditorDialog::Export(ExportState::new(editor)));
+                        next_status = Some(String::from("export"));
                     } else if keybindings.editor.home.matches(key) {
                         if editor.buffer.is_dirty() {
                             editor.dialog = Some(EditorDialog::ReturnHome);
@@ -1142,6 +1173,16 @@ impl App {
                                 String::from("Esc cancels"),
                             ],
                         },
+                        EditorDialog::Export(state) => DialogView {
+                            title: String::from(" Export "),
+                            lines: vec![
+                                format!("scope: {}", state.scope_label()),
+                                format!("format: {}", state.kind.label()),
+                                format!("path: {}", state.path),
+                                String::from("Up/Down scope   Left/Right format   Tab check path"),
+                                String::from("Enter export   Backspace edit path   Esc cancel"),
+                            ],
+                        },
                     }),
                 }
             }
@@ -1339,6 +1380,36 @@ impl App {
         editor.refresh_git_changes();
         editor.dialog = None;
         Ok(SaveOutcome::Saved)
+    }
+
+    fn default_export_output_path(
+        source_path: &std::path::Path,
+        selected_rows: Option<(usize, usize)>,
+        kind: ExportKind,
+    ) -> PathBuf {
+        let parent = source_path
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let stem = source_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("snapshot");
+        let file_name = match (selected_rows, kind) {
+            (Some((start, end)), ExportKind::Snapshot) => {
+                format!("{stem}-L{}-{}.png", start + 1, end + 1)
+            }
+            (Some((start, end)), ExportKind::Html) => {
+                format!("{stem}-L{}-{}.html", start + 1, end + 1)
+            }
+            (Some((start, end)), ExportKind::Pdf) => {
+                format!("{stem}-L{}-{}.pdf", start + 1, end + 1)
+            }
+            (None, ExportKind::Snapshot) => format!("{stem}-snapshot.png"),
+            (None, ExportKind::Html) => format!("{stem}.html"),
+            (None, ExportKind::Pdf) => format!("{stem}.pdf"),
+        };
+        parent.join(file_name)
     }
 
     fn step_editor_search(editor: &mut EditorState, forward: bool) -> String {
@@ -1658,6 +1729,149 @@ impl App {
         state.path.replace_range(replace_from.., &replacement);
         state.confirm_overwrite = false;
         SaveDialogOutcome::Status(String::from("completed path"))
+    }
+
+    fn handle_export_input(
+        editor: &mut EditorState,
+        key: KeyEvent,
+        line_numbers: bool,
+        theme_name: &str,
+    ) -> ExportDialogOutcome {
+        let Some(EditorDialog::Export(state)) = editor.dialog.as_mut() else {
+            return ExportDialogOutcome::None;
+        };
+
+        match key.code {
+            KeyCode::Esc => {
+                editor.dialog = None;
+                ExportDialogOutcome::Canceled
+            }
+            KeyCode::Up | KeyCode::Down => {
+                state.toggle_scope();
+                ExportDialogOutcome::Status(format!("scope {}", state.scope_label()))
+            }
+            KeyCode::Left => {
+                state.kind = state.kind.previous();
+                state.sync_path_extension();
+                ExportDialogOutcome::Status(format!("format {}", state.kind.label()))
+            }
+            KeyCode::Right => {
+                state.kind = state.kind.next();
+                state.sync_path_extension();
+                ExportDialogOutcome::Status(format!("format {}", state.kind.label()))
+            }
+            KeyCode::Tab => {
+                state.confirm_snapshot_extension();
+                ExportDialogOutcome::Status(String::from("checked path"))
+            }
+            KeyCode::Backspace => {
+                state.path.pop();
+                ExportDialogOutcome::None
+            }
+            KeyCode::Enter => Self::run_editor_export(editor, line_numbers, theme_name),
+            KeyCode::Char(ch) if is_insertable(key.modifiers) => {
+                state.path.push(ch);
+                ExportDialogOutcome::None
+            }
+            _ => ExportDialogOutcome::None,
+        }
+    }
+
+    fn run_editor_export(
+        editor: &mut EditorState,
+        line_numbers: bool,
+        theme_name: &str,
+    ) -> ExportDialogOutcome {
+        let Some(EditorDialog::Export(state)) = editor.dialog.take() else {
+            return ExportDialogOutcome::None;
+        };
+
+        let trimmed = state.path.trim();
+        if trimmed.is_empty() {
+            editor.dialog = Some(EditorDialog::Export(state));
+            return ExportDialogOutcome::Error(anyhow!("path cannot be empty"));
+        }
+
+        let path = PathBuf::from(trimmed);
+        let selected_rows = state.scope.line_rows(state.selected_rows);
+        let lines = match selected_rows {
+            Some((start, end)) => editor.buffer.lines()[start..=end].to_vec(),
+            None => editor.buffer.lines().to_vec(),
+        };
+        let source_path = editor
+            .file_path
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_SAVE_AS_PATH));
+        let source_label = match selected_rows {
+            Some((start, end)) => format!("{} [{}-{}]", source_path.display(), start + 1, end + 1),
+            None => source_path.display().to_string(),
+        };
+        let mode = print_mode_for_editor_mode(editor.active_mode());
+
+        let result = match state.kind {
+            ExportKind::Snapshot => match export::snapshot_lines(
+                export::SnapshotRequest {
+                    lines: &lines,
+                    source_path: &source_path,
+                    file_type: editor.file_type,
+                    mode,
+                    output_path: Some(path.as_path()),
+                    source_label: source_label.clone(),
+                    line_numbers,
+                },
+                theme_name,
+            ) {
+                Ok(saved) => Ok(saved),
+                Err(_) if path.extension().and_then(|ext| ext.to_str()) == Some("png") => {
+                    let svg_path = path.with_extension("svg");
+                    export::snapshot_lines(
+                        export::SnapshotRequest {
+                            lines: &lines,
+                            source_path: &source_path,
+                            file_type: editor.file_type,
+                            mode,
+                            output_path: Some(svg_path.as_path()),
+                            source_label,
+                            line_numbers,
+                        },
+                        theme_name,
+                    )
+                }
+                Err(error) => Err(error),
+            },
+            ExportKind::Html => export::export_lines(
+                export::ExportRequest {
+                    lines: &lines,
+                    source_path: &source_path,
+                    file_type: editor.file_type,
+                    mode,
+                    format: export::ExportFormat::Html,
+                    output_path: Some(path.as_path()),
+                    source_label,
+                },
+                theme_name,
+            ),
+            ExportKind::Pdf => export::export_lines(
+                export::ExportRequest {
+                    lines: &lines,
+                    source_path: &source_path,
+                    file_type: editor.file_type,
+                    mode,
+                    format: export::ExportFormat::Pdf,
+                    output_path: Some(path.as_path()),
+                    source_label,
+                },
+                theme_name,
+            ),
+        };
+
+        match result {
+            Ok(path) => ExportDialogOutcome::Exported(path),
+            Err(error) => {
+                editor.dialog = Some(EditorDialog::Export(state));
+                ExportDialogOutcome::Error(error)
+            }
+        }
     }
 
     fn apply_edit<F>(editor: &mut EditorState, edit: F)
@@ -2246,6 +2460,14 @@ impl EditorState {
         Some(SelectionRange { start, end })
     }
 
+    fn active_selection_range(&self) -> Option<SelectionRange> {
+        match self.focus {
+            EditorFocus::Primary | EditorFocus::Sidebar => self.primary_selection_range(),
+            EditorFocus::Secondary if self.split_view => self.secondary_selection_range(),
+            EditorFocus::Secondary => self.primary_selection_range(),
+        }
+    }
+
     fn primary_selection_range(&self) -> Option<SelectionRange> {
         let cursor = if self.focus == EditorFocus::Primary {
             self.buffer.cursor()
@@ -2366,6 +2588,7 @@ enum EditorDialog {
     SidebarCreate(SidebarCreateState),
     SidebarRename(SidebarRenameState),
     SidebarDelete(SidebarDeleteState),
+    Export(ExportState),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2393,6 +2616,151 @@ impl SaveAsState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExportKind {
+    Snapshot,
+    Html,
+    Pdf,
+}
+
+impl ExportKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Snapshot => "snapshot",
+            Self::Html => "html",
+            Self::Pdf => "pdf",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::Snapshot => Self::Html,
+            Self::Html => Self::Pdf,
+            Self::Pdf => Self::Snapshot,
+        }
+    }
+
+    fn previous(self) -> Self {
+        match self {
+            Self::Snapshot => Self::Pdf,
+            Self::Html => Self::Snapshot,
+            Self::Pdf => Self::Html,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ExportState {
+    kind: ExportKind,
+    path: String,
+    source_path: PathBuf,
+    selected_rows: Option<(usize, usize)>,
+    scope: ExportScope,
+}
+
+impl ExportState {
+    fn new(editor: &EditorState) -> Self {
+        let selected_rows = editor
+            .active_selection_range()
+            .map(|selection| (selection.start.0, selection.end.0));
+        let source_path = editor
+            .file_path
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_SAVE_AS_PATH));
+        let scope = if selected_rows.is_some() {
+            ExportScope::Selection
+        } else {
+            ExportScope::FullBuffer
+        };
+        let path = App::default_export_output_path(
+            &source_path,
+            scope.line_rows(selected_rows),
+            ExportKind::Snapshot,
+        )
+        .display()
+        .to_string();
+        Self {
+            kind: ExportKind::Snapshot,
+            path,
+            source_path,
+            selected_rows,
+            scope,
+        }
+    }
+
+    fn sync_path_extension(&mut self) {
+        self.path = App::default_export_output_path(
+            &self.source_path,
+            self.scope.line_rows(self.selected_rows),
+            self.kind,
+        )
+        .display()
+        .to_string();
+    }
+
+    fn confirm_snapshot_extension(&mut self) {
+        let trimmed = self.path.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+
+        let path = PathBuf::from(trimmed);
+        let has_valid_ext = match self.kind {
+            ExportKind::Snapshot => matches!(
+                path.extension().and_then(|ext| ext.to_str()),
+                Some("png") | Some("svg")
+            ),
+            ExportKind::Html => path.extension().and_then(|ext| ext.to_str()) == Some("html"),
+            ExportKind::Pdf => path.extension().and_then(|ext| ext.to_str()) == Some("pdf"),
+        };
+
+        if !has_valid_ext {
+            self.sync_path_extension();
+        }
+    }
+
+    fn scope_label(&self) -> String {
+        match self.scope {
+            ExportScope::FullBuffer => String::from("full buffer"),
+            ExportScope::Selection => match self.selected_rows {
+                Some((start, end)) => format!("selection lines {}-{}", start + 1, end + 1),
+                None => String::from("full buffer"),
+            },
+        }
+    }
+
+    fn toggle_scope(&mut self) {
+        if self.selected_rows.is_none() {
+            return;
+        }
+
+        self.scope = self.scope.toggle();
+        self.sync_path_extension();
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExportScope {
+    FullBuffer,
+    Selection,
+}
+
+impl ExportScope {
+    fn toggle(self) -> Self {
+        match self {
+            Self::FullBuffer => Self::Selection,
+            Self::Selection => Self::FullBuffer,
+        }
+    }
+
+    fn line_rows(self, selected_rows: Option<(usize, usize)>) -> Option<(usize, usize)> {
+        match self {
+            Self::FullBuffer => None,
+            Self::Selection => selected_rows,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SaveOutcome {
     Saved,
     NeedsPath,
@@ -2402,6 +2770,15 @@ enum SaveOutcome {
 enum SaveDialogOutcome {
     None,
     Saved(SaveAfterAction),
+    Canceled,
+    Status(String),
+    Error(anyhow::Error),
+}
+
+#[derive(Debug)]
+enum ExportDialogOutcome {
+    None,
+    Exported(PathBuf),
     Canceled,
     Status(String),
     Error(anyhow::Error),
@@ -2591,7 +2968,8 @@ impl Overlay {
             Self::Editor(EditorMode::SourceHints) => vec![
                 "Arrows move   Home/End line start/end   Ctrl+Home/End doc start/end",
                 "Shift+Arrows/Home/End/Page select text in the focused pane",
-                "Ctrl+S save or save-as   Ctrl+F find   Ctrl+G goto line   Ctrl+E sidebar",
+                "Ctrl+S save or save-as   Ctrl+Shift+E export dialog",
+                "Ctrl+F find   Ctrl+G goto line   Ctrl+E sidebar",
                 "Alt+N next match   Alt+P previous match   Ctrl+Z undo   Ctrl+R redo",
                 "Ctrl+P preview mode   Ctrl+\\ split   Tab pane focus   Ctrl+. swap pane",
                 "Ctrl+, settings",
@@ -2604,7 +2982,8 @@ impl Overlay {
             Self::Editor(EditorMode::Preview) => vec![
                 "Arrows move   Home/End line start/end   Ctrl+Home/End doc start/end",
                 "Shift+Arrows/Home/End/Page select text in the focused pane",
-                "Ctrl+F find   Ctrl+G goto line   Ctrl+P source mode   Ctrl+\\ split",
+                "Ctrl+Shift+E export dialog   Ctrl+F find   Ctrl+G goto line",
+                "Ctrl+P source mode   Ctrl+\\ split",
                 "Tab pane focus   Ctrl+. swap pane   Ctrl+W return home",
                 "Alt+N next match   Alt+P previous match",
                 "Ctrl+E sidebar   Ctrl+, settings",
@@ -2617,7 +2996,8 @@ impl Overlay {
             Self::Editor(EditorMode::Source) => vec![
                 "Arrows move   Home/End line start/end   Ctrl+Home/End doc start/end",
                 "Shift+Arrows/Home/End/Page select text in the focused pane",
-                "Ctrl+S save or save-as   Ctrl+F find   Ctrl+G goto line   Ctrl+E sidebar",
+                "Ctrl+S save or save-as   Ctrl+Shift+E export dialog",
+                "Ctrl+F find   Ctrl+G goto line   Ctrl+E sidebar",
                 "Alt+N next match   Alt+P previous match   Ctrl+Z undo   Ctrl+R redo",
                 "Ctrl+P source+hints mode   Ctrl+\\ split   Tab pane focus   Ctrl+. swap pane",
                 "Ctrl+, settings",
@@ -3996,6 +4376,182 @@ mod tests {
             panic!("editor screen");
         };
         assert!(matches!(editor.dialog, Some(EditorDialog::SaveAs(_))));
+    }
+
+    #[test]
+    fn ctrl_shift_e_opens_export_dialog() {
+        let root = temp_dir("export-snapshot");
+        fs::create_dir_all(&root).expect("mkdir");
+        let path = root.join("note.md");
+        fs::write(&path, "# Title\nbody").expect("seed");
+
+        let mut app = App::new(
+            StartupTarget::Open(path.clone()),
+            AppConfig::default(),
+            KeyBindings::default(),
+        );
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('E'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )));
+
+        let Screen::Editor(editor) = app.screen else {
+            panic!("editor screen");
+        };
+        assert!(matches!(editor.dialog, Some(EditorDialog::Export(_))));
+        assert_eq!(app.status_message, "export");
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn export_dialog_exports_current_buffer_snapshot() {
+        let root = temp_dir("export-snapshot-run");
+        fs::create_dir_all(&root).expect("mkdir");
+        let path = root.join("note.md");
+        fs::write(&path, "# Title\nbody").expect("seed");
+
+        let mut app = App::new(
+            StartupTarget::Open(path.clone()),
+            AppConfig::default(),
+            KeyBindings::default(),
+        );
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('E'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+
+        let png_output = root.join("note-snapshot.png");
+        let svg_output = root.join("note-snapshot.svg");
+        assert!(
+            png_output.exists() || svg_output.exists(),
+            "expected {} or {}",
+            png_output.display(),
+            svg_output.display()
+        );
+        assert!(app.status_message.contains("exported"));
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn export_dialog_exports_selected_lines_only() {
+        let root = temp_dir("export-selection");
+        fs::create_dir_all(&root).expect("mkdir");
+        let path = root.join("main.rs");
+        fs::write(&path, "fn main() {\n    println!(\"hi\");\n}\n").expect("seed");
+
+        let mut app = App::new(
+            StartupTarget::Open(path.clone()),
+            AppConfig::default(),
+            KeyBindings::default(),
+        );
+        let Screen::Editor(editor) = &mut app.screen else {
+            panic!("editor screen");
+        };
+        editor.primary_pane.selection = Some(SelectionState { anchor: (0, 0) });
+        editor.buffer.goto_line(2);
+        editor.buffer.move_end();
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('E'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+
+        let png_output = root.join("main-L1-2.png");
+        let svg_output = root.join("main-L1-2.svg");
+        assert!(
+            png_output.exists() || svg_output.exists(),
+            "expected {} or {}",
+            png_output.display(),
+            svg_output.display()
+        );
+        assert!(app.status_message.contains("exported"));
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn export_dialog_can_cycle_to_html() {
+        let root = temp_dir("export-html");
+        fs::create_dir_all(&root).expect("mkdir");
+        let path = root.join("note.md");
+        fs::write(&path, "# Title\nbody").expect("seed");
+
+        let mut app = App::new(
+            StartupTarget::Open(path.clone()),
+            AppConfig::default(),
+            KeyBindings::default(),
+        );
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('E'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Right,
+            KeyModifiers::NONE,
+        )));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+
+        let output = root.join("note.html");
+        assert!(output.exists(), "expected {}", output.display());
+        assert!(app.status_message.contains("exported"));
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn export_dialog_can_toggle_from_selection_to_full_buffer() {
+        let root = temp_dir("export-scope");
+        fs::create_dir_all(&root).expect("mkdir");
+        let path = root.join("main.rs");
+        fs::write(&path, "fn main() {\n    println!(\"hi\");\n}\n").expect("seed");
+
+        let mut app = App::new(
+            StartupTarget::Open(path.clone()),
+            AppConfig::default(),
+            KeyBindings::default(),
+        );
+        let Screen::Editor(editor) = &mut app.screen else {
+            panic!("editor screen");
+        };
+        editor.primary_pane.selection = Some(SelectionState { anchor: (0, 0) });
+        editor.buffer.goto_line(2);
+        editor.buffer.move_end();
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('E'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        )));
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Right,
+            KeyModifiers::NONE,
+        )));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+
+        let output = root.join("main.html");
+        assert!(output.exists(), "expected {}", output.display());
+        assert!(app.status_message.contains("exported"));
+
+        fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]
