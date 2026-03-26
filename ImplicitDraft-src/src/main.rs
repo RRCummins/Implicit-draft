@@ -5,6 +5,7 @@ mod config;
 mod export;
 mod filetype;
 mod gitdiff;
+mod install;
 mod markdown;
 mod picker;
 mod preview;
@@ -15,6 +16,7 @@ mod settings;
 mod sidebar;
 mod terminal;
 mod theme;
+mod updater;
 mod welcome;
 
 use std::ffi::OsStr;
@@ -35,6 +37,14 @@ struct Cli {
     /// Open the settings screen instead of a file or welcome flow.
     #[arg(long)]
     config: bool,
+
+    /// Install the current binary into ~/.local/bin/implicit.
+    #[arg(long)]
+    install: bool,
+
+    /// Download and install the latest published release into ~/.local/bin/implicit.
+    #[arg(long)]
+    update: bool,
 
     /// Render the file to stdout using ANSI styling instead of opening the TUI.
     #[arg(long)]
@@ -74,10 +84,13 @@ struct Cli {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let mode_count =
-        usize::from(cli.print) + usize::from(cli.export.is_some()) + usize::from(cli.snapshot);
-    if mode_count > 1 {
-        bail!("cannot combine --print, --export, and --snapshot");
+    let action_count = usize::from(cli.print)
+        + usize::from(cli.export.is_some())
+        + usize::from(cli.snapshot)
+        + usize::from(cli.install)
+        + usize::from(cli.update);
+    if action_count > 1 {
+        bail!("cannot combine --print, --export, --snapshot, --install, and --update");
     }
 
     let runtime = match AppConfig::load_runtime() {
@@ -87,9 +100,41 @@ fn main() -> Result<()> {
             RuntimeConfig {
                 app: AppConfig::default(),
                 keybindings: crate::config::KeyBindings::default(),
+                first_run: true,
             }
         }
     };
+
+    if cli.install {
+        let result = crate::install::install_current_exe()?;
+        println!("installed implicit to {}", result.target.display());
+        if !result.on_path {
+            println!("add this to your shell profile:");
+            println!("{}", crate::install::path_export_hint());
+        }
+        return Ok(());
+    }
+
+    if cli.update {
+        match crate::updater::self_update(env!("CARGO_PKG_VERSION"))? {
+            Some(result) => {
+                println!(
+                    "updated implicit from {} to {} at {}",
+                    result.previous_version,
+                    result.installed_version,
+                    result.target.display()
+                );
+                if !crate::install::current_status().on_path {
+                    println!("add this to your shell profile:");
+                    println!("{}", crate::install::path_export_hint());
+                }
+            }
+            None => {
+                println!("implicit {} is already current", env!("CARGO_PKG_VERSION"));
+            }
+        }
+        return Ok(());
+    }
 
     if cli.print {
         let path = crate::export::validate_input_path("--print", cli.file.as_deref())?;
@@ -126,10 +171,11 @@ fn main() -> Result<()> {
     }
 
     let mut terminal = terminal::init()?;
-    let mut app = App::new(
+    let mut app = App::new_with_runtime(
         resolve_startup_target(cli.file, cli.config),
         runtime.app,
         runtime.keybindings,
+        runtime.first_run,
     );
 
     let run_result = app.run(&mut terminal);
@@ -203,6 +249,22 @@ mod tests {
     fn print_requires_a_file() {
         let error = crate::export::validate_input_path("--print", None).expect_err("missing path");
         assert!(error.to_string().contains("--print requires a file path"));
+    }
+
+    #[test]
+    fn install_flag_parses_without_file() {
+        let cli = Cli::parse_from(["implicit", "--install"]);
+        assert!(cli.install);
+        assert!(!cli.update);
+        assert_eq!(cli.file, None);
+    }
+
+    #[test]
+    fn update_flag_parses_without_file() {
+        let cli = Cli::parse_from(["implicit", "--update"]);
+        assert!(cli.update);
+        assert!(!cli.install);
+        assert_eq!(cli.file, None);
     }
 
     #[test]

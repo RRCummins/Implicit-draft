@@ -1,4 +1,4 @@
-use std::{env, fs, path::PathBuf, time::Duration};
+use std::{env, fs, path::PathBuf, sync::mpsc, thread, time::Duration};
 
 use anyhow::{Result, anyhow};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -11,6 +11,7 @@ use crate::{
     export,
     filetype::FileType,
     gitdiff::LineChange,
+    install::{self, InstallStatus},
     markdown,
     picker::{Picker, PickerAction, PickerEntry},
     preview, recents, render,
@@ -18,6 +19,7 @@ use crate::{
     settings::{ConfigPane, ConfigState},
     sidebar::{SidebarAction, SidebarCreateKind, SidebarRow, SidebarSelection, SidebarState},
     theme::Theme,
+    updater,
     welcome::{BRAILLE_LOGO, SHORTCUTS, WelcomeState},
 };
 
@@ -67,6 +69,15 @@ impl EditorMode {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum UpdateBadge {
+    Idle,
+    Checking,
+    Current,
+    Available(String),
+    Unavailable,
+}
+
 impl From<DefaultMode> for EditorMode {
     fn from(value: DefaultMode) -> Self {
         match value {
@@ -99,6 +110,10 @@ pub struct App {
     config_return: Option<Box<Screen>>,
     overlay: Option<Overlay>,
     tick: u64,
+    first_run: bool,
+    install_status: InstallStatus,
+    update_badge: UpdateBadge,
+    update_rx: Option<mpsc::Receiver<Result<Option<updater::UpdateInfo>, String>>>,
 }
 
 #[derive(Debug)]
@@ -110,13 +125,35 @@ pub enum StartupTarget {
 }
 
 impl App {
+    #[cfg(test)]
     pub fn new(startup: StartupTarget, config: AppConfig, keybindings: KeyBindings) -> Self {
+        Self::new_with_runtime(startup, config, keybindings, false)
+    }
+
+    pub fn new_with_runtime(
+        startup: StartupTarget,
+        config: AppConfig,
+        keybindings: KeyBindings,
+        first_run: bool,
+    ) -> Self {
         let launch_into_config = matches!(startup, StartupTarget::Config);
         let default_mode = EditorMode::from(config.default_mode);
         let session = SessionState::load().unwrap_or_default();
         let theme = Theme::load_named(&config.theme).unwrap_or_else(|_| {
             Theme::load_named("dark").unwrap_or_else(|_| Theme::source_hints_default())
         });
+        let install_status = install::current_status();
+        let (update_badge, update_rx) = if install_status.installed && !cfg!(test) {
+            let (tx, rx) = mpsc::channel();
+            thread::spawn(move || {
+                let result = updater::latest_available(env!("CARGO_PKG_VERSION"))
+                    .map_err(|error| error.to_string());
+                let _ = tx.send(result);
+            });
+            (UpdateBadge::Checking, Some(rx))
+        } else {
+            (UpdateBadge::Idle, None)
+        };
         let (screen, status_message) = match startup {
             StartupTarget::Browse(path) => match Picker::new(path.clone()) {
                 Ok(picker) => (Screen::Picker(picker), String::from(PICKER_HELP)),
@@ -165,11 +202,16 @@ impl App {
                 .then(|| Box::new(Screen::Welcome(Self::load_welcome_state()))),
             overlay: None,
             tick: 0,
+            first_run,
+            install_status,
+            update_badge,
+            update_rx,
         }
     }
 
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
         while !self.should_quit {
+            self.poll_update_badge();
             terminal.draw(|frame| render::draw(frame, self))?;
 
             if event::poll(FRAME_POLL_INTERVAL)? {
@@ -191,6 +233,32 @@ impl App {
             title: overlay.title().to_owned(),
             lines: overlay.lines().into_iter().map(str::to_owned).collect(),
         })
+    }
+
+    fn poll_update_badge(&mut self) {
+        let Some(receiver) = &self.update_rx else {
+            return;
+        };
+
+        match receiver.try_recv() {
+            Ok(Ok(Some(update))) => {
+                self.update_badge = UpdateBadge::Available(update.latest_version);
+                self.update_rx = None;
+            }
+            Ok(Ok(None)) => {
+                self.update_badge = UpdateBadge::Current;
+                self.update_rx = None;
+            }
+            Ok(Err(_)) => {
+                self.update_badge = UpdateBadge::Unavailable;
+                self.update_rx = None;
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.update_badge = UpdateBadge::Unavailable;
+                self.update_rx = None;
+            }
+        }
     }
 
     fn handle_event(&mut self, event: Event) {
@@ -1223,6 +1291,7 @@ impl App {
             Screen::Welcome(welcome) => ViewModel::Welcome {
                 logo: BRAILLE_LOGO.iter().map(|line| (*line).to_owned()).collect(),
                 version: format!("v{}", env!("CARGO_PKG_VERSION")),
+                badge: self.welcome_badge(),
                 shortcuts: SHORTCUTS
                     .iter()
                     .map(|(label, value)| ((*label).to_owned(), (*value).to_owned()))
@@ -1236,6 +1305,29 @@ impl App {
                 search_active: self.search_mode,
                 tick: self.tick,
             },
+        }
+    }
+
+    fn welcome_badge(&self) -> Option<String> {
+        if self.first_run {
+            return Some(if self.install_status.installed {
+                String::from("First run · defaults ready")
+            } else {
+                String::from("First run · use `implicit --install`")
+            });
+        }
+
+        if !self.install_status.installed {
+            return Some(String::from("Not installed · run `implicit --install`"));
+        }
+
+        match &self.update_badge {
+            UpdateBadge::Available(version) => Some(format!(
+                "Update available · {} · `implicit --update`",
+                version
+            )),
+            UpdateBadge::Checking => Some(String::from("Checking for updates…")),
+            UpdateBadge::Current | UpdateBadge::Idle | UpdateBadge::Unavailable => None,
         }
     }
 
@@ -3099,6 +3191,7 @@ pub enum ViewModel {
     Welcome {
         logo: Vec<String>,
         version: String,
+        badge: Option<String>,
         shortcuts: Vec<(String, String)>,
         recents: Vec<(String, String)>,
         selected_row: Option<usize>,
@@ -3148,6 +3241,14 @@ mod tests {
             config_return: None,
             overlay: None,
             tick: 0,
+            first_run: false,
+            install_status: InstallStatus {
+                target: PathBuf::from("/tmp/implicit"),
+                installed: true,
+                on_path: true,
+            },
+            update_badge: UpdateBadge::Current,
+            update_rx: None,
         }
     }
 
@@ -3165,6 +3266,14 @@ mod tests {
             config_return: None,
             overlay: None,
             tick: 0,
+            first_run: false,
+            install_status: InstallStatus {
+                target: PathBuf::from("/tmp/implicit"),
+                installed: true,
+                on_path: true,
+            },
+            update_badge: UpdateBadge::Current,
+            update_rx: None,
         }
     }
 

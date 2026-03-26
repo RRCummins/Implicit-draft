@@ -25,6 +25,7 @@ pub struct AppConfig {
 pub struct RuntimeConfig {
     pub app: AppConfig,
     pub keybindings: KeyBindings,
+    pub first_run: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -235,10 +236,12 @@ impl Default for AppConfig {
 impl AppConfig {
     pub fn load_runtime() -> Result<RuntimeConfig> {
         let dir = config_dir();
+        let first_run = !config_path(&dir).exists() && !dir.join("keybindings.toml").exists();
         ensure_default_files(&dir)?;
         Ok(RuntimeConfig {
             app: Self::load_from_dir(&dir)?,
             keybindings: KeyBindings::load_from_dir(&dir)?,
+            first_run,
         })
     }
 

@@ -25,6 +25,7 @@ struct WelcomeMeta {
 struct WelcomeView<'a> {
     logo: &'a [String],
     version: &'a str,
+    badge: Option<&'a str>,
     shortcuts: &'a [(String, String)],
     recents: &'a [(String, String)],
     meta: WelcomeMeta,
@@ -170,6 +171,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         ViewModel::Welcome {
             logo,
             version,
+            badge,
             shortcuts,
             recents,
             selected_row,
@@ -181,6 +183,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             WelcomeView {
                 logo: &logo,
                 version: &version,
+                badge: badge.as_deref(),
                 shortcuts: &shortcuts,
                 recents: &recents,
                 meta: WelcomeMeta {
@@ -694,15 +697,17 @@ fn draw_welcome(frame: &mut Frame, area: Rect, welcome: WelcomeView<'_>, theme: 
     );
     frame.render_widget(logo_widget, logo_area);
 
-    let title_lines = vec![
-        Line::raw("implicit"),
-        Line::raw(welcome.version.to_owned()),
+    let mut title_lines = vec![Line::raw("implicit"), Line::raw(welcome.version.to_owned())];
+    if let Some(badge) = welcome.badge {
+        title_lines.push(Line::styled(badge.to_owned(), theme.ui_chrome));
+    }
+    title_lines.extend([
         Line::raw("a markdown editor for the terminal"),
         Line::raw(""),
         Line::raw("Press O to open a file"),
         Line::raw("Press N for a new untitled buffer"),
         Line::raw("Press C for settings"),
-    ];
+    ]);
     let title = Paragraph::new(title_lines)
         .style(theme.background)
         .block(
