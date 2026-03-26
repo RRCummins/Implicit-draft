@@ -29,7 +29,8 @@ const PREVIEW_HELP: &str = "ctrl+f find | ctrl+shift+e export | ctrl+\\ split | 
 const SOURCE_HELP: &str = "ctrl+f find | ctrl+shift+e export | ctrl+\\ split | tab pane | ctrl+. swap | alt+n next | ctrl+g goto | ctrl+p source+hints";
 const PICKER_HELP: &str =
     "enter/right open | left/backspace parent | a notes/code filter | esc home";
-const HOME_HELP: &str = "o open | n new | c settings | enter recent | / search | q quit";
+const HOME_HELP: &str =
+    "o open | n new | c settings | i install | u update | enter recent | / search | q quit";
 const SEARCH_HELP: &str = "type to filter | backspace delete | enter keep | esc clear";
 const CONFIG_HELP: &str = "tab switch pane | enter apply | ctrl+, close | s save | esc cancel";
 const SIDEBAR_HELP: &str =
@@ -426,8 +427,8 @@ impl App {
                             &self.config.theme,
                         ) {
                             ExportDialogOutcome::None => {}
-                            ExportDialogOutcome::Exported(path) => {
-                                next_status = Some(format!("exported {}", short_path(&path)));
+                            ExportDialogOutcome::Exported(message) => {
+                                next_status = Some(message);
                             }
                             ExportDialogOutcome::Canceled => {
                                 next_status = Some(String::from(editor.focus_help()));
@@ -888,6 +889,43 @@ impl App {
                     self.open_config();
                     return;
                 }
+                _ if keybindings.home.install.matches(key) => {
+                    match install::install_current_exe() {
+                        Ok(result) => {
+                            self.install_status = install::current_status();
+                            next_status = Some(if result.on_path {
+                                format!("installed to {}", short_path(&result.target))
+                            } else {
+                                format!(
+                                    "installed to {} · add {} to PATH",
+                                    short_path(&result.target),
+                                    install::path_export_hint()
+                                )
+                            });
+                        }
+                        Err(error) => next_status = Some(error.to_string()),
+                    }
+                }
+                _ if keybindings.home.update.matches(key) => {
+                    match updater::self_update(env!("CARGO_PKG_VERSION")) {
+                        Ok(Some(result)) => {
+                            self.install_status = install::current_status();
+                            self.update_badge = UpdateBadge::Current;
+                            self.update_rx = None;
+                            next_status = Some(format!(
+                                "updated {} -> {}",
+                                result.previous_version, result.installed_version
+                            ));
+                        }
+                        Ok(None) => {
+                            self.update_badge = UpdateBadge::Current;
+                            self.update_rx = None;
+                            next_status =
+                                Some(format!("already current ({})", env!("CARGO_PKG_VERSION")));
+                        }
+                        Err(error) => next_status = Some(error.to_string()),
+                    }
+                }
                 _ if keybindings.home.search.matches(key) => {
                     match Picker::new(env::current_dir().unwrap_or_else(|_| PathBuf::from("."))) {
                         Ok(picker) => {
@@ -1247,7 +1285,10 @@ impl App {
                                 format!("scope: {}", state.scope_label()),
                                 format!("format: {}", state.kind.label()),
                                 format!("path: {}", state.path),
-                                String::from("Up/Down scope   Left/Right format   Tab check path"),
+                                state.detail_line(export::pdf_renderer_program()),
+                                String::from(
+                                    "Up/Down scope   Left/Right format   Tab fix extension",
+                                ),
                                 String::from("Enter export   Backspace edit path   Esc cancel"),
                             ],
                         },
@@ -1853,8 +1894,12 @@ impl App {
                 ExportDialogOutcome::Status(format!("format {}", state.kind.label()))
             }
             KeyCode::Tab => {
-                state.confirm_snapshot_extension();
-                ExportDialogOutcome::Status(String::from("checked path"))
+                let changed = state.confirm_snapshot_extension();
+                ExportDialogOutcome::Status(String::from(if changed {
+                    "fixed output extension"
+                } else {
+                    "path ok"
+                }))
             }
             KeyCode::Backspace => {
                 state.path.pop();
@@ -1913,7 +1958,7 @@ impl App {
                 },
                 theme_name,
             ) {
-                Ok(saved) => Ok(saved),
+                Ok(saved) => Ok(format!("exported snapshot {}", short_path(&saved))),
                 Err(_) if path.extension().and_then(|ext| ext.to_str()) == Some("png") => {
                     let svg_path = path.with_extension("svg");
                     export::snapshot_lines(
@@ -1928,6 +1973,9 @@ impl App {
                         },
                         theme_name,
                     )
+                    .map(|saved| {
+                        format!("png unavailable; exported snapshot {}", short_path(&saved))
+                    })
                 }
                 Err(error) => Err(error),
             },
@@ -1942,7 +1990,8 @@ impl App {
                     source_label,
                 },
                 theme_name,
-            ),
+            )
+            .map(Self::document_export_status),
             ExportKind::Pdf => export::export_lines(
                 export::ExportRequest {
                     lines: &lines,
@@ -1954,15 +2003,33 @@ impl App {
                     source_label,
                 },
                 theme_name,
-            ),
+            )
+            .map(Self::document_export_status),
         };
 
         match result {
-            Ok(path) => ExportDialogOutcome::Exported(path),
+            Ok(message) => ExportDialogOutcome::Exported(message),
             Err(error) => {
                 editor.dialog = Some(EditorDialog::Export(state));
                 ExportDialogOutcome::Error(error)
             }
+        }
+    }
+
+    fn document_export_status(exported: export::ExportedDocument) -> String {
+        if exported.used_fallback() {
+            format!(
+                "{} unavailable; exported {} {}",
+                exported.requested_format.label(),
+                exported.actual_format.label(),
+                short_path(&exported.path)
+            )
+        } else {
+            format!(
+                "exported {} {}",
+                exported.actual_format.label(),
+                short_path(&exported.path)
+            )
         }
     }
 
@@ -2789,12 +2856,13 @@ impl ExportState {
         .to_string();
     }
 
-    fn confirm_snapshot_extension(&mut self) {
+    fn confirm_snapshot_extension(&mut self) -> bool {
         let trimmed = self.path.trim();
         if trimmed.is_empty() {
-            return;
+            return false;
         }
 
+        let previous = self.path.clone();
         let path = PathBuf::from(trimmed);
         let has_valid_ext = match self.kind {
             ExportKind::Snapshot => matches!(
@@ -2808,6 +2876,8 @@ impl ExportState {
         if !has_valid_ext {
             self.sync_path_extension();
         }
+
+        self.path != previous
     }
 
     fn scope_label(&self) -> String {
@@ -2827,6 +2897,17 @@ impl ExportState {
 
         self.scope = self.scope.toggle();
         self.sync_path_extension();
+    }
+
+    fn detail_line(&self, pdf_renderer: Option<&str>) -> String {
+        match self.kind {
+            ExportKind::Snapshot => String::from("writes .png or .svg snapshots"),
+            ExportKind::Html => String::from("writes standalone .html"),
+            ExportKind::Pdf => match pdf_renderer {
+                Some(program) => format!("renderer: {program}"),
+                None => String::from("no PDF renderer found; Enter writes HTML fallback"),
+            },
+        }
     }
 }
 
@@ -2870,7 +2951,7 @@ enum SaveDialogOutcome {
 #[derive(Debug)]
 enum ExportDialogOutcome {
     None,
-    Exported(PathBuf),
+    Exported(String),
     Canceled,
     Status(String),
     Error(anyhow::Error),
@@ -3114,6 +3195,7 @@ impl Overlay {
             ],
             Self::Home => vec![
                 "O open file picker   N new untitled buffer   C settings",
+                "I install to ~/.local/bin   U update from latest release",
                 "Enter open selected recent   Up/Down move",
                 "/ search files   Q quit",
                 "? or Esc close this dialog",
@@ -4108,6 +4190,38 @@ mod tests {
     }
 
     #[test]
+    fn home_view_shows_first_run_badge_when_not_installed() {
+        let mut app = home_app();
+        app.first_run = true;
+        app.install_status.installed = false;
+
+        let ViewModel::Welcome { badge, .. } = app.current_view(20, 80) else {
+            panic!("welcome view");
+        };
+
+        assert_eq!(
+            badge.as_deref(),
+            Some("First run · use `implicit --install`")
+        );
+    }
+
+    #[test]
+    fn home_view_shows_update_badge_when_new_version_exists() {
+        let mut app = home_app();
+        app.install_status.installed = true;
+        app.update_badge = UpdateBadge::Available(String::from("0.2.1"));
+
+        let ViewModel::Welcome { badge, .. } = app.current_view(20, 80) else {
+            panic!("welcome view");
+        };
+
+        assert_eq!(
+            badge.as_deref(),
+            Some("Update available · 0.2.1 · `implicit --update`")
+        );
+    }
+
+    #[test]
     fn code_files_open_in_source_mode() {
         let mode = App::editor_mode_for_path(&PathBuf::from("main.rs"), EditorMode::Preview);
         assert_eq!(mode, EditorMode::Source);
@@ -4661,6 +4775,31 @@ mod tests {
         assert!(app.status_message.contains("exported"));
 
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn export_dialog_pdf_detail_line_mentions_html_fallback_without_renderer() {
+        let state = ExportState {
+            kind: ExportKind::Pdf,
+            path: String::from("note.pdf"),
+            source_path: PathBuf::from("note.md"),
+            selected_rows: None,
+            scope: ExportScope::FullBuffer,
+        };
+
+        assert!(state.detail_line(None).contains("HTML fallback"));
+    }
+
+    #[test]
+    fn document_export_status_reports_pdf_html_fallback() {
+        let message = App::document_export_status(export::ExportedDocument {
+            path: PathBuf::from("/tmp/note.html"),
+            requested_format: export::ExportFormat::Pdf,
+            actual_format: export::ExportFormat::Html,
+        });
+
+        assert!(message.contains("pdf unavailable"));
+        assert!(message.contains("exported html"));
     }
 
     #[test]

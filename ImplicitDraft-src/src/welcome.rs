@@ -14,6 +14,8 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("O", "Open file picker"),
     ("N", "New untitled buffer"),
     ("C", "Open settings"),
+    ("I", "Install to ~/.local/bin"),
+    ("U", "Update to latest release"),
     ("Enter", "Open highlighted recent file"),
     ("/", "Search files (next)"),
     ("?", "Show controls"),

@@ -145,7 +145,7 @@ fn main() -> Result<()> {
     if let Some(format) = cli.export {
         let path = crate::export::validate_input_path("--export", cli.file.as_deref())?;
         let theme_name = cli.theme.as_deref().unwrap_or(&runtime.app.theme);
-        crate::export::export_path(
+        let exported = crate::export::export_path(
             path,
             format,
             cli.mode,
@@ -153,6 +153,9 @@ fn main() -> Result<()> {
             cli.output.as_deref(),
             cli.lines,
         )?;
+        if let Some(notice) = exported.fallback_notice() {
+            eprintln!("implicit: {notice}");
+        }
         return Ok(());
     }
 

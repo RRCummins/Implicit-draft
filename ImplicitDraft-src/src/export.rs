@@ -33,6 +33,15 @@ pub enum ExportFormat {
     Pdf,
 }
 
+impl ExportFormat {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Html => "html",
+            Self::Pdf => "pdf",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LineRange {
     pub start: usize,
@@ -57,6 +66,29 @@ pub struct ExportRequest<'a> {
     pub format: ExportFormat,
     pub output_path: Option<&'a Path>,
     pub source_label: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExportedDocument {
+    pub path: PathBuf,
+    pub requested_format: ExportFormat,
+    pub actual_format: ExportFormat,
+}
+
+impl ExportedDocument {
+    pub fn used_fallback(&self) -> bool {
+        self.requested_format != self.actual_format
+    }
+
+    pub fn fallback_notice(&self) -> Option<String> {
+        (self.requested_format == ExportFormat::Pdf && self.actual_format == ExportFormat::Html)
+            .then(|| {
+                format!(
+                    "no PDF renderer found; wrote HTML fallback to {}",
+                    self.path.display()
+                )
+            })
+    }
 }
 
 pub fn parse_line_range(value: &str) -> std::result::Result<LineRange, String> {
@@ -120,7 +152,7 @@ pub fn export_path(
     theme_name: &str,
     output_path: Option<&Path>,
     line_range: Option<LineRange>,
-) -> Result<PathBuf> {
+) -> Result<ExportedDocument> {
     let text =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     let lines = text
@@ -142,7 +174,7 @@ pub fn export_path(
     )
 }
 
-pub fn export_lines(request: ExportRequest<'_>, theme_name: &str) -> Result<PathBuf> {
+pub fn export_lines(request: ExportRequest<'_>, theme_name: &str) -> Result<ExportedDocument> {
     let theme = Theme::load_named(theme_name)
         .with_context(|| format!("failed to load theme {theme_name}"))?;
     let width = print_width();
@@ -170,7 +202,11 @@ pub fn export_lines(request: ExportRequest<'_>, theme_name: &str) -> Result<Path
             let output_path = resolve_html_output_path(request.source_path, request.output_path);
             fs::write(&output_path, html)
                 .with_context(|| format!("failed to write {}", output_path.display()))?;
-            Ok(output_path)
+            Ok(ExportedDocument {
+                path: output_path,
+                requested_format: request.format,
+                actual_format: ExportFormat::Html,
+            })
         }
         ExportFormat::Pdf => export_pdf_document(request.source_path, request.output_path, &html),
     }
@@ -211,6 +247,10 @@ pub fn snapshot_lines(request: SnapshotRequest<'_>, theme_name: &str) -> Result<
     let theme = Theme::load_named(theme_name)
         .with_context(|| format!("failed to load theme {theme_name}"))?;
     snapshot_lines_with_theme(request, &theme)
+}
+
+pub fn pdf_renderer_program() -> Option<&'static str> {
+    detect_pdf_tool().map(PdfTool::program)
 }
 
 fn snapshot_lines_with_theme(request: SnapshotRequest<'_>, theme: &Theme) -> Result<PathBuf> {
@@ -1142,9 +1182,18 @@ fn export_pdf_document(
     input_path: &Path,
     output_path: Option<&Path>,
     html: &str,
-) -> Result<PathBuf> {
+) -> Result<ExportedDocument> {
+    export_pdf_document_with_tool(input_path, output_path, html, detect_pdf_tool())
+}
+
+fn export_pdf_document_with_tool(
+    input_path: &Path,
+    output_path: Option<&Path>,
+    html: &str,
+    tool: Option<PdfTool>,
+) -> Result<ExportedDocument> {
     let pdf_output_path = resolve_pdf_output_path(input_path, output_path);
-    if let Some(tool) = detect_pdf_tool() {
+    if let Some(tool) = tool {
         let temp_html_path = temp_html_export_path(&pdf_output_path);
         fs::write(&temp_html_path, html)
             .with_context(|| format!("failed to write {}", temp_html_path.display()))?;
@@ -1159,17 +1208,21 @@ fn export_pdf_document(
         }
 
         render_result?;
-        return Ok(pdf_output_path);
+        return Ok(ExportedDocument {
+            path: pdf_output_path,
+            requested_format: ExportFormat::Pdf,
+            actual_format: ExportFormat::Pdf,
+        });
     }
 
     let fallback_path = resolve_pdf_fallback_path(&pdf_output_path);
     fs::write(&fallback_path, html)
         .with_context(|| format!("failed to write {}", fallback_path.display()))?;
-    eprintln!(
-        "implicit: no PDF renderer found; wrote HTML fallback to {}",
-        fallback_path.display()
-    );
-    Ok(fallback_path)
+    Ok(ExportedDocument {
+        path: fallback_path,
+        requested_format: ExportFormat::Pdf,
+        actual_format: ExportFormat::Html,
+    })
 }
 
 fn detect_pdf_tool() -> Option<PdfTool> {
@@ -1352,6 +1405,40 @@ mod tests {
     fn pdf_tool_selection_falls_back_to_chrome_family() {
         let tool = select_pdf_tool(|program| program == "google-chrome");
         assert_eq!(tool, Some(PdfTool::GoogleChrome));
+    }
+
+    #[test]
+    fn pdf_export_reports_html_fallback_when_renderer_is_missing() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or(0);
+        let root = env::temp_dir().join(format!("implicit-export-pdf-fallback-{unique}"));
+        fs::create_dir_all(&root).expect("mkdir");
+        let source = root.join("notes.md");
+        let html = "<html><body>demo</body></html>";
+
+        let exported = export_pdf_document_with_tool(
+            &source,
+            Some(root.join("notes.pdf").as_path()),
+            html,
+            None,
+        )
+        .expect("fallback export");
+
+        assert_eq!(exported.requested_format, ExportFormat::Pdf);
+        assert_eq!(exported.actual_format, ExportFormat::Html);
+        assert_eq!(exported.path, root.join("notes.html"));
+        assert!(exported.used_fallback());
+        assert!(exported.path.exists());
+        assert!(
+            exported
+                .fallback_notice()
+                .expect("fallback notice")
+                .contains("HTML fallback")
+        );
+
+        fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]

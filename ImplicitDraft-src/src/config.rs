@@ -69,6 +69,8 @@ pub struct HomeKeys {
     pub new_buffer: Shortcut,
     pub search: Shortcut,
     pub settings: Shortcut,
+    pub install: Shortcut,
+    pub update: Shortcut,
     pub quit: Shortcut,
     pub controls: Shortcut,
 }
@@ -160,6 +162,8 @@ struct HomeKeysFile {
     new_buffer: Option<String>,
     search: Option<String>,
     settings: Option<String>,
+    install: Option<String>,
+    update: Option<String>,
     quit: Option<String>,
     controls: Option<String>,
 }
@@ -332,6 +336,8 @@ impl Default for KeyBindings {
                 new_buffer: Shortcut::parse("n").expect("default shortcut"),
                 search: Shortcut::parse("/").expect("default shortcut"),
                 settings: Shortcut::parse("c").expect("default shortcut"),
+                install: Shortcut::parse("i").expect("default shortcut"),
+                update: Shortcut::parse("u").expect("default shortcut"),
                 quit: Shortcut::parse("q").expect("default shortcut"),
                 controls: Shortcut::parse("?").expect("default shortcut"),
             },
@@ -406,6 +412,8 @@ impl KeyBindings {
                 new_buffer: parse_or_default(file.home.new_buffer, defaults.home.new_buffer)?,
                 search: parse_or_default(file.home.search, defaults.home.search)?,
                 settings: parse_or_default(file.home.settings, defaults.home.settings)?,
+                install: parse_or_default(file.home.install, defaults.home.install)?,
+                update: parse_or_default(file.home.update, defaults.home.update)?,
                 quit: parse_or_default(file.home.quit, defaults.home.quit)?,
                 controls: parse_or_default(file.home.controls, defaults.home.controls)?,
             },
@@ -593,6 +601,8 @@ open_picker = "o"
 new_buffer = "n"
 search = "/"
 settings = "c"
+install = "i"
+update = "u"
 quit = "q"
 controls = "?"
 
