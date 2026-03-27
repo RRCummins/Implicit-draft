@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>Implicit</string>
+    <key>CFBundleExecutable</key>
+    <string>ImplicitApp</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.implicitdraft.implicit</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Implicit</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.2.2</string>
+    <key>CFBundleVersion</key>
+    <string>0.2.2</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Markdown Document</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Owner</string>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>md</string>
+                <string>markdown</string>
+                <string>mdown</string>
+                <string>txt</string>
+                <string>text</string>
+            </array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Code and Config Text</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>rs</string>
+                <string>swift</string>
+                <string>kt</string>
+                <string>kts</string>
+                <string>py</string>
+                <string>js</string>
+                <string>ts</string>
+                <string>json</string>
+                <string>toml</string>
+                <string>yaml</string>
+                <string>yml</string>
+                <string>c</string>
+                <string>cpp</string>
+                <string>h</string>
+                <string>hpp</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>

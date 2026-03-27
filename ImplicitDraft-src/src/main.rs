@@ -47,6 +47,10 @@ struct Cli {
     #[arg(long)]
     update: bool,
 
+    /// Install Implicit.app into ~/Applications.
+    #[arg(long)]
+    install_app: bool,
+
     /// Open the file in the native Implicit app window instead of the terminal UI.
     #[arg(long)]
     app: bool,
@@ -92,21 +96,24 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(filtered_cli_args());
     let action_count = usize::from(cli.print)
         + usize::from(cli.export.is_some())
         + usize::from(cli.snapshot)
         + usize::from(cli.install)
-        + usize::from(cli.update);
+        + usize::from(cli.update)
+        + usize::from(cli.install_app);
     if action_count > 1 {
-        bail!("cannot combine --print, --export, --snapshot, --install, and --update");
+        bail!(
+            "cannot combine --print, --export, --snapshot, --install, --install-app, and --update"
+        );
     }
     if cli.app && cli.new_window {
         bail!("cannot combine --app and --new-window");
     }
     if (cli.app || cli.new_window) && action_count > 0 {
         bail!(
-            "cannot combine --app or --new-window with --print, --export, --snapshot, --install, or --update"
+            "cannot combine --app or --new-window with --print, --export, --snapshot, --install, --install-app, or --update"
         );
     }
 
@@ -180,6 +187,21 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    if cli.install_app {
+        let result = crate::install::install_current_app_bundle()?;
+        if result.already_current {
+            println!(
+                "Implicit.app is already installed at {}",
+                result.target.display()
+            );
+        } else {
+            println!("installed Implicit.app to {}", result.target.display());
+        }
+        println!("launch it with:");
+        println!("open -na {}", result.target.display());
+        return Ok(());
+    }
+
     if cli.print {
         let path = crate::export::validate_input_path("--print", cli.file.as_deref())?;
         let theme_name = cli.theme.as_deref().unwrap_or(&runtime.app.theme);
@@ -239,6 +261,27 @@ fn main() -> Result<()> {
     restore_result?;
     run_result?;
     Ok(())
+}
+
+fn filtered_cli_args() -> Vec<std::ffi::OsString> {
+    std::env::args_os()
+        .filter(|arg| !is_ignored_platform_arg(arg))
+        .collect()
+}
+
+fn is_ignored_platform_arg(arg: &std::ffi::OsString) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        arg.to_str()
+            .map(|value| value.starts_with("-psn_"))
+            .unwrap_or(false)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = arg;
+        false
+    }
 }
 
 fn resolve_startup_target(file: Option<PathBuf>, config: bool) -> StartupTarget {
@@ -323,6 +366,14 @@ mod tests {
     }
 
     #[test]
+    fn install_app_flag_parses_without_file() {
+        let cli = Cli::parse_from(["implicit", "--install-app"]);
+        assert!(cli.install_app);
+        assert!(!cli.install);
+        assert_eq!(cli.file, None);
+    }
+
+    #[test]
     fn app_flag_parses_without_file() {
         let cli = Cli::parse_from(["implicit", "--app"]);
         assert!(cli.app);
@@ -379,5 +430,23 @@ mod tests {
         assert_eq!(cli.output, Some(PathBuf::from("snippet.svg")));
         assert_eq!(cli.lines, Some(LineRange { start: 12, end: 18 }));
         assert_eq!(cli.file, Some(PathBuf::from("main.rs")));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn filters_finder_process_serial_number_arg() {
+        let args = vec![
+            std::ffi::OsString::from("implicit"),
+            std::ffi::OsString::from("--app"),
+            std::ffi::OsString::from("-psn_0_12345"),
+            std::ffi::OsString::from("notes.md"),
+        ];
+        let filtered = args
+            .into_iter()
+            .filter(|arg| !is_ignored_platform_arg(arg))
+            .collect::<Vec<_>>();
+        let cli = Cli::parse_from(filtered);
+        assert!(cli.app);
+        assert_eq!(cli.file, Some(PathBuf::from("notes.md")));
     }
 }

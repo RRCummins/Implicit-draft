@@ -1,7 +1,7 @@
 use std::{
     fs,
     num::NonZeroU32,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     rc::Rc,
 };
@@ -41,6 +41,23 @@ pub fn run(path: Option<&Path>) -> Result<()> {
 }
 
 pub fn launch_new_window(path: Option<&Path>) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(bundle) = find_app_bundle()? {
+            let mut command = Command::new("open");
+            for arg in build_open_bundle_args(&bundle, path) {
+                command.arg(arg);
+            }
+            command
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .with_context(|| format!("failed to open bundle {}", bundle.display()))?;
+            return Ok(());
+        }
+    }
+
     let exe = std::env::current_exe().context("failed to resolve current executable")?;
     let mut command = Command::new(&exe);
     for arg in build_new_window_args(path) {
@@ -63,8 +80,70 @@ fn build_new_window_args(path: Option<&Path>) -> Vec<String> {
     args
 }
 
+#[cfg(target_os = "macos")]
+fn find_app_bundle() -> Result<Option<PathBuf>> {
+    let current_exe = std::env::current_exe().context("failed to resolve current executable")?;
+    for candidate in bundle_candidates(&current_exe) {
+        if candidate.exists() {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(target_os = "macos")]
+fn bundle_candidates(current_exe: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(bundle) = bundle_root_for_executable(current_exe) {
+        candidates.push(bundle);
+    }
+
+    let dev_bundle = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .map(|root| root.join("ImplicitDraft-output/Implicit.app"));
+    if let Some(bundle) = dev_bundle {
+        candidates.push(bundle);
+    }
+
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(PathBuf::from(home).join("Applications/Implicit.app"));
+    }
+    candidates.push(PathBuf::from("/Applications/Implicit.app"));
+
+    let mut unique = Vec::new();
+    for candidate in candidates {
+        if !unique.iter().any(|existing| existing == &candidate) {
+            unique.push(candidate);
+        }
+    }
+    unique
+}
+
+#[cfg(target_os = "macos")]
+fn bundle_root_for_executable(exe: &Path) -> Option<PathBuf> {
+    let contents = exe.parent()?.parent()?;
+    let bundle = contents.parent()?;
+    (contents.file_name()? == "Contents" && bundle.extension()? == "app")
+        .then(|| bundle.to_path_buf())
+}
+
+#[cfg(target_os = "macos")]
+fn build_open_bundle_args(bundle: &Path, path: Option<&Path>) -> Vec<String> {
+    let mut args = vec![
+        String::from("-n"),
+        String::from("-a"),
+        bundle.display().to_string(),
+        String::from("--args"),
+    ];
+    if let Some(path) = path {
+        args.push(path.display().to_string());
+    }
+    args
+}
+
 #[derive(Clone, Debug)]
 struct ViewerDocument {
+    source_path: Option<PathBuf>,
     title: String,
     subtitle: String,
     lines: Vec<String>,
@@ -74,6 +153,7 @@ fn load_document(path: Option<&Path>) -> ViewerDocument {
     match path {
         Some(path) => match fs::read_to_string(path) {
             Ok(contents) => ViewerDocument {
+                source_path: Some(path.to_path_buf()),
                 title: path
                     .file_name()
                     .and_then(|name| name.to_str())
@@ -83,6 +163,7 @@ fn load_document(path: Option<&Path>) -> ViewerDocument {
                 lines: split_lines(&contents),
             },
             Err(error) => ViewerDocument {
+                source_path: Some(path.to_path_buf()),
                 title: String::from("Implicit"),
                 subtitle: path.display().to_string(),
                 lines: vec![
@@ -93,6 +174,7 @@ fn load_document(path: Option<&Path>) -> ViewerDocument {
             },
         },
         None => ViewerDocument {
+            source_path: None,
             title: String::from("Implicit"),
             subtitle: String::from("Native app mode"),
             lines: vec![
@@ -111,7 +193,11 @@ fn load_document(path: Option<&Path>) -> ViewerDocument {
 fn split_lines(contents: &str) -> Vec<String> {
     let mut lines = contents
         .split('\n')
-        .map(|line| line.strip_suffix('\r').unwrap_or(line).replace('\t', "    "))
+        .map(|line| {
+            line.strip_suffix('\r')
+                .unwrap_or(line)
+                .replace('\t', "    ")
+        })
         .collect::<Vec<_>>();
     if lines.is_empty() {
         lines.push(String::new());
@@ -137,6 +223,26 @@ impl WindowApp {
             surface: None,
             modifiers: ModifiersState::default(),
             scroll_line: 0,
+        }
+    }
+
+    fn set_document(&mut self, document: ViewerDocument) {
+        self.document = document;
+        self.scroll_line = 0;
+        if let Some(window) = &self.window {
+            window.set_title(&format!("Implicit — {}", self.document.title));
+        }
+    }
+
+    fn open_document(&mut self, path: &Path) {
+        self.set_document(load_document(Some(path)));
+        self.request_redraw();
+    }
+
+    fn reload_document(&mut self) {
+        if let Some(path) = self.document.source_path.clone() {
+            self.set_document(load_document(Some(&path)));
+            self.request_redraw();
         }
     }
 
@@ -170,9 +276,9 @@ impl WindowApp {
     }
 
     fn visible_rows(&self, size: PhysicalSize<u32>) -> usize {
-        let content_height = size
-            .height
-            .saturating_sub((TOP_BAR_HEIGHT + BOTTOM_BAR_HEIGHT) as u32) as usize;
+        let content_height =
+            size.height
+                .saturating_sub((TOP_BAR_HEIGHT + BOTTOM_BAR_HEIGHT) as u32) as usize;
         let row_height = CHAR_HEIGHT + LINE_SPACING;
         (content_height / row_height).max(1)
     }
@@ -229,7 +335,10 @@ impl WindowApp {
             width,
             H_PADDING,
             24,
-            &abbreviate_middle(&self.document.subtitle, max_cols(size.width).saturating_sub(4)),
+            &abbreviate_middle(
+                &self.document.subtitle,
+                max_cols(size.width).saturating_sub(4),
+            ),
             MUTED,
         );
 
@@ -243,7 +352,7 @@ impl WindowApp {
             PANEL,
         );
         let footer = format!(
-            "Esc close  Up/Down scroll  PageUp/PageDown faster  {} lines",
+            "Esc close  Up/Down scroll  PageUp/PageDown faster  Cmd+R reload  Drop file to open  {} lines",
             wrapped.len()
         );
         draw_text(
@@ -314,6 +423,9 @@ impl ApplicationHandler for WindowApp {
     ) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::DroppedFile(path) => {
+                self.open_document(&path);
+            }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
             }
@@ -356,6 +468,11 @@ impl ApplicationHandler for WindowApp {
                         if self.modifiers.super_key() && text.eq_ignore_ascii_case("w") =>
                     {
                         event_loop.exit();
+                    }
+                    Key::Character(text)
+                        if self.modifiers.super_key() && text.eq_ignore_ascii_case("r") =>
+                    {
+                        self.reload_document();
                     }
                     _ => return,
                 }
@@ -476,6 +593,35 @@ mod tests {
         assert_eq!(args, vec![String::from("--app"), String::from("notes.md")]);
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bundle_root_is_detected_from_executable_path() {
+        let exe = Path::new("/Applications/Implicit.app/Contents/MacOS/Implicit");
+        assert_eq!(
+            bundle_root_for_executable(exe),
+            Some(PathBuf::from("/Applications/Implicit.app"))
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn open_bundle_args_include_new_instance_and_file() {
+        let args = build_open_bundle_args(
+            Path::new("/Applications/Implicit.app"),
+            Some(Path::new("note.md")),
+        );
+        assert_eq!(
+            args,
+            vec![
+                String::from("-n"),
+                String::from("-a"),
+                String::from("/Applications/Implicit.app"),
+                String::from("--args"),
+                String::from("note.md")
+            ]
+        );
+    }
+
     #[test]
     fn wrap_lines_chunks_long_lines() {
         let wrapped = wrap_lines(&[String::from("abcdefgh")], 3);
@@ -493,5 +639,22 @@ mod tests {
         let document = load_document(None);
         assert_eq!(document.title, "Implicit");
         assert!(document.lines[0].contains("Implicit native window mode"));
+    }
+
+    #[test]
+    fn load_document_from_path_reads_file_contents() {
+        let path = std::env::temp_dir().join("implicit-window-app-load.txt");
+        fs::write(&path, "hello\nworld").expect("write temp file");
+
+        let document = load_document(Some(&path));
+
+        assert_eq!(document.source_path.as_deref(), Some(path.as_path()));
+        assert_eq!(document.title, "implicit-window-app-load.txt");
+        assert_eq!(
+            document.lines,
+            vec![String::from("hello"), String::from("world")]
+        );
+
+        fs::remove_file(path).expect("cleanup");
     }
 }
