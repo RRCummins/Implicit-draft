@@ -3,7 +3,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(target_os = "macos")]
+use anyhow::bail;
 use anyhow::{Context, Result};
+#[cfg(target_os = "macos")]
+use std::process::Command;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -74,12 +78,15 @@ pub fn install_app_bundle(source_binary: &Path, target_app: &Path) -> Result<App
     let target_binary = macos_dir.join("implicit");
     let target_launcher = macos_dir.join("ImplicitApp");
     let target_plist = target_app.join("Contents/Info.plist");
+    let target_launcher_source = resources_dir.join("ImplicitApp.m");
 
     let already_current = target_binary.exists()
         && target_launcher.exists()
         && target_plist.exists()
+        && target_launcher_source.exists()
         && files_match(source_binary, &target_binary)?
-        && fs::read_to_string(&target_launcher).ok().as_deref() == Some(app_launcher_contents())
+        && fs::read_to_string(&target_launcher_source).ok().as_deref()
+            == Some(app_launcher_source())
         && fs::read_to_string(&target_plist).ok().as_deref() == Some(&app_info_plist_contents());
     if already_current {
         return Ok(AppInstallResult {
@@ -95,8 +102,8 @@ pub fn install_app_bundle(source_binary: &Path, target_app: &Path) -> Result<App
 
     fs::write(&target_plist, app_info_plist_contents())
         .with_context(|| format!("failed to write {}", target_plist.display()))?;
-    fs::write(&target_launcher, app_launcher_contents())
-        .with_context(|| format!("failed to write {}", target_launcher.display()))?;
+    fs::write(&target_launcher_source, app_launcher_source())
+        .with_context(|| format!("failed to write {}", target_launcher_source.display()))?;
 
     let temp_binary = target_binary.with_extension("tmp");
     fs::copy(source_binary, &temp_binary).with_context(|| {
@@ -113,14 +120,12 @@ pub fn install_app_bundle(source_binary: &Path, target_app: &Path) -> Result<App
             target_binary.display()
         )
     })?;
+    compile_app_launcher(&target_launcher_source, &target_launcher)?;
 
     #[cfg(unix)]
     {
         fs::set_permissions(&target_binary, fs::Permissions::from_mode(0o755))
             .with_context(|| format!("failed to set permissions on {}", target_binary.display()))?;
-        fs::set_permissions(&target_launcher, fs::Permissions::from_mode(0o755)).with_context(
-            || format!("failed to set permissions on {}", target_launcher.display()),
-        )?;
     }
 
     Ok(AppInstallResult {
@@ -282,7 +287,156 @@ fn app_info_plist_contents() -> String {
     )
 }
 
-fn app_launcher_contents() -> &'static str {
+#[cfg(target_os = "macos")]
+fn compile_app_launcher(source: &Path, target: &Path) -> Result<()> {
+    let temp_target = target.with_extension("tmp");
+    if temp_target.exists() {
+        fs::remove_file(&temp_target)
+            .with_context(|| format!("failed to remove {}", temp_target.display()))?;
+    }
+
+    let status = Command::new("clang")
+        .arg("-fobjc-arc")
+        .arg("-framework")
+        .arg("Cocoa")
+        .arg("-o")
+        .arg(&temp_target)
+        .arg(source)
+        .status()
+        .context("failed to invoke clang for macOS app launcher")?;
+    if !status.success() {
+        bail!("failed to compile macOS app launcher");
+    }
+
+    #[cfg(unix)]
+    fs::set_permissions(&temp_target, fs::Permissions::from_mode(0o755))
+        .with_context(|| format!("failed to set permissions on {}", temp_target.display()))?;
+
+    fs::rename(&temp_target, target).with_context(|| {
+        format!(
+            "failed to move {} to {}",
+            temp_target.display(),
+            target.display()
+        )
+    })?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn compile_app_launcher(_source: &Path, target: &Path) -> Result<()> {
+    fs::write(target, app_launcher_fallback_script())
+        .with_context(|| format!("failed to write {}", target.display()))?;
+
+    #[cfg(unix)]
+    fs::set_permissions(target, fs::Permissions::from_mode(0o755))
+        .with_context(|| format!("failed to set permissions on {}", target.display()))?;
+
+    Ok(())
+}
+
+fn app_launcher_source() -> &'static str {
+    r#"#import <Cocoa/Cocoa.h>
+
+@interface ImplicitAppDelegate : NSObject <NSApplicationDelegate>
+@property(nonatomic, assign) BOOL launched;
+@end
+
+@implementation ImplicitAppDelegate
+
+- (NSString *)implicitBinaryPath {
+    NSString *executablePath = [[NSBundle mainBundle] executablePath];
+    NSString *macosDir = [executablePath stringByDeletingLastPathComponent];
+    return [macosDir stringByAppendingPathComponent:@"implicit"];
+}
+
+- (void)launchImplicitWithArguments:(NSArray<NSString *> *)arguments {
+    self.launched = YES;
+
+    NSTask *task = [[NSTask alloc] init];
+    task.executableURL = [NSURL fileURLWithPath:[self implicitBinaryPath]];
+    task.arguments = arguments;
+    task.standardInput = [NSPipe pipe];
+    task.standardOutput = [NSFileHandle fileHandleWithNullDevice];
+    task.standardError = [NSFileHandle fileHandleWithNullDevice];
+
+    NSError *error = nil;
+    [task launchAndReturnError:&error];
+    if (error != nil) {
+        NSLog(@"Implicit launcher failed: %@", error);
+    }
+}
+
+- (NSArray<NSString *> *)forwardedArguments {
+    NSArray<NSString *> *arguments = [[NSProcessInfo processInfo] arguments];
+    if ([arguments count] <= 1) {
+        return @[];
+    }
+
+    NSMutableArray<NSString *> *forwarded = [NSMutableArray arrayWithObject:@"--app"];
+    for (NSUInteger index = 1; index < [arguments count]; index++) {
+        NSString *argument = arguments[index];
+        if ([argument hasPrefix:@"-psn_"]) {
+            continue;
+        }
+        [forwarded addObject:argument];
+    }
+    return forwarded;
+}
+
+- (void)launchDefaultIfNeeded {
+    if (!self.launched) {
+        [self launchImplicitWithArguments:@[@"--app"]];
+        [NSApp terminate:nil];
+    }
+}
+
+- (void)applicationDidFinishLaunching:(NSNotification *)notification {
+    (void)notification;
+
+    NSArray<NSString *> *forwarded = [self forwardedArguments];
+    if ([forwarded count] > 1) {
+        [self launchImplicitWithArguments:forwarded];
+        [NSApp terminate:nil];
+        return;
+    }
+
+    [self performSelector:@selector(launchDefaultIfNeeded) withObject:nil afterDelay:0.2];
+}
+
+- (void)application:(NSApplication *)sender openFiles:(NSArray<NSString *> *)filenames {
+    if ([filenames count] == 0) {
+        [self launchDefaultIfNeeded];
+    } else {
+        for (NSString *filename in filenames) {
+            [self launchImplicitWithArguments:@[@"--app", filename]];
+        }
+    }
+
+    [sender replyToOpenOrPrint:NSApplicationDelegateReplySuccess];
+    [NSApp terminate:nil];
+}
+
+- (BOOL)applicationShouldOpenUntitledFile:(NSApplication *)sender {
+    (void)sender;
+    return NO;
+}
+
+@end
+
+int main(int argc, const char *argv[]) {
+    @autoreleasepool {
+        NSApplication *application = [NSApplication sharedApplication];
+        ImplicitAppDelegate *delegate = [[ImplicitAppDelegate alloc] init];
+        [application setActivationPolicy:NSApplicationActivationPolicyRegular];
+        [application setDelegate:delegate];
+        return NSApplicationMain(argc, argv);
+    }
+}
+"#
+}
+
+#[cfg(not(target_os = "macos"))]
+fn app_launcher_fallback_script() -> &'static str {
     "#!/bin/sh\nset -eu\n\nSELF_DIR=\"$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)\"\nexec \"$SELF_DIR/implicit\" --app \"$@\"\n"
 }
 
