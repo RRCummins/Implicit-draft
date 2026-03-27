@@ -6,7 +6,9 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, DialogView, EditorSplitView, OverlayView, SelectionRange, ViewModel},
+    app::{
+        App, DialogView, EditorSplitView, OverlayView, SearchBarView, SelectionRange, ViewModel,
+    },
     buffer::SearchMatch,
     gitdiff::LineChange,
     picker::PickerEntry,
@@ -48,6 +50,7 @@ struct EditorView {
     sidebar_focused: bool,
     sidebar_root: String,
     split: Option<Box<EditorSplitView>>,
+    search_bar: Option<SearchBarView>,
     dialog: Option<DialogView>,
 }
 
@@ -103,6 +106,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             sidebar_focused,
             sidebar_root,
             split,
+            search_bar,
             dialog,
         } => draw_editor(
             frame,
@@ -124,6 +128,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 sidebar_focused,
                 sidebar_root,
                 split,
+                search_bar,
                 dialog,
             },
             theme,
@@ -236,7 +241,7 @@ fn fit_status_line(line: &str, width: usize) -> String {
 }
 
 fn draw_editor(frame: &mut Frame, area: Rect, editor: EditorView, theme: Theme) {
-    let editor_area = if editor.sidebar_width > 0 {
+    let content_area = if editor.sidebar_width > 0 {
         let [sidebar_area, editor_area] =
             Layout::horizontal([Constraint::Length(editor.sidebar_width), Constraint::Min(1)])
                 .areas(area);
@@ -254,6 +259,14 @@ fn draw_editor(frame: &mut Frame, area: Rect, editor: EditorView, theme: Theme) 
         editor_area
     } else {
         area
+    };
+
+    let (editor_area, search_bar_area) = if editor.search_bar.is_some() {
+        let [editor_area, search_bar_area] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).areas(content_area);
+        (editor_area, Some(search_bar_area))
+    } else {
+        (content_area, None)
     };
 
     if let Some(split) = editor.split {
@@ -333,6 +346,39 @@ fn draw_editor(frame: &mut Frame, area: Rect, editor: EditorView, theme: Theme) 
             .wrap(Wrap { trim: false });
 
         frame.render_widget(dialog, dialog_area);
+    }
+
+    if let (Some(search_bar), Some(search_bar_area)) = (editor.search_bar, search_bar_area) {
+        let inner_width = search_bar_area.width.saturating_sub(2) as usize;
+        let search_widget = Paragraph::new(
+            search_bar
+                .lines
+                .into_iter()
+                .map(|line| Line::raw(fit_status_line(&line, inner_width)))
+                .collect::<Vec<_>>(),
+        )
+        .style(theme.background)
+        .block(
+            Block::default()
+                .title(search_bar.title)
+                .title_style(theme.ui_chrome)
+                .borders(Borders::ALL)
+                .border_style(theme.ui_chrome),
+        )
+        .wrap(Wrap { trim: false });
+
+        frame.render_widget(search_widget, search_bar_area);
+
+        if let Some((column, row)) = search_bar.cursor {
+            let inner_x = search_bar_area.x.saturating_add(1);
+            let inner_y = search_bar_area.y.saturating_add(1);
+            let max_x = search_bar_area.right().saturating_sub(2);
+            let max_y = search_bar_area.bottom().saturating_sub(2);
+            frame.set_cursor_position((
+                inner_x.saturating_add(column as u16).min(max_x),
+                inner_y.saturating_add(row as u16).min(max_y),
+            ));
+        }
     }
 }
 

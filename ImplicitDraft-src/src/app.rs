@@ -142,7 +142,11 @@ impl App {
     ) -> Self {
         let launch_into_config = matches!(startup, StartupTarget::Config);
         let default_mode = EditorMode::from(config.default_mode);
-        let session = SessionState::load().unwrap_or_default();
+        let session = if cfg!(test) {
+            SessionState::default()
+        } else {
+            SessionState::load().unwrap_or_default()
+        };
         let theme = Theme::load_named(&config.theme).unwrap_or_else(|_| {
             Theme::load_named("dark").unwrap_or_else(|_| Theme::source_hints_default())
         });
@@ -1105,7 +1109,8 @@ impl App {
     pub fn sync_viewport(&mut self, height: usize, width: usize) {
         match &mut self.screen {
             Screen::Editor(editor) => {
-                editor.viewport_height = height;
+                let bottom_bar_height = if editor.uses_search_bar() { 2 } else { 0 };
+                editor.viewport_height = height.saturating_sub(bottom_bar_height);
                 if editor.focus != EditorFocus::Sidebar {
                     let editor_width = editor_panel_width(width, &editor.sidebar);
                     let active_mode = editor.active_mode();
@@ -1122,11 +1127,13 @@ impl App {
                         editor_line_numbers_enabled(active_mode, self.config.line_numbers),
                         show_git_change_gutter,
                     );
-                    editor.buffer.sync_viewport(height, content_width);
+                    editor
+                        .buffer
+                        .sync_viewport(editor.viewport_height, content_width);
                     editor.save_focused_viewport();
                 }
                 if editor.sidebar.is_open() {
-                    editor.sidebar.sync_viewport(height);
+                    editor.sidebar.sync_viewport(editor.viewport_height);
                 }
             }
             Screen::Picker(picker) => picker.sync_viewport(height),
@@ -1137,6 +1144,11 @@ impl App {
     pub fn current_view(&self, list_height: usize, list_width: usize) -> ViewModel {
         match &self.screen {
             Screen::Editor(editor) => {
+                let visible_height = if editor.uses_search_bar() {
+                    list_height.saturating_sub(2)
+                } else {
+                    list_height
+                };
                 let editor_width = editor_panel_width(list_width, &editor.sidebar);
                 let split_width = if editor.split_view {
                     editor_width.saturating_div(2).max(1)
@@ -1233,7 +1245,7 @@ impl App {
                     },
                     scroll: editor.primary_scroll(),
                     sidebar_rows: if editor.sidebar.is_open() {
-                        editor.sidebar.visible_rows(list_height)
+                        editor.sidebar.visible_rows(visible_height)
                     } else {
                         Vec::new()
                     },
@@ -1251,24 +1263,85 @@ impl App {
                         && editor.focus == EditorFocus::Sidebar,
                     sidebar_root: editor.sidebar.root_display(),
                     split: split.map(Box::new),
-                    dialog: editor.dialog.as_ref().map(|dialog| match dialog {
-                        EditorDialog::Quit => DialogView {
+                    search_bar: editor.dialog.as_ref().and_then(|dialog| match dialog {
+                        EditorDialog::Find(state) => {
+                            let prefix = "Find: ";
+                            Some(SearchBarView {
+                                title: String::from(" Find "),
+                                lines: vec![
+                                    format!(
+                                        "{prefix}{}   {} {}   {}   ↑ ↓",
+                                        state.query,
+                                        state.case_label(),
+                                        state.regex_label(),
+                                        state.match_label()
+                                    ),
+                                    String::from(
+                                        "Enter/Down next   Shift+Enter/Up prev   Alt+A case   Alt+R regex   Esc close",
+                                    ),
+                                ],
+                                cursor: Some((
+                                    prefix.chars().count() + state.query.chars().count(),
+                                    0,
+                                )),
+                            })
+                        }
+                        EditorDialog::Replace(state) => {
+                            let find_prefix = format!(
+                                "{} Find: ",
+                                ReplaceFocus::Find.marker(state.focus)
+                            );
+                            let replace_prefix = format!(
+                                "{} Replace: ",
+                                ReplaceFocus::Replace.marker(state.focus)
+                            );
+                            Some(SearchBarView {
+                                title: String::from(" Find & Replace "),
+                                lines: vec![
+                                    format!(
+                                        "{find_prefix}{}   {} {}   {}",
+                                        state.find.query,
+                                        state.case_label(),
+                                        state.find.match_label(),
+                                        state.regex_label(),
+                                    ),
+                                    format!(
+                                        "{replace_prefix}{}   Enter Replace   Ctrl+Enter Replace All   Esc close",
+                                        state.replace
+                                    ),
+                                ],
+                                cursor: Some(match state.focus {
+                                    ReplaceFocus::Find => (
+                                        find_prefix.chars().count() + state.find.query.chars().count(),
+                                        0,
+                                    ),
+                                    ReplaceFocus::Replace => (
+                                        replace_prefix.chars().count() + state.replace.chars().count(),
+                                        1,
+                                    ),
+                                }),
+                            })
+                        }
+                        _ => None,
+                    }),
+                    dialog: editor.dialog.as_ref().and_then(|dialog| match dialog {
+                        EditorDialog::Quit => Some(DialogView {
                             title: String::from(" Unsaved Changes "),
                             lines: vec![
                                 String::from("Save before quitting?"),
                                 String::from("Enter/y/ctrl+q: discard   ctrl+s: save and stay"),
                                 String::from("Esc or n: cancel"),
                             ],
-                        },
-                        EditorDialog::ReturnHome => DialogView {
+                        }),
+                        EditorDialog::ReturnHome => Some(DialogView {
                             title: String::from(" Return Home "),
                             lines: vec![
                                 String::from("Save before returning home?"),
                                 String::from("Enter/y: discard   ctrl+s: save and return"),
                                 String::from("Esc or n: cancel"),
                             ],
-                        },
-                        EditorDialog::SaveAs(state) => DialogView {
+                        }),
+                        EditorDialog::SaveAs(state) => Some(DialogView {
                             title: String::from(if state.confirm_overwrite {
                                 " Overwrite File "
                             } else {
@@ -1289,57 +1362,32 @@ impl App {
                                     String::from("Tab completes path   Esc cancels"),
                                 ]
                             },
-                        },
-                        EditorDialog::Find(state) => DialogView {
-                            title: String::from(" Find "),
-                            lines: vec![
-                                format!("query: {}", state.query),
-                                state.match_label(),
-                                String::from("Enter/Down next   Shift+Enter/Up prev"),
-                                String::from("Alt+N next after close   Alt+P prev"),
-                                String::from("Alt+A case toggle   Esc closes"),
-                            ],
-                        },
-                        EditorDialog::Replace(state) => DialogView {
-                            title: String::from(" Replace "),
-                            lines: vec![
-                                format!("find{}: {}", state.find_focus_label(), state.find.query),
-                                format!("replace{}: {}", state.replace_focus_label(), state.replace),
-                                format!(
-                                    "{}   {}   [.* {}]",
-                                    state.find.match_label(),
-                                    state.case_label(),
-                                    if state.regex_enabled { "on" } else { "off" }
-                                ),
-                                String::from("Tab switch field   Enter replace/next   Ctrl+Enter replace all"),
-                                String::from("Alt+A case toggle   Alt+R regex placeholder   Esc closes"),
-                            ],
-                        },
-                        EditorDialog::GotoLine(state) => DialogView {
+                        }),
+                        EditorDialog::GotoLine(state) => Some(DialogView {
                             title: String::from(" Goto Line "),
                             lines: vec![
                                 format!("line: {}", state.line),
                                 String::from("Enter jumps to line"),
                                 String::from("Esc cancels"),
                             ],
-                        },
-                        EditorDialog::SidebarCreate(state) => DialogView {
+                        }),
+                        EditorDialog::SidebarCreate(state) => Some(DialogView {
                             title: String::from(state.title()),
                             lines: vec![
                                 format!("parent: {}", state.parent.display()),
                                 format!("name: {}", state.name),
                                 String::from("Enter creates   Esc cancels"),
                             ],
-                        },
-                        EditorDialog::SidebarRename(state) => DialogView {
+                        }),
+                        EditorDialog::SidebarRename(state) => Some(DialogView {
                             title: String::from(" Rename "),
                             lines: vec![
                                 format!("target: {}", state.target.path.display()),
                                 format!("name: {}", state.name),
                                 String::from("Enter renames   Esc cancels"),
                             ],
-                        },
-                        EditorDialog::SidebarDelete(state) => DialogView {
+                        }),
+                        EditorDialog::SidebarDelete(state) => Some(DialogView {
                             title: String::from(if state.target.is_dir {
                                 " Delete Folder "
                             } else {
@@ -1354,8 +1402,8 @@ impl App {
                                 }),
                                 String::from("Esc cancels"),
                             ],
-                        },
-                        EditorDialog::Export(state) => DialogView {
+                        }),
+                        EditorDialog::Export(state) => Some(DialogView {
                             title: String::from(" Export "),
                             lines: vec![
                                 format!("scope: {}", state.scope_label()),
@@ -1367,7 +1415,8 @@ impl App {
                                 ),
                                 String::from("Enter export   Backspace edit path   Esc cancel"),
                             ],
-                        },
+                        }),
+                        EditorDialog::Find(_) | EditorDialog::Replace(_) => None,
                     }),
                 }
             }
@@ -1681,6 +1730,15 @@ impl App {
                 editor.dialog = Some(EditorDialog::Find(state));
                 FindDialogOutcome::Status(message)
             }
+            KeyCode::Char('r') if key.modifiers == KeyModifiers::ALT => {
+                state.toggle_regex();
+                state.refresh(&mut editor.buffer);
+                editor.clear_active_selection();
+                editor.set_active_search(state.clone());
+                let message = format!("find {}", state.regex_label());
+                editor.dialog = Some(EditorDialog::Find(state));
+                FindDialogOutcome::Status(message)
+            }
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 let outcome = state.step(&mut editor.buffer, false);
                 editor.clear_active_selection();
@@ -1753,12 +1811,11 @@ impl App {
                 ReplaceDialogOutcome::Status(message)
             }
             KeyCode::Char('r') if key.modifiers == KeyModifiers::ALT => {
-                state.regex_enabled = !state.regex_enabled;
-                let message = if state.regex_enabled {
-                    "regex mode is not implemented yet".to_owned()
-                } else {
-                    "regex mode off".to_owned()
-                };
+                state.find.toggle_regex();
+                state.find.refresh(&mut editor.buffer);
+                editor.clear_active_selection();
+                editor.set_active_search(state.find.clone());
+                let message = format!("replace {}", state.regex_label());
                 editor.dialog = Some(EditorDialog::Replace(state));
                 ReplaceDialogOutcome::Status(message)
             }
@@ -2766,6 +2823,13 @@ impl EditorState {
         }
     }
 
+    fn uses_search_bar(&self) -> bool {
+        matches!(
+            self.dialog,
+            Some(EditorDialog::Find(_)) | Some(EditorDialog::Replace(_))
+        )
+    }
+
     fn active_selection(&self) -> Option<&SelectionState> {
         match self.focus {
             EditorFocus::Primary | EditorFocus::Sidebar => self.primary_pane.selection.as_ref(),
@@ -3197,6 +3261,8 @@ struct FindState {
     current_index: Option<usize>,
     anchor: (usize, usize),
     case_sensitive: bool,
+    regex_enabled: bool,
+    error: Option<String>,
 }
 
 impl FindState {
@@ -3207,11 +3273,39 @@ impl FindState {
             current_index: None,
             anchor: editor.buffer.cursor(),
             case_sensitive: false,
+            regex_enabled: false,
+            error: None,
         }
     }
 
     fn refresh(&mut self, buffer: &mut Buffer) {
-        self.matches = buffer.search_matches_with_case(&self.query, self.case_sensitive);
+        if self.query.is_empty() {
+            self.matches.clear();
+            self.current_index = None;
+            self.error = None;
+            return;
+        }
+
+        let result = if self.regex_enabled {
+            buffer.search_matches_regex(&self.query, self.case_sensitive)
+        } else {
+            Ok(buffer.search_matches_with_case(&self.query, self.case_sensitive))
+        };
+
+        let matches = match result {
+            Ok(matches) => {
+                self.error = None;
+                matches
+            }
+            Err(error) => {
+                self.matches.clear();
+                self.current_index = None;
+                self.error = Some(format!("invalid regex: {error}"));
+                return;
+            }
+        };
+
+        self.matches = matches;
         self.current_index = self
             .matches
             .iter()
@@ -3224,6 +3318,10 @@ impl FindState {
     }
 
     fn step(&mut self, buffer: &mut Buffer, forward: bool) -> FindDialogOutcome {
+        if let Some(error) = &self.error {
+            return FindDialogOutcome::Status(error.clone());
+        }
+
         if self.query.is_empty() || self.matches.is_empty() {
             return FindDialogOutcome::NoMatches;
         }
@@ -3239,6 +3337,10 @@ impl FindState {
     }
 
     fn outcome(&self) -> FindDialogOutcome {
+        if let Some(error) = &self.error {
+            return FindDialogOutcome::Status(error.clone());
+        }
+
         match self.current_index {
             Some(index) => FindDialogOutcome::Moved {
                 current: index + 1,
@@ -3249,9 +3351,14 @@ impl FindState {
     }
 
     fn match_label(&self) -> String {
+        if self.error.is_some() {
+            return String::from("invalid regex");
+        }
+
         match self.current_index {
-            Some(index) => format!("matches: {}/{}", index + 1, self.matches.len()),
-            None => format!("matches: 0/{}", self.matches.len()),
+            Some(index) => format!("{} of {}", index + 1, self.matches.len()),
+            None if self.matches.is_empty() => String::from("0 matches"),
+            None => format!("0 of {}", self.matches.len()),
         }
     }
 
@@ -3267,7 +3374,23 @@ impl FindState {
         }
     }
 
+    fn toggle_regex(&mut self) {
+        self.regex_enabled = !self.regex_enabled;
+    }
+
+    fn regex_label(&self) -> &'static str {
+        if self.regex_enabled {
+            "[.* on]"
+        } else {
+            "[.* off]"
+        }
+    }
+
     fn status_label(&self, prefix: &str) -> String {
+        if let Some(error) = &self.error {
+            return error.clone();
+        }
+
         match self.current_index {
             Some(index) => format!("{prefix} {}/{}", index + 1, self.matches.len()),
             None => String::from("no matches"),
@@ -3295,6 +3418,10 @@ impl ReplaceFocus {
             Self::Replace => "replace",
         }
     }
+
+    fn marker(self, focus: ReplaceFocus) -> &'static str {
+        if self == focus { ">" } else { " " }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3302,7 +3429,6 @@ struct ReplaceState {
     find: FindState,
     replace: String,
     focus: ReplaceFocus,
-    regex_enabled: bool,
 }
 
 impl ReplaceState {
@@ -3311,7 +3437,6 @@ impl ReplaceState {
             find,
             replace: String::new(),
             focus: ReplaceFocus::Find,
-            regex_enabled: false,
         }
     }
 
@@ -3323,6 +3448,10 @@ impl ReplaceState {
     }
 
     fn replace_current(&mut self, buffer: &mut Buffer) -> String {
+        if let Some(error) = &self.find.error {
+            return error.clone();
+        }
+
         let Some(index) = self.find.current_index else {
             return String::from("no matches");
         };
@@ -3330,7 +3459,22 @@ impl ReplaceState {
             return String::from("no matches");
         };
 
-        if !buffer.replace_match(search_match, &self.replace) {
+        let replaced = if self.find.regex_enabled {
+            buffer.replace_match_regex(
+                &self.find.query,
+                self.find.case_sensitive,
+                search_match,
+                &self.replace,
+            )
+        } else {
+            Ok(buffer.replace_match(search_match, &self.replace))
+        };
+
+        let Ok(replaced) = replaced else {
+            return String::from("invalid regex");
+        };
+
+        if !replaced {
             return String::from("no matches");
         }
 
@@ -3344,8 +3488,13 @@ impl ReplaceState {
     }
 
     fn replace_all(&mut self, buffer: &mut Buffer) -> usize {
-        let replaced =
-            buffer.replace_all(&self.find.query, &self.replace, self.find.case_sensitive);
+        let replaced = if self.find.regex_enabled {
+            buffer
+                .replace_all_regex(&self.find.query, &self.replace, self.find.case_sensitive)
+                .unwrap_or(0)
+        } else {
+            buffer.replace_all(&self.find.query, &self.replace, self.find.case_sensitive)
+        };
         self.find.anchor = buffer.cursor();
         self.find.refresh(buffer);
         replaced
@@ -3355,20 +3504,8 @@ impl ReplaceState {
         self.find.case_label()
     }
 
-    fn find_focus_label(&self) -> &'static str {
-        if self.focus == ReplaceFocus::Find {
-            " *"
-        } else {
-            ""
-        }
-    }
-
-    fn replace_focus_label(&self) -> &'static str {
-        if self.focus == ReplaceFocus::Replace {
-            " *"
-        } else {
-            ""
-        }
+    fn regex_label(&self) -> &'static str {
+        self.find.regex_label()
     }
 }
 
@@ -3577,6 +3714,13 @@ pub struct DialogView {
 }
 
 #[derive(Debug)]
+pub struct SearchBarView {
+    pub title: String,
+    pub lines: Vec<String>,
+    pub cursor: Option<(usize, usize)>,
+}
+
+#[derive(Debug)]
 pub struct OverlayView {
     pub title: String,
     pub lines: Vec<String>,
@@ -3616,6 +3760,7 @@ pub enum ViewModel {
         sidebar_focused: bool,
         sidebar_root: String,
         split: Option<Box<EditorSplitView>>,
+        search_bar: Option<SearchBarView>,
         dialog: Option<DialogView>,
     },
     Picker {
@@ -4905,6 +5050,56 @@ mod tests {
     }
 
     #[test]
+    fn find_regex_query_moves_to_first_match() {
+        let mut app = editor_app();
+        let Screen::Editor(editor) = &mut app.screen else {
+            panic!("editor screen");
+        };
+        editor.buffer = Buffer::from_text("hello\nhallo\nhullo");
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        )));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('r'),
+            KeyModifiers::ALT,
+        )));
+        for ch in "h.llo".chars() {
+            app.handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+
+        let Screen::Editor(editor) = app.screen else {
+            panic!("editor screen");
+        };
+        assert_eq!(editor.buffer.cursor(), (0, 0));
+        assert_eq!(app.status_message, "find 1/3");
+    }
+
+    #[test]
+    fn find_invalid_regex_reports_error() {
+        let mut app = editor_app();
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        )));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('r'),
+            KeyModifiers::ALT,
+        )));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('['),
+            KeyModifiers::NONE,
+        )));
+
+        assert!(app.status_message.starts_with("invalid regex:"));
+    }
+
+    #[test]
     fn replace_dialog_replaces_current_match() {
         let mut app = editor_app();
         let Screen::Editor(editor) = &mut app.screen else {
@@ -4978,6 +5173,119 @@ mod tests {
         assert_eq!(editor.buffer.lines()[0], "world one");
         assert_eq!(editor.buffer.lines()[1], "world two");
         assert_eq!(app.status_message, "replaced 2 occurrences");
+    }
+
+    #[test]
+    fn replace_dialog_replaces_all_regex_matches() {
+        let mut app = editor_app();
+        let Screen::Editor(editor) = &mut app.screen else {
+            panic!("editor screen");
+        };
+        editor.buffer = Buffer::from_text("cat one\nbat two");
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('h'),
+            KeyModifiers::CONTROL,
+        )));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('r'),
+            KeyModifiers::ALT,
+        )));
+        for ch in "[cb]at".chars() {
+            app.handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        for ch in "pet".chars() {
+            app.handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::CONTROL,
+        )));
+
+        let Screen::Editor(editor) = app.screen else {
+            panic!("editor screen");
+        };
+        assert_eq!(editor.buffer.lines()[0], "pet one");
+        assert_eq!(editor.buffer.lines()[1], "pet two");
+        assert_eq!(app.status_message, "replaced 2 occurrences");
+    }
+
+    #[test]
+    fn find_bar_view_shows_match_indicator_and_regex_toggle() {
+        let mut app = editor_app();
+        let Screen::Editor(editor) = &mut app.screen else {
+            panic!("editor screen");
+        };
+        editor.buffer = Buffer::from_text("hello\nhallo\nhullo");
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('f'),
+            KeyModifiers::CONTROL,
+        )));
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('r'),
+            KeyModifiers::ALT,
+        )));
+        for ch in "h.llo".chars() {
+            app.handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+
+        let ViewModel::Editor {
+            search_bar: Some(search_bar),
+            ..
+        } = app.current_view(10, 80)
+        else {
+            panic!("editor view");
+        };
+
+        assert_eq!(search_bar.title, " Find ");
+        assert!(search_bar.lines[0].contains("[Aa off]"));
+        assert!(search_bar.lines[0].contains("[.* on]"));
+        assert!(search_bar.lines[0].contains("1 of 3"));
+    }
+
+    #[test]
+    fn replace_bar_view_marks_active_field() {
+        let mut app = editor_app();
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('h'),
+            KeyModifiers::CONTROL,
+        )));
+
+        let ViewModel::Editor {
+            search_bar: Some(search_bar),
+            ..
+        } = app.current_view(10, 80)
+        else {
+            panic!("editor view");
+        };
+        assert_eq!(search_bar.title, " Find & Replace ");
+        assert!(search_bar.lines[0].starts_with("> Find: "));
+        assert!(search_bar.lines[1].starts_with("  Replace: "));
+
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+
+        let ViewModel::Editor {
+            search_bar: Some(search_bar),
+            ..
+        } = app.current_view(10, 80)
+        else {
+            panic!("editor view");
+        };
+        assert!(search_bar.lines[0].starts_with("  Find: "));
+        assert!(search_bar.lines[1].starts_with("> Replace: "));
+        assert!(search_bar.lines[1].contains("Replace All"));
     }
 
     #[test]

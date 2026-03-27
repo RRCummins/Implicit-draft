@@ -1,6 +1,7 @@
 use std::{fs, path::Path};
 
 use anyhow::{Context, Result};
+use regex::{Regex, RegexBuilder};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SearchMatch {
@@ -319,6 +320,30 @@ impl Buffer {
         matches
     }
 
+    pub fn search_matches_regex(
+        &self,
+        query: &str,
+        case_sensitive: bool,
+    ) -> Result<Vec<SearchMatch>, regex::Error> {
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let regex = build_regex(query, case_sensitive)?;
+        let mut matches = Vec::new();
+        for (row, line) in self.lines.iter().enumerate() {
+            for matched in regex.find_iter(line) {
+                matches.push(SearchMatch {
+                    row,
+                    col: line[..matched.start()].chars().count(),
+                    len: line[matched.start()..matched.end()].chars().count(),
+                });
+            }
+        }
+
+        Ok(matches)
+    }
+
     pub fn replace_match(&mut self, search_match: SearchMatch, replacement: &str) -> bool {
         let mut replaced = false;
         self.record_edit(|buffer| {
@@ -326,6 +351,23 @@ impl Buffer {
             replaced
         });
         replaced
+    }
+
+    pub fn replace_match_regex(
+        &mut self,
+        query: &str,
+        case_sensitive: bool,
+        search_match: SearchMatch,
+        replacement: &str,
+    ) -> Result<bool, regex::Error> {
+        let regex = build_regex(query, case_sensitive)?;
+        let replacement = replacement.to_owned();
+        let mut replaced = false;
+        self.record_edit(|buffer| {
+            replaced = buffer.replace_match_regex_raw(&regex, search_match, &replacement);
+            replaced
+        });
+        Ok(replaced)
     }
 
     pub fn replace_all(&mut self, query: &str, replacement: &str, case_sensitive: bool) -> usize {
@@ -343,6 +385,34 @@ impl Buffer {
             true
         });
         match_count
+    }
+
+    pub fn replace_all_regex(
+        &mut self,
+        query: &str,
+        replacement: &str,
+        case_sensitive: bool,
+    ) -> Result<usize, regex::Error> {
+        let regex = build_regex(query, case_sensitive)?;
+        let replacement = replacement.to_owned();
+        let match_count = self
+            .lines
+            .iter()
+            .map(|line| regex.find_iter(line).count())
+            .sum::<usize>();
+        if match_count == 0 {
+            return Ok(0);
+        }
+
+        self.record_edit(|buffer| {
+            for line in &mut buffer.lines {
+                if regex.is_match(line) {
+                    *line = regex.replace_all(line, replacement.as_str()).into_owned();
+                }
+            }
+            true
+        });
+        Ok(match_count)
     }
 
     pub fn move_to_search_match(&mut self, search_match: SearchMatch) {
@@ -443,6 +513,44 @@ impl Buffer {
         true
     }
 
+    fn replace_match_regex_raw(
+        &mut self,
+        regex: &Regex,
+        search_match: SearchMatch,
+        replacement: &str,
+    ) -> bool {
+        if search_match.row >= self.lines.len() {
+            return false;
+        }
+
+        let target = {
+            let line = &self.lines[search_match.row];
+            regex.captures_iter(line).find_map(|captures| {
+                let matched = captures.get(0)?;
+                let col = line[..matched.start()].chars().count();
+                let len = line[matched.start()..matched.end()].chars().count();
+                if col != search_match.col || len != search_match.len {
+                    return None;
+                }
+
+                let mut expanded = String::new();
+                captures.expand(replacement, &mut expanded);
+                Some((matched.start(), matched.end(), expanded))
+            })
+        };
+
+        let Some((start, end, expanded)) = target else {
+            return false;
+        };
+
+        let line = &mut self.lines[search_match.row];
+        line.replace_range(start..end, &expanded);
+        self.cursor_row = search_match.row;
+        self.cursor_col = search_match.col + expanded.chars().count();
+        self.desired_col = self.cursor_col;
+        true
+    }
+
     fn record_edit<F>(&mut self, edit: F)
     where
         F: FnOnce(&mut Self) -> bool,
@@ -520,6 +628,12 @@ fn chars_equal(left: char, right: char, case_sensitive: bool) -> bool {
     } else {
         left.to_lowercase().to_string() == right.to_lowercase().to_string()
     }
+}
+
+fn build_regex(query: &str, case_sensitive: bool) -> Result<Regex, regex::Error> {
+    RegexBuilder::new(query)
+        .case_insensitive(!case_sensitive)
+        .build()
 }
 
 #[cfg(test)]
@@ -673,6 +787,33 @@ mod tests {
     }
 
     #[test]
+    fn search_matches_support_regex() {
+        let buffer = Buffer::from_text("hello\nhallo\nhullo");
+        let matches = buffer.search_matches_regex("h.llo", false).unwrap();
+
+        assert_eq!(
+            matches,
+            vec![
+                SearchMatch {
+                    row: 0,
+                    col: 0,
+                    len: 5
+                },
+                SearchMatch {
+                    row: 1,
+                    col: 0,
+                    len: 5
+                },
+                SearchMatch {
+                    row: 2,
+                    col: 0,
+                    len: 5
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn replace_all_is_a_single_undoable_edit() {
         let mut buffer = Buffer::from_text("hello\nhello");
 
@@ -682,5 +823,17 @@ mod tests {
         assert_eq!(buffer.lines, vec!["world".to_owned(), "world".to_owned()]);
         assert!(buffer.undo());
         assert_eq!(buffer.lines, vec!["hello".to_owned(), "hello".to_owned()]);
+    }
+
+    #[test]
+    fn replace_all_regex_is_a_single_undoable_edit() {
+        let mut buffer = Buffer::from_text("cat\nbat");
+
+        let replaced = buffer.replace_all_regex("[cb]at", "pet", false).unwrap();
+
+        assert_eq!(replaced, 2);
+        assert_eq!(buffer.lines, vec!["pet".to_owned(), "pet".to_owned()]);
+        assert!(buffer.undo());
+        assert_eq!(buffer.lines, vec!["cat".to_owned(), "bat".to_owned()]);
     }
 }
