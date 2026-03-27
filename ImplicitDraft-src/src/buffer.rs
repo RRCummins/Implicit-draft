@@ -300,23 +300,49 @@ impl Buffer {
         (self.scroll_row, self.scroll_col)
     }
 
-    pub fn search_matches(&self, query: &str) -> Vec<SearchMatch> {
+    pub fn search_matches_with_case(&self, query: &str, case_sensitive: bool) -> Vec<SearchMatch> {
         if query.is_empty() {
             return Vec::new();
         }
 
         let mut matches = Vec::new();
         for (row, line) in self.lines.iter().enumerate() {
-            for (byte_index, _) in line.match_indices(query) {
+            for column in line_match_columns(line, query, case_sensitive) {
                 matches.push(SearchMatch {
                     row,
-                    col: line[..byte_index].chars().count(),
+                    col: column,
                     len: query.chars().count(),
                 });
             }
         }
 
         matches
+    }
+
+    pub fn replace_match(&mut self, search_match: SearchMatch, replacement: &str) -> bool {
+        let mut replaced = false;
+        self.record_edit(|buffer| {
+            replaced = buffer.replace_match_raw(search_match, replacement);
+            replaced
+        });
+        replaced
+    }
+
+    pub fn replace_all(&mut self, query: &str, replacement: &str, case_sensitive: bool) -> usize {
+        let matches = self.search_matches_with_case(query, case_sensitive);
+        if matches.is_empty() {
+            return 0;
+        }
+
+        let replacement = replacement.to_owned();
+        let match_count = matches.len();
+        self.record_edit(|buffer| {
+            for search_match in matches.iter().rev().copied() {
+                let _ = buffer.replace_match_raw(search_match, &replacement);
+            }
+            true
+        });
+        match_count
     }
 
     pub fn move_to_search_match(&mut self, search_match: SearchMatch) {
@@ -398,6 +424,25 @@ impl Buffer {
         true
     }
 
+    fn replace_match_raw(&mut self, search_match: SearchMatch, replacement: &str) -> bool {
+        if search_match.row >= self.lines.len() {
+            return false;
+        }
+
+        let line = &mut self.lines[search_match.row];
+        let start = byte_index(line, search_match.col);
+        let end = byte_index(line, search_match.col + search_match.len);
+        if start > end || end > line.len() {
+            return false;
+        }
+
+        line.replace_range(start..end, replacement);
+        self.cursor_row = search_match.row;
+        self.cursor_col = search_match.col + replacement.chars().count();
+        self.desired_col = self.cursor_col;
+        true
+    }
+
     fn record_edit<F>(&mut self, edit: F)
     where
         F: FnOnce(&mut Self) -> bool,
@@ -443,6 +488,38 @@ fn byte_index(line: &str, column: usize) -> usize {
         .nth(column)
         .map(|(index, _)| index)
         .unwrap_or(line.len())
+}
+
+fn line_match_columns(line: &str, query: &str, case_sensitive: bool) -> Vec<usize> {
+    let haystack = line.chars().collect::<Vec<_>>();
+    let needle = query.chars().collect::<Vec<_>>();
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return Vec::new();
+    }
+
+    let mut columns = Vec::new();
+    let mut index = 0;
+    while index + needle.len() <= haystack.len() {
+        let is_match = needle.iter().enumerate().all(|(offset, needle_char)| {
+            chars_equal(haystack[index + offset], *needle_char, case_sensitive)
+        });
+        if is_match {
+            columns.push(index);
+            index += needle.len();
+        } else {
+            index += 1;
+        }
+    }
+
+    columns
+}
+
+fn chars_equal(left: char, right: char, case_sensitive: bool) -> bool {
+    if case_sensitive {
+        left == right
+    } else {
+        left.to_lowercase().to_string() == right.to_lowercase().to_string()
+    }
 }
 
 #[cfg(test)]
@@ -554,7 +631,7 @@ mod tests {
     #[test]
     fn search_matches_reports_document_hits() {
         let buffer = Buffer::from_text("alpha beta\nbeta gamma\nalphabet");
-        let matches = buffer.search_matches("beta");
+        let matches = buffer.search_matches_with_case("beta", false);
 
         assert_eq!(
             matches,
@@ -571,5 +648,39 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn search_matches_can_ignore_case() {
+        let buffer = Buffer::from_text("Hello\nheLLo");
+        let matches = buffer.search_matches_with_case("hello", false);
+
+        assert_eq!(
+            matches,
+            vec![
+                SearchMatch {
+                    row: 0,
+                    col: 0,
+                    len: 5
+                },
+                SearchMatch {
+                    row: 1,
+                    col: 0,
+                    len: 5
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn replace_all_is_a_single_undoable_edit() {
+        let mut buffer = Buffer::from_text("hello\nhello");
+
+        let replaced = buffer.replace_all("hello", "world", false);
+
+        assert_eq!(replaced, 2);
+        assert_eq!(buffer.lines, vec!["world".to_owned(), "world".to_owned()]);
+        assert!(buffer.undo());
+        assert_eq!(buffer.lines, vec!["hello".to_owned(), "hello".to_owned()]);
     }
 }

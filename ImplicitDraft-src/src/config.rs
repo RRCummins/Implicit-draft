@@ -49,6 +49,7 @@ pub struct EditorKeys {
     pub quit: Shortcut,
     pub home: Shortcut,
     pub find: Shortcut,
+    pub replace: Shortcut,
     pub find_next: Shortcut,
     pub find_prev: Shortcut,
     pub goto_line: Shortcut,
@@ -141,6 +142,7 @@ struct EditorKeysFile {
     quit: Option<String>,
     home: Option<String>,
     find: Option<String>,
+    replace: Option<String>,
     find_next: Option<String>,
     find_prev: Option<String>,
     goto_line: Option<String>,
@@ -318,6 +320,7 @@ impl Default for KeyBindings {
                 quit: Shortcut::parse("ctrl+q").expect("default shortcut"),
                 home: Shortcut::parse("ctrl+w").expect("default shortcut"),
                 find: Shortcut::parse("ctrl+f").expect("default shortcut"),
+                replace: Shortcut::parse("ctrl+h").expect("default shortcut"),
                 find_next: Shortcut::parse("alt+n").expect("default shortcut"),
                 find_prev: Shortcut::parse("alt+p").expect("default shortcut"),
                 goto_line: Shortcut::parse("ctrl+g").expect("default shortcut"),
@@ -382,6 +385,7 @@ impl KeyBindings {
                 quit: parse_or_default(file.editor.quit, defaults.editor.quit)?,
                 home: parse_or_default(file.editor.home, defaults.editor.home)?,
                 find: parse_or_default(file.editor.find, defaults.editor.find)?,
+                replace: parse_or_default(file.editor.replace, defaults.editor.replace)?,
                 find_next: parse_or_default(file.editor.find_next, defaults.editor.find_next)?,
                 find_prev: parse_or_default(file.editor.find_prev, defaults.editor.find_prev)?,
                 goto_line: parse_or_default(file.editor.goto_line, defaults.editor.goto_line)?,
@@ -583,6 +587,7 @@ export = "ctrl+shift+e"
 quit = "ctrl+q"
 home = "ctrl+w"
 find = "ctrl+f"
+replace = "ctrl+h"
 find_next = "alt+n"
 find_prev = "alt+p"
 goto_line = "ctrl+g"

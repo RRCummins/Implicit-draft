@@ -24,9 +24,9 @@ use crate::{
 };
 
 const FRAME_POLL_INTERVAL: Duration = Duration::from_millis(80);
-const EDITOR_HELP: &str = "ctrl+f find | ctrl+shift+e export | ctrl+\\ split | tab pane | ctrl+. swap | alt+n next | ctrl+g goto | ctrl+s save";
-const PREVIEW_HELP: &str = "ctrl+f find | ctrl+shift+e export | ctrl+\\ split | tab pane | ctrl+. swap | alt+n next | ctrl+g goto | ctrl+p source";
-const SOURCE_HELP: &str = "ctrl+f find | ctrl+shift+e export | ctrl+\\ split | tab pane | ctrl+. swap | alt+n next | ctrl+g goto | ctrl+p source+hints";
+const EDITOR_HELP: &str = "ctrl+f find | ctrl+h replace | ctrl+shift+e export | ctrl+\\ split | tab pane | ctrl+. swap | alt+n next | ctrl+g goto | ctrl+s save";
+const PREVIEW_HELP: &str = "ctrl+f find | ctrl+h replace | ctrl+shift+e export | ctrl+\\ split | tab pane | ctrl+. swap | alt+n next | ctrl+g goto | ctrl+p source";
+const SOURCE_HELP: &str = "ctrl+f find | ctrl+h replace | ctrl+shift+e export | ctrl+\\ split | tab pane | ctrl+. swap | alt+n next | ctrl+g goto | ctrl+p source+hints";
 const PICKER_HELP: &str =
     "enter/right open | left/backspace parent | a notes/code filter | esc home";
 const HOME_HELP: &str =
@@ -363,7 +363,19 @@ impl App {
                             FindDialogOutcome::NoMatches => {
                                 next_status = Some(String::from("no matches"));
                             }
+                            FindDialogOutcome::Status(message) => {
+                                next_status = Some(message);
+                            }
                             FindDialogOutcome::Closed => {
+                                next_status = Some(String::from(editor.focus_help()));
+                            }
+                        },
+                        EditorDialog::Replace(_) => match Self::handle_replace_input(editor, key) {
+                            ReplaceDialogOutcome::None => {}
+                            ReplaceDialogOutcome::Status(message) => {
+                                next_status = Some(message);
+                            }
+                            ReplaceDialogOutcome::Closed => {
                                 next_status = Some(String::from(editor.focus_help()));
                             }
                         },
@@ -518,6 +530,9 @@ impl App {
                     } else if keybindings.editor.find.matches(key) {
                         editor.dialog = Some(EditorDialog::Find(editor.reopen_find_state()));
                         next_status = Some(String::from("find"));
+                    } else if keybindings.editor.replace.matches(key) {
+                        editor.dialog = Some(EditorDialog::Replace(editor.reopen_replace_state()));
+                        next_status = Some(String::from("replace"));
                     } else if keybindings.editor.find_next.matches(key) {
                         next_status = Some(Self::step_editor_search(editor, true));
                     } else if keybindings.editor.find_prev.matches(key) {
@@ -1279,15 +1294,25 @@ impl App {
                             title: String::from(" Find "),
                             lines: vec![
                                 format!("query: {}", state.query),
-                                match state.current_index {
-                                    Some(index) => {
-                                        format!("matches: {}/{}", index + 1, state.matches.len())
-                                    }
-                                    None => format!("matches: 0/{}", state.matches.len()),
-                                },
+                                state.match_label(),
                                 String::from("Enter/Down next   Shift+Enter/Up prev"),
                                 String::from("Alt+N next after close   Alt+P prev"),
-                                String::from("Esc closes"),
+                                String::from("Alt+A case toggle   Esc closes"),
+                            ],
+                        },
+                        EditorDialog::Replace(state) => DialogView {
+                            title: String::from(" Replace "),
+                            lines: vec![
+                                format!("find{}: {}", state.find_focus_label(), state.find.query),
+                                format!("replace{}: {}", state.replace_focus_label(), state.replace),
+                                format!(
+                                    "{}   {}   [.* {}]",
+                                    state.find.match_label(),
+                                    state.case_label(),
+                                    if state.regex_enabled { "on" } else { "off" }
+                                ),
+                                String::from("Tab switch field   Enter replace/next   Ctrl+Enter replace all"),
+                                String::from("Alt+A case toggle   Alt+R regex placeholder   Esc closes"),
                             ],
                         },
                         EditorDialog::GotoLine(state) => DialogView {
@@ -1632,6 +1657,7 @@ impl App {
                 format!("find {current}/{total}")
             }
             FindDialogOutcome::NoMatches => String::from("no matches"),
+            FindDialogOutcome::Status(message) => message,
             FindDialogOutcome::None | FindDialogOutcome::Closed => String::from("find"),
         }
     }
@@ -1645,6 +1671,15 @@ impl App {
             KeyCode::Esc => {
                 editor.set_active_search(state.clone());
                 FindDialogOutcome::Closed
+            }
+            KeyCode::Char('a') if key.modifiers == KeyModifiers::ALT => {
+                state.toggle_case();
+                state.refresh(&mut editor.buffer);
+                editor.clear_active_selection();
+                editor.set_active_search(state.clone());
+                let message = format!("find {}", state.case_label());
+                editor.dialog = Some(EditorDialog::Find(state));
+                FindDialogOutcome::Status(message)
             }
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 let outcome = state.step(&mut editor.buffer, false);
@@ -1689,6 +1724,115 @@ impl App {
                 editor.dialog = Some(EditorDialog::Find(state));
                 FindDialogOutcome::None
             }
+        }
+    }
+
+    fn handle_replace_input(editor: &mut EditorState, key: KeyEvent) -> ReplaceDialogOutcome {
+        let Some(EditorDialog::Replace(mut state)) = editor.dialog.take() else {
+            return ReplaceDialogOutcome::None;
+        };
+
+        match key.code {
+            KeyCode::Esc => {
+                editor.clear_active_search();
+                ReplaceDialogOutcome::Closed
+            }
+            KeyCode::Tab => {
+                state.focus = state.focus.toggle();
+                let message = format!("replace {}", state.focus.label());
+                editor.dialog = Some(EditorDialog::Replace(state));
+                ReplaceDialogOutcome::Status(message)
+            }
+            KeyCode::Char('a') if key.modifiers == KeyModifiers::ALT => {
+                state.find.toggle_case();
+                state.find.refresh(&mut editor.buffer);
+                editor.clear_active_selection();
+                editor.set_active_search(state.find.clone());
+                let message = format!("replace {}", state.case_label());
+                editor.dialog = Some(EditorDialog::Replace(state));
+                ReplaceDialogOutcome::Status(message)
+            }
+            KeyCode::Char('r') if key.modifiers == KeyModifiers::ALT => {
+                state.regex_enabled = !state.regex_enabled;
+                let message = if state.regex_enabled {
+                    "regex mode is not implemented yet".to_owned()
+                } else {
+                    "regex mode off".to_owned()
+                };
+                editor.dialog = Some(EditorDialog::Replace(state));
+                ReplaceDialogOutcome::Status(message)
+            }
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let replaced = state.replace_all(&mut editor.buffer);
+                editor.clear_active_selection();
+                editor.set_active_search(state.find.clone());
+                editor.refresh_git_changes();
+                let message = if replaced == 0 {
+                    String::from("no matches")
+                } else {
+                    format!("replaced {replaced} occurrences")
+                };
+                editor.dialog = Some(EditorDialog::Replace(state));
+                ReplaceDialogOutcome::Status(message)
+            }
+            KeyCode::Enter => {
+                let message = if state.focus == ReplaceFocus::Find {
+                    Self::find_outcome_label(state.find.step(&mut editor.buffer, true))
+                } else {
+                    state.replace_current(&mut editor.buffer)
+                };
+                editor.clear_active_selection();
+                editor.set_active_search(state.find.clone());
+                editor.refresh_git_changes();
+                editor.dialog = Some(EditorDialog::Replace(state));
+                ReplaceDialogOutcome::Status(message)
+            }
+            KeyCode::Down if state.focus == ReplaceFocus::Find => {
+                let outcome = state.find.step(&mut editor.buffer, true);
+                editor.clear_active_selection();
+                editor.set_active_search(state.find.clone());
+                editor.dialog = Some(EditorDialog::Replace(state));
+                ReplaceDialogOutcome::Status(Self::find_outcome_label(outcome))
+            }
+            KeyCode::Up if state.focus == ReplaceFocus::Find => {
+                let outcome = state.find.step(&mut editor.buffer, false);
+                editor.clear_active_selection();
+                editor.set_active_search(state.find.clone());
+                editor.dialog = Some(EditorDialog::Replace(state));
+                ReplaceDialogOutcome::Status(Self::find_outcome_label(outcome))
+            }
+            KeyCode::Backspace => {
+                state.active_field_mut().pop();
+                state.find.refresh(&mut editor.buffer);
+                editor.clear_active_selection();
+                editor.set_active_search(state.find.clone());
+                let message = state.find.status_label("replace");
+                editor.dialog = Some(EditorDialog::Replace(state));
+                ReplaceDialogOutcome::Status(message)
+            }
+            KeyCode::Char(ch) if is_insertable(key.modifiers) => {
+                state.active_field_mut().push(ch);
+                state.find.refresh(&mut editor.buffer);
+                editor.clear_active_selection();
+                editor.set_active_search(state.find.clone());
+                let message = state.find.status_label("replace");
+                editor.dialog = Some(EditorDialog::Replace(state));
+                ReplaceDialogOutcome::Status(message)
+            }
+            _ => {
+                editor.dialog = Some(EditorDialog::Replace(state));
+                ReplaceDialogOutcome::None
+            }
+        }
+    }
+
+    fn find_outcome_label(outcome: FindDialogOutcome) -> String {
+        match outcome {
+            FindDialogOutcome::Moved { current, total } => format!("find {current}/{total}"),
+            FindDialogOutcome::NoMatches => String::from("no matches"),
+            FindDialogOutcome::Closed => String::from("find"),
+            FindDialogOutcome::Status(message) => message,
+            FindDialogOutcome::None => String::from("find"),
         }
     }
 
@@ -2785,6 +2929,14 @@ impl EditorState {
         }
     }
 
+    fn clear_active_search(&mut self) {
+        match self.focus {
+            EditorFocus::Primary | EditorFocus::Sidebar => self.primary_pane.search = None,
+            EditorFocus::Secondary if self.split_view => self.secondary_pane.search = None,
+            EditorFocus::Secondary => self.primary_pane.search = None,
+        }
+    }
+
     fn reopen_find_state(&self) -> FindState {
         match self.active_search() {
             Some(state) => {
@@ -2794,6 +2946,11 @@ impl EditorState {
             }
             None => FindState::new(self),
         }
+    }
+
+    fn reopen_replace_state(&self) -> ReplaceState {
+        let find = self.reopen_find_state();
+        ReplaceState::new(find)
     }
 }
 
@@ -2818,6 +2975,7 @@ enum EditorDialog {
     ReturnHome,
     SaveAs(SaveAsState),
     Find(FindState),
+    Replace(ReplaceState),
     GotoLine(GotoLineState),
     SidebarCreate(SidebarCreateState),
     SidebarRename(SidebarRenameState),
@@ -3038,6 +3196,7 @@ struct FindState {
     matches: Vec<SearchMatch>,
     current_index: Option<usize>,
     anchor: (usize, usize),
+    case_sensitive: bool,
 }
 
 impl FindState {
@@ -3047,11 +3206,12 @@ impl FindState {
             matches: Vec::new(),
             current_index: None,
             anchor: editor.buffer.cursor(),
+            case_sensitive: false,
         }
     }
 
     fn refresh(&mut self, buffer: &mut Buffer) {
-        self.matches = buffer.search_matches(&self.query);
+        self.matches = buffer.search_matches_with_case(&self.query, self.case_sensitive);
         self.current_index = self
             .matches
             .iter()
@@ -3087,6 +3247,129 @@ impl FindState {
             None => FindDialogOutcome::NoMatches,
         }
     }
+
+    fn match_label(&self) -> String {
+        match self.current_index {
+            Some(index) => format!("matches: {}/{}", index + 1, self.matches.len()),
+            None => format!("matches: 0/{}", self.matches.len()),
+        }
+    }
+
+    fn toggle_case(&mut self) {
+        self.case_sensitive = !self.case_sensitive;
+    }
+
+    fn case_label(&self) -> &'static str {
+        if self.case_sensitive {
+            "[Aa on]"
+        } else {
+            "[Aa off]"
+        }
+    }
+
+    fn status_label(&self, prefix: &str) -> String {
+        match self.current_index {
+            Some(index) => format!("{prefix} {}/{}", index + 1, self.matches.len()),
+            None => String::from("no matches"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReplaceFocus {
+    Find,
+    Replace,
+}
+
+impl ReplaceFocus {
+    fn toggle(self) -> Self {
+        match self {
+            Self::Find => Self::Replace,
+            Self::Replace => Self::Find,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Find => "find",
+            Self::Replace => "replace",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ReplaceState {
+    find: FindState,
+    replace: String,
+    focus: ReplaceFocus,
+    regex_enabled: bool,
+}
+
+impl ReplaceState {
+    fn new(find: FindState) -> Self {
+        Self {
+            find,
+            replace: String::new(),
+            focus: ReplaceFocus::Find,
+            regex_enabled: false,
+        }
+    }
+
+    fn active_field_mut(&mut self) -> &mut String {
+        match self.focus {
+            ReplaceFocus::Find => &mut self.find.query,
+            ReplaceFocus::Replace => &mut self.replace,
+        }
+    }
+
+    fn replace_current(&mut self, buffer: &mut Buffer) -> String {
+        let Some(index) = self.find.current_index else {
+            return String::from("no matches");
+        };
+        let Some(search_match) = self.find.matches.get(index).copied() else {
+            return String::from("no matches");
+        };
+
+        if !buffer.replace_match(search_match, &self.replace) {
+            return String::from("no matches");
+        }
+
+        self.find.anchor = buffer.cursor();
+        self.find.refresh(buffer);
+        if self.find.matches.is_empty() {
+            String::from("replaced current match")
+        } else {
+            format!("replaced current; {}", self.find.status_label("match"))
+        }
+    }
+
+    fn replace_all(&mut self, buffer: &mut Buffer) -> usize {
+        let replaced =
+            buffer.replace_all(&self.find.query, &self.replace, self.find.case_sensitive);
+        self.find.anchor = buffer.cursor();
+        self.find.refresh(buffer);
+        replaced
+    }
+
+    fn case_label(&self) -> &'static str {
+        self.find.case_label()
+    }
+
+    fn find_focus_label(&self) -> &'static str {
+        if self.focus == ReplaceFocus::Find {
+            " *"
+        } else {
+            ""
+        }
+    }
+
+    fn replace_focus_label(&self) -> &'static str {
+        if self.focus == ReplaceFocus::Replace {
+            " *"
+        } else {
+            ""
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3107,6 +3390,14 @@ enum FindDialogOutcome {
     None,
     Moved { current: usize, total: usize },
     NoMatches,
+    Closed,
+    Status(String),
+}
+
+#[derive(Debug)]
+enum ReplaceDialogOutcome {
+    None,
+    Status(String),
     Closed,
 }
 
@@ -3217,7 +3508,7 @@ impl Overlay {
                 "Arrows move   Home/End line start/end   Ctrl+Home/End doc start/end",
                 "Shift+Arrows/Home/End/Page select text in the focused pane",
                 "Ctrl+S save or save-as   Ctrl+Shift+E export dialog",
-                "Ctrl+F find   Ctrl+G goto line   Ctrl+E sidebar",
+                "Ctrl+F find   Ctrl+H replace   Ctrl+G goto line   Ctrl+E sidebar",
                 "Alt+N next match   Alt+P previous match   Ctrl+Z undo   Ctrl+R redo",
                 "Ctrl+P preview mode   Ctrl+\\ split   Tab pane focus   Ctrl+. swap pane",
                 "Ctrl+, settings",
@@ -3230,7 +3521,7 @@ impl Overlay {
             Self::Editor(EditorMode::Preview) => vec![
                 "Arrows move   Home/End line start/end   Ctrl+Home/End doc start/end",
                 "Shift+Arrows/Home/End/Page select text in the focused pane",
-                "Ctrl+Shift+E export dialog   Ctrl+F find   Ctrl+G goto line",
+                "Ctrl+Shift+E export dialog   Ctrl+F find   Ctrl+H replace   Ctrl+G goto line",
                 "Ctrl+P source mode   Ctrl+\\ split",
                 "Tab pane focus   Ctrl+. swap pane   Ctrl+W return home",
                 "Alt+N next match   Alt+P previous match",
@@ -3245,7 +3536,7 @@ impl Overlay {
                 "Arrows move   Home/End line start/end   Ctrl+Home/End doc start/end",
                 "Shift+Arrows/Home/End/Page select text in the focused pane",
                 "Ctrl+S save or save-as   Ctrl+Shift+E export dialog",
-                "Ctrl+F find   Ctrl+G goto line   Ctrl+E sidebar",
+                "Ctrl+F find   Ctrl+H replace   Ctrl+G goto line   Ctrl+E sidebar",
                 "Alt+N next match   Alt+P previous match   Ctrl+Z undo   Ctrl+R redo",
                 "Ctrl+P source+hints mode   Ctrl+\\ split   Tab pane focus   Ctrl+. swap pane",
                 "Ctrl+, settings",
@@ -4541,6 +4832,23 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_h_opens_replace_dialog() {
+        let mut app = editor_app();
+
+        app.handle_event(Event::Key(KeyEvent {
+            code: KeyCode::Char('h'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }));
+
+        let Screen::Editor(editor) = app.screen else {
+            panic!("editor screen");
+        };
+        assert!(matches!(editor.dialog, Some(EditorDialog::Replace(_))));
+    }
+
+    #[test]
     fn find_query_moves_to_first_match() {
         let mut app = editor_app();
         let Screen::Editor(editor) = &mut app.screen else {
@@ -4594,6 +4902,82 @@ mod tests {
         };
         assert_eq!(editor.buffer.cursor(), (1, 0));
         assert_eq!(app.status_message, "find 2/3");
+    }
+
+    #[test]
+    fn replace_dialog_replaces_current_match() {
+        let mut app = editor_app();
+        let Screen::Editor(editor) = &mut app.screen else {
+            panic!("editor screen");
+        };
+        editor.buffer = Buffer::from_text("hello one\nhello two");
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('h'),
+            KeyModifiers::CONTROL,
+        )));
+        for ch in "hello".chars() {
+            app.handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        for ch in "world".chars() {
+            app.handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )));
+
+        let Screen::Editor(editor) = app.screen else {
+            panic!("editor screen");
+        };
+        assert_eq!(editor.buffer.lines()[0], "world one");
+        assert_eq!(editor.buffer.lines()[1], "hello two");
+        assert!(app.status_message.contains("replaced current"));
+    }
+
+    #[test]
+    fn replace_dialog_replaces_all_matches() {
+        let mut app = editor_app();
+        let Screen::Editor(editor) = &mut app.screen else {
+            panic!("editor screen");
+        };
+        editor.buffer = Buffer::from_text("hello one\nhello two");
+
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Char('h'),
+            KeyModifiers::CONTROL,
+        )));
+        for ch in "hello".chars() {
+            app.handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        for ch in "world".chars() {
+            app.handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            )));
+        }
+        app.handle_event(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::CONTROL,
+        )));
+
+        let Screen::Editor(editor) = app.screen else {
+            panic!("editor screen");
+        };
+        assert_eq!(editor.buffer.lines()[0], "world one");
+        assert_eq!(editor.buffer.lines()[1], "world two");
+        assert_eq!(app.status_message, "replaced 2 occurrences");
     }
 
     #[test]
