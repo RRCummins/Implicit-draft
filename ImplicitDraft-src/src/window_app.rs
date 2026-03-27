@@ -38,6 +38,9 @@ const CURSOR: u32 = 0xffd166;
 const CURRENT_LINE: u32 = 0x151922;
 const STATUS_OK: u32 = 0x8bd3dd;
 const STATUS_WARN: u32 = 0xf2c97d;
+const DIALOG_BG: u32 = 0x11161d;
+const DIALOG_BORDER: u32 = 0x2a3340;
+const ERROR: u32 = 0xff7b72;
 
 pub fn run(path: Option<&Path>) -> Result<()> {
     let event_loop = EventLoop::new()?;
@@ -169,7 +172,7 @@ impl NativeDocument {
             .as_ref()
             .and_then(|path| path.file_name())
             .and_then(|name| name.to_str())
-            .unwrap_or("Implicit");
+            .unwrap_or("Untitled");
         if self.buffer.is_dirty() {
             format!("{base} •")
         } else {
@@ -216,19 +219,11 @@ fn load_document(path: Option<&Path>) -> NativeDocument {
                 "Read error",
             ),
         },
-        None => NativeDocument::message(
-            None,
-            vec![
-                String::from("Implicit native window mode"),
-                String::new(),
-                String::from("Open a file with:"),
-                String::from("implicit --app /path/to/note.md"),
-                String::from("implicit --new-window /path/to/note.md"),
-                String::new(),
-                String::from("Edit with normal typing, save with Cmd+S."),
-            ],
-            "Native app mode",
-        ),
+        None => NativeDocument {
+            source_path: None,
+            buffer: Buffer::empty(),
+            status: String::from("Untitled"),
+        },
     }
 }
 
@@ -238,6 +233,25 @@ struct WindowApp {
     context: Option<SoftbufferContext<Rc<Window>>>,
     surface: Option<Surface<Rc<Window>, Rc<Window>>>,
     modifiers: ModifiersState,
+    overlay: Option<Overlay>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeferredAction {
+    Close,
+}
+
+#[derive(Debug)]
+struct SaveAsState {
+    input: String,
+    after_save: Option<DeferredAction>,
+    error: Option<String>,
+}
+
+#[derive(Debug)]
+enum Overlay {
+    SaveAs(SaveAsState),
+    ConfirmClose,
 }
 
 impl WindowApp {
@@ -248,6 +262,7 @@ impl WindowApp {
             context: None,
             surface: None,
             modifiers: ModifiersState::default(),
+            overlay: None,
         }
     }
 
@@ -257,6 +272,18 @@ impl WindowApp {
     }
 
     fn open_document(&mut self, path: &Path) {
+        if self.document.buffer.is_dirty() {
+            match launch_new_window(Some(path)) {
+                Ok(()) => {
+                    self.document.status = format!("Opened {} in a new window", path.display());
+                }
+                Err(error) => {
+                    self.document.status = error.to_string();
+                }
+            }
+            self.request_redraw();
+            return;
+        }
         self.set_document(load_document(Some(path)));
         self.request_redraw();
     }
@@ -269,22 +296,157 @@ impl WindowApp {
     }
 
     fn save_document(&mut self) {
+        self.save_document_with_action(None);
+    }
+
+    fn save_document_with_action(
+        &mut self,
+        after_save: Option<DeferredAction>,
+    ) -> Option<DeferredAction> {
         match self.document.source_path.clone() {
-            Some(path) => match self.document.buffer.save_to_path(&path) {
-                Ok(()) => {
-                    self.document.status = format!("Saved {}", path.display());
-                    self.sync_window_title();
-                }
-                Err(error) => {
-                    self.document.status = error.to_string();
-                }
-            },
+            Some(path) => self.save_document_to(path, after_save),
             None => {
-                self.document.status =
-                    String::from("Save As is not implemented in native app mode");
+                self.open_save_as(after_save);
+                self.request_redraw();
+                None
             }
         }
-        self.request_redraw();
+    }
+
+    fn save_document_to(
+        &mut self,
+        path: PathBuf,
+        after_save: Option<DeferredAction>,
+    ) -> Option<DeferredAction> {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+            && !parent.exists()
+        {
+            let message = format!("Folder not found: {}", parent.display());
+            self.document.status = message.clone();
+            if let Some(Overlay::SaveAs(state)) = self.overlay.as_mut() {
+                state.error = Some(message);
+            }
+            self.request_redraw();
+            return None;
+        }
+
+        match self.document.buffer.save_to_path(&path) {
+            Ok(()) => {
+                self.document.source_path = Some(path.clone());
+                self.document.status = format!("Saved {}", path.display());
+                self.overlay = None;
+                self.sync_window_title();
+                self.request_redraw();
+                after_save
+            }
+            Err(error) => {
+                let message = error.to_string();
+                self.document.status = message.clone();
+                if let Some(Overlay::SaveAs(state)) = self.overlay.as_mut() {
+                    state.error = Some(message);
+                }
+                self.request_redraw();
+                None
+            }
+        }
+    }
+
+    fn open_save_as(&mut self, after_save: Option<DeferredAction>) {
+        let default_path = suggested_save_path(self.document.source_path.as_deref());
+        self.overlay = Some(Overlay::SaveAs(SaveAsState {
+            input: default_path.display().to_string(),
+            after_save,
+            error: None,
+        }));
+        self.document.status = String::from("Save As");
+    }
+
+    fn request_close(&mut self) -> bool {
+        if self.document.buffer.is_dirty() {
+            self.overlay = Some(Overlay::ConfirmClose);
+            self.document.status = String::from("Unsaved changes");
+            self.request_redraw();
+            false
+        } else {
+            true
+        }
+    }
+
+    fn handle_overlay_key(&mut self, event: &winit::event::KeyEvent) -> Option<DeferredAction> {
+        match self.overlay.as_mut()? {
+            Overlay::ConfirmClose => match &event.logical_key {
+                Key::Named(NamedKey::Escape) => {
+                    self.overlay = None;
+                    self.document.status = String::from("Close canceled");
+                    self.request_redraw();
+                    None
+                }
+                Key::Named(NamedKey::Enter) => Some(DeferredAction::Close),
+                Key::Character(text) if text.eq_ignore_ascii_case("d") => {
+                    Some(DeferredAction::Close)
+                }
+                Key::Character(text)
+                    if self.modifiers.super_key() && text.eq_ignore_ascii_case("w") =>
+                {
+                    Some(DeferredAction::Close)
+                }
+                Key::Character(text)
+                    if self.modifiers.super_key() && text.eq_ignore_ascii_case("s") =>
+                {
+                    self.save_document_with_action(Some(DeferredAction::Close))
+                }
+                Key::Character(text) if text.eq_ignore_ascii_case("s") => {
+                    self.save_document_with_action(Some(DeferredAction::Close))
+                }
+                Key::Character(text) if text.eq_ignore_ascii_case("n") => {
+                    self.overlay = None;
+                    self.document.status = String::from("Close canceled");
+                    self.request_redraw();
+                    None
+                }
+                _ => None,
+            },
+            Overlay::SaveAs(state) => match &event.logical_key {
+                Key::Named(NamedKey::Escape) => {
+                    self.overlay = None;
+                    self.document.status = String::from("Save canceled");
+                    self.request_redraw();
+                    None
+                }
+                Key::Named(NamedKey::Backspace) => {
+                    state.input.pop();
+                    state.error = None;
+                    self.request_redraw();
+                    None
+                }
+                Key::Named(NamedKey::Enter) => {
+                    let input = state.input.trim();
+                    if input.is_empty() {
+                        state.error = Some(String::from("Enter a file path"));
+                        self.request_redraw();
+                        return None;
+                    }
+
+                    let path = PathBuf::from(input);
+                    let after_save = state.after_save;
+                    self.save_document_to(path, after_save)
+                }
+                Key::Character(text)
+                    if !self.modifiers.super_key()
+                        && !self.modifiers.control_key()
+                        && !self.modifiers.alt_key() =>
+                {
+                    for ch in text.chars().filter(|ch| !ch.is_control()) {
+                        state.input.push(ch);
+                    }
+                    state.error = None;
+                    self.request_redraw();
+                    None
+                }
+                _ => None,
+            },
+        }
     }
 
     fn sync_window_title(&self) {
@@ -404,7 +566,7 @@ impl WindowApp {
             PANEL,
         );
         let footer = format!(
-            "Cmd+S save  Cmd+R reload  Cmd+W close  Drop file to open  Ln {} Col {}  {}",
+            "Cmd+N new  Cmd+S save  Cmd+Shift+S save as  Cmd+R reload  Cmd+W close  Ln {} Col {}  {}",
             self.document.buffer.cursor().0 + 1,
             self.document.buffer.cursor().1 + 1,
             self.document.status
@@ -453,6 +615,8 @@ impl WindowApp {
             let x = H_PADDING + cursor_x * CHAR_WIDTH;
             fill_rect(&mut buffer, width, x, y, 2, CHAR_HEIGHT, CURSOR);
         }
+
+        draw_overlay(self.overlay.as_ref(), &mut buffer, width, height);
 
         buffer
             .present()
@@ -503,7 +667,11 @@ impl ApplicationHandler for WindowApp {
         event: WindowEvent,
     ) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                if self.request_close() {
+                    event_loop.exit();
+                }
+            }
             WindowEvent::DroppedFile(path) => {
                 self.open_document(&path);
             }
@@ -542,8 +710,19 @@ impl ApplicationHandler for WindowApp {
                     .map(|window| window.inner_size())
                     .unwrap_or(PhysicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT));
                 let page = self.visible_rows(size).max(1) as isize;
+                if let Some(action) = self.handle_overlay_key(&event) {
+                    match action {
+                        DeferredAction::Close => event_loop.exit(),
+                    }
+                    return;
+                }
                 match &event.logical_key {
-                    Key::Named(NamedKey::Escape) => event_loop.exit(),
+                    Key::Named(NamedKey::Escape) => {
+                        if self.request_close() {
+                            event_loop.exit();
+                        }
+                        return;
+                    }
                     Key::Named(NamedKey::ArrowUp) => self.document.buffer.move_up(),
                     Key::Named(NamedKey::ArrowDown) => self.document.buffer.move_down(),
                     Key::Named(NamedKey::ArrowLeft) => self.document.buffer.move_left(),
@@ -559,7 +738,25 @@ impl ApplicationHandler for WindowApp {
                     Key::Character(text)
                         if self.modifiers.super_key() && text.eq_ignore_ascii_case("w") =>
                     {
-                        event_loop.exit();
+                        if self.request_close() {
+                            event_loop.exit();
+                        }
+                        return;
+                    }
+                    Key::Character(text)
+                        if self.modifiers.super_key() && text.eq_ignore_ascii_case("n") =>
+                    {
+                        self.document.status = match launch_new_window(None) {
+                            Ok(()) => String::from("Opened a new window"),
+                            Err(error) => error.to_string(),
+                        };
+                    }
+                    Key::Character(text)
+                        if self.modifiers.super_key()
+                            && self.modifiers.shift_key()
+                            && text.eq_ignore_ascii_case("s") =>
+                    {
+                        self.open_save_as(None);
                     }
                     Key::Character(text)
                         if self.modifiers.super_key() && text.eq_ignore_ascii_case("s") =>
@@ -630,6 +827,14 @@ fn visible_fragment(line: &str, scroll_col: usize, visible_cols: usize) -> Strin
         .collect::<String>()
 }
 
+fn suggested_save_path(source_path: Option<&Path>) -> PathBuf {
+    source_path.map(Path::to_path_buf).unwrap_or_else(|| {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("Untitled.md")
+    })
+}
+
 fn abbreviate_middle(text: &str, max_chars: usize) -> String {
     let chars = text.chars().collect::<Vec<_>>();
     if chars.len() <= max_chars {
@@ -646,6 +851,98 @@ fn abbreviate_middle(text: &str, max_chars: usize) -> String {
         chars[..head].iter().collect::<String>(),
         chars[chars.len() - tail..].iter().collect::<String>()
     )
+}
+
+fn draw_overlay(overlay: Option<&Overlay>, buffer: &mut [u32], width: usize, height: usize) {
+    let Some(overlay) = overlay else {
+        return;
+    };
+
+    let dialog_width = width.saturating_sub(120).clamp(420, 760);
+    let dialog_height = match overlay {
+        Overlay::SaveAs(_) => 146,
+        Overlay::ConfirmClose => 112,
+    };
+    let x = width.saturating_sub(dialog_width) / 2;
+    let y = height.saturating_sub(dialog_height) / 2;
+
+    fill_rect(buffer, width, x, y, dialog_width, dialog_height, DIALOG_BG);
+    fill_rect(buffer, width, x, y, dialog_width, 2, DIALOG_BORDER);
+    fill_rect(
+        buffer,
+        width,
+        x,
+        y + dialog_height.saturating_sub(2),
+        dialog_width,
+        2,
+        DIALOG_BORDER,
+    );
+    fill_rect(buffer, width, x, y, 2, dialog_height, DIALOG_BORDER);
+    fill_rect(
+        buffer,
+        width,
+        x + dialog_width.saturating_sub(2),
+        y,
+        2,
+        dialog_height,
+        DIALOG_BORDER,
+    );
+
+    match overlay {
+        Overlay::SaveAs(state) => {
+            draw_text(buffer, width, x + 16, y + 14, "Save As", ACCENT);
+            draw_text(buffer, width, x + 16, y + 38, "Path", MUTED);
+            fill_rect(
+                buffer,
+                width,
+                x + 16,
+                y + 54,
+                dialog_width.saturating_sub(32),
+                28,
+                PANEL,
+            );
+            draw_text(
+                buffer,
+                width,
+                x + 22,
+                y + 61,
+                &abbreviate_middle(&state.input, dialog_width / CHAR_WIDTH - 6),
+                TEXT,
+            );
+            draw_text(buffer, width, x + 16, y + 92, "Enter save  Esc cancel", MUTED);
+            let status = state
+                .error
+                .as_deref()
+                .unwrap_or("Save untitled docs to a real path");
+            draw_text(
+                buffer,
+                width,
+                x + 16,
+                y + 112,
+                &abbreviate_middle(status, dialog_width / CHAR_WIDTH - 6),
+                if state.error.is_some() { ERROR } else { STATUS_OK },
+            );
+        }
+        Overlay::ConfirmClose => {
+            draw_text(buffer, width, x + 16, y + 14, "Unsaved Changes", ACCENT);
+            draw_text(
+                buffer,
+                width,
+                x + 16,
+                y + 42,
+                "Save before closing this window?",
+                TEXT,
+            );
+            draw_text(
+                buffer,
+                width,
+                x + 16,
+                y + 72,
+                "S save  D discard  Esc cancel",
+                MUTED,
+            );
+        }
+    }
 }
 
 fn fill_rect(
@@ -754,8 +1051,9 @@ mod tests {
     #[test]
     fn load_document_without_path_returns_welcome() {
         let document = load_document(None);
-        assert_eq!(document.display_title(), "Implicit");
-        assert!(document.buffer.lines()[0].contains("Implicit native window mode"));
+        assert_eq!(document.display_title(), "Untitled");
+        assert_eq!(document.buffer.lines(), [""]);
+        assert_eq!(document.status, "Untitled");
     }
 
     #[test]
@@ -790,6 +1088,41 @@ mod tests {
         document.buffer.move_end();
         document.buffer.insert_char('!');
 
-        assert_eq!(document.display_title(), "Implicit •");
+        assert_eq!(document.display_title(), "Untitled •");
+    }
+
+    #[test]
+    fn suggested_save_path_defaults_to_untitled_markdown() {
+        let path = suggested_save_path(None);
+        assert_eq!(path.file_name().and_then(|name| name.to_str()), Some("Untitled.md"));
+    }
+
+    #[test]
+    fn request_close_prompts_for_dirty_document() {
+        let mut app = WindowApp::new(load_document(None));
+        app.document.buffer.insert_char('x');
+
+        assert!(!app.request_close());
+        assert!(matches!(app.overlay, Some(Overlay::ConfirmClose)));
+    }
+
+    #[test]
+    fn save_document_to_sets_source_path_and_writes_contents() {
+        let path = std::env::temp_dir().join("implicit-window-app-save.txt");
+        let _ = fs::remove_file(&path);
+
+        let mut app = WindowApp::new(NativeDocument {
+            source_path: None,
+            buffer: Buffer::empty(),
+            status: String::from("Ready"),
+        });
+        app.document.buffer.insert_char('x');
+        let result = app.save_document_to(path.clone(), None);
+
+        assert_eq!(result, None);
+        assert_eq!(app.document.source_path.as_deref(), Some(path.as_path()));
+        assert_eq!(fs::read_to_string(&path).expect("saved file"), "x");
+
+        fs::remove_file(path).expect("cleanup");
     }
 }
