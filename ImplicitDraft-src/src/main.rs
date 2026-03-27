@@ -18,6 +18,7 @@ mod terminal;
 mod theme;
 mod updater;
 mod welcome;
+mod window_app;
 
 use std::ffi::OsStr;
 use std::path::PathBuf;
@@ -45,6 +46,14 @@ struct Cli {
     /// Download and install the latest published release into ~/.local/bin/implicit.
     #[arg(long)]
     update: bool,
+
+    /// Open the file in the native Implicit app window instead of the terminal UI.
+    #[arg(long)]
+    app: bool,
+
+    /// Launch a separate native Implicit app window process for the file.
+    #[arg(long)]
+    new_window: bool,
 
     /// Render the file to stdout using ANSI styling instead of opening the TUI.
     #[arg(long)]
@@ -91,6 +100,14 @@ fn main() -> Result<()> {
         + usize::from(cli.update);
     if action_count > 1 {
         bail!("cannot combine --print, --export, --snapshot, --install, and --update");
+    }
+    if cli.app && cli.new_window {
+        bail!("cannot combine --app and --new-window");
+    }
+    if (cli.app || cli.new_window) && action_count > 0 {
+        bail!(
+            "cannot combine --app or --new-window with --print, --export, --snapshot, --install, or --update"
+        );
     }
 
     let runtime = match AppConfig::load_runtime() {
@@ -200,6 +217,14 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    if cli.new_window {
+        return crate::window_app::launch_new_window(cli.file.as_deref());
+    }
+
+    if cli.app {
+        return crate::window_app::run(cli.file.as_deref());
+    }
+
     let mut terminal = terminal::init()?;
     let mut app = App::new_with_runtime(
         resolve_startup_target(cli.file, cli.config),
@@ -295,6 +320,22 @@ mod tests {
         assert!(cli.update);
         assert!(!cli.install);
         assert_eq!(cli.file, None);
+    }
+
+    #[test]
+    fn app_flag_parses_without_file() {
+        let cli = Cli::parse_from(["implicit", "--app"]);
+        assert!(cli.app);
+        assert!(!cli.new_window);
+        assert_eq!(cli.file, None);
+    }
+
+    #[test]
+    fn new_window_flag_parses_with_file() {
+        let cli = Cli::parse_from(["implicit", "--new-window", "notes.md"]);
+        assert!(cli.new_window);
+        assert!(!cli.app);
+        assert_eq!(cli.file, Some(PathBuf::from("notes.md")));
     }
 
     #[test]
