@@ -121,6 +121,7 @@ pub fn install_app_bundle(source_binary: &Path, target_app: &Path) -> Result<App
         )
     })?;
     compile_app_launcher(&target_launcher_source, &target_launcher)?;
+    register_app_bundle(target_app);
 
     #[cfg(unix)]
     {
@@ -207,6 +208,15 @@ fn is_dir_on_path(dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(target_os = "macos")]
+fn register_app_bundle(target_app: &Path) {
+    const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
+    let _ = Command::new(LSREGISTER).arg("-f").arg(target_app).status();
+}
+
+#[cfg(not(target_os = "macos"))]
+fn register_app_bundle(_target_app: &Path) {}
+
 fn app_info_plist_contents() -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -264,19 +274,56 @@ fn app_info_plist_contents() -> String {
             <array>
                 <string>rs</string>
                 <string>swift</string>
+                <string>swiftinterface</string>
                 <string>kt</string>
                 <string>kts</string>
                 <string>py</string>
+                <string>pyi</string>
+                <string>pyw</string>
                 <string>js</string>
+                <string>mjs</string>
+                <string>cjs</string>
                 <string>ts</string>
+                <string>tsx</string>
+                <string>jsx</string>
+                <string>go</string>
                 <string>json</string>
+                <string>jsonc</string>
                 <string>toml</string>
                 <string>yaml</string>
                 <string>yml</string>
+                <string>ini</string>
+                <string>conf</string>
+                <string>sh</string>
+                <string>bash</string>
+                <string>zsh</string>
+                <string>fish</string>
+                <string>css</string>
+                <string>scss</string>
+                <string>html</string>
+                <string>htm</string>
+                <string>xml</string>
                 <string>c</string>
+                <string>cc</string>
                 <string>cpp</string>
+                <string>cxx</string>
                 <string>h</string>
+                <string>hh</string>
                 <string>hpp</string>
+                <string>hxx</string>
+                <string>ipp</string>
+                <string>java</string>
+                <string>rb</string>
+                <string>php</string>
+                <string>m</string>
+                <string>mm</string>
+                <string>cs</string>
+                <string>scala</string>
+                <string>lua</string>
+                <string>dart</string>
+                <string>sql</string>
+                <string>r</string>
+                <string>zig</string>
             </array>
         </dict>
     </array>
@@ -366,26 +413,37 @@ fn app_launcher_source() -> &'static str {
     }
 }
 
-- (NSArray<NSString *> *)forwardedArguments {
+- (NSArray<NSString *> *)forwardedPaths {
     NSArray<NSString *> *arguments = [[NSProcessInfo processInfo] arguments];
     if ([arguments count] <= 1) {
         return @[];
     }
 
-    NSMutableArray<NSString *> *forwarded = [NSMutableArray arrayWithObject:@"--app"];
+    NSMutableArray<NSString *> *paths = [NSMutableArray array];
     for (NSUInteger index = 1; index < [arguments count]; index++) {
         NSString *argument = arguments[index];
-        if ([argument hasPrefix:@"-psn_"]) {
+        if ([argument hasPrefix:@"-psn_"] || [argument isEqualToString:@"--app"]) {
             continue;
         }
-        [forwarded addObject:argument];
+        [paths addObject:argument];
     }
-    return forwarded;
+    return paths;
+}
+
+- (void)launchPaths:(NSArray<NSString *> *)paths {
+    if ([paths count] == 0) {
+        [self launchImplicitWithArguments:@[@"--app"]];
+        return;
+    }
+
+    for (NSString *path in paths) {
+        [self launchImplicitWithArguments:@[@"--app", path]];
+    }
 }
 
 - (void)launchDefaultIfNeeded {
     if (!self.launched) {
-        [self launchImplicitWithArguments:@[@"--app"]];
+        [self launchPaths:@[]];
         [NSApp terminate:nil];
     }
 }
@@ -393,9 +451,9 @@ fn app_launcher_source() -> &'static str {
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     (void)notification;
 
-    NSArray<NSString *> *forwarded = [self forwardedArguments];
-    if ([forwarded count] > 1) {
-        [self launchImplicitWithArguments:forwarded];
+    NSArray<NSString *> *paths = [self forwardedPaths];
+    if ([paths count] > 0) {
+        [self launchPaths:paths];
         [NSApp terminate:nil];
         return;
     }
@@ -404,13 +462,7 @@ fn app_launcher_source() -> &'static str {
 }
 
 - (void)application:(NSApplication *)sender openFiles:(NSArray<NSString *> *)filenames {
-    if ([filenames count] == 0) {
-        [self launchDefaultIfNeeded];
-    } else {
-        for (NSString *filename in filenames) {
-            [self launchImplicitWithArguments:@[@"--app", filename]];
-        }
-    }
+    [self launchPaths:filenames];
 
     [sender replyToOpenOrPrint:NSApplicationDelegateReplySuccess];
     [NSApp terminate:nil];

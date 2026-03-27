@@ -12,11 +12,13 @@ use softbuffer::{Context as SoftbufferContext, Surface};
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalSize},
-    event::{ElementState, MouseScrollDelta, WindowEvent},
+    event::{ElementState, Ime, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{Key, ModifiersState, NamedKey},
     window::{Window, WindowAttributes, WindowId},
 };
+
+use crate::{buffer::Buffer, filetype};
 
 const WINDOW_WIDTH: u32 = 1080;
 const WINDOW_HEIGHT: u32 = 760;
@@ -32,6 +34,10 @@ const PANEL: u32 = 0x171b22;
 const TEXT: u32 = 0xd7dce2;
 const MUTED: u32 = 0x8d95a3;
 const ACCENT: u32 = 0x4fd1c5;
+const CURSOR: u32 = 0xffd166;
+const CURRENT_LINE: u32 = 0x151922;
+const STATUS_OK: u32 = 0x8bd3dd;
+const STATUS_WARN: u32 = 0xf2c97d;
 
 pub fn run(path: Option<&Path>) -> Result<()> {
     let event_loop = EventLoop::new()?;
@@ -141,97 +147,113 @@ fn build_open_bundle_args(bundle: &Path, path: Option<&Path>) -> Vec<String> {
     args
 }
 
-#[derive(Clone, Debug)]
-struct ViewerDocument {
+#[derive(Debug)]
+struct NativeDocument {
     source_path: Option<PathBuf>,
-    title: String,
-    subtitle: String,
-    lines: Vec<String>,
+    buffer: Buffer,
+    status: String,
 }
 
-fn load_document(path: Option<&Path>) -> ViewerDocument {
+impl NativeDocument {
+    fn message(source_path: Option<PathBuf>, lines: Vec<String>, status: &str) -> Self {
+        Self {
+            source_path,
+            buffer: Buffer::from_text(&lines.join("\n")),
+            status: status.to_owned(),
+        }
+    }
+
+    fn display_title(&self) -> String {
+        let base = self
+            .source_path
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or("Implicit");
+        if self.buffer.is_dirty() {
+            format!("{base} •")
+        } else {
+            base.to_owned()
+        }
+    }
+
+    fn subtitle(&self) -> String {
+        self.source_path
+            .as_ref()
+            .map(|path| {
+                let kind = match filetype::detect(path) {
+                    filetype::FileType::Markdown => "markdown",
+                    filetype::FileType::Text => "text",
+                    filetype::FileType::Code => "code",
+                    filetype::FileType::Unknown => "file",
+                };
+                format!("{} · {}", path.display(), kind)
+            })
+            .unwrap_or_else(|| String::from("Native app mode"))
+    }
+}
+
+fn load_document(path: Option<&Path>) -> NativeDocument {
     match path {
         Some(path) => match fs::read_to_string(path) {
-            Ok(contents) => ViewerDocument {
+            Ok(contents) => NativeDocument {
                 source_path: Some(path.to_path_buf()),
-                title: path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("Implicit")
-                    .to_owned(),
-                subtitle: path.display().to_string(),
-                lines: split_lines(&contents),
+                buffer: Buffer::from_text(&contents),
+                status: String::from("Opened file"),
             },
-            Err(error) => ViewerDocument {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => NativeDocument {
                 source_path: Some(path.to_path_buf()),
-                title: String::from("Implicit"),
-                subtitle: path.display().to_string(),
-                lines: vec![
+                buffer: Buffer::empty(),
+                status: String::from("New file"),
+            },
+            Err(error) => NativeDocument::message(
+                Some(path.to_path_buf()),
+                vec![
                     String::from("Failed to open file."),
                     String::new(),
                     error.to_string(),
                 ],
-            },
+                "Read error",
+            ),
         },
-        None => ViewerDocument {
-            source_path: None,
-            title: String::from("Implicit"),
-            subtitle: String::from("Native app mode"),
-            lines: vec![
+        None => NativeDocument::message(
+            None,
+            vec![
                 String::from("Implicit native window mode"),
                 String::new(),
                 String::from("Open a file with:"),
                 String::from("implicit --app /path/to/note.md"),
                 String::from("implicit --new-window /path/to/note.md"),
                 String::new(),
-                String::from("Keys: Esc close, Up/Down scroll, PageUp/PageDown move faster."),
+                String::from("Edit with normal typing, save with Cmd+S."),
             ],
-        },
+            "Native app mode",
+        ),
     }
-}
-
-fn split_lines(contents: &str) -> Vec<String> {
-    let mut lines = contents
-        .split('\n')
-        .map(|line| {
-            line.strip_suffix('\r')
-                .unwrap_or(line)
-                .replace('\t', "    ")
-        })
-        .collect::<Vec<_>>();
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    lines
 }
 
 struct WindowApp {
-    document: ViewerDocument,
+    document: NativeDocument,
     window: Option<Rc<Window>>,
     context: Option<SoftbufferContext<Rc<Window>>>,
     surface: Option<Surface<Rc<Window>, Rc<Window>>>,
     modifiers: ModifiersState,
-    scroll_line: usize,
 }
 
 impl WindowApp {
-    fn new(document: ViewerDocument) -> Self {
+    fn new(document: NativeDocument) -> Self {
         Self {
             document,
             window: None,
             context: None,
             surface: None,
             modifiers: ModifiersState::default(),
-            scroll_line: 0,
         }
     }
 
-    fn set_document(&mut self, document: ViewerDocument) {
+    fn set_document(&mut self, document: NativeDocument) {
         self.document = document;
-        self.scroll_line = 0;
-        if let Some(window) = &self.window {
-            window.set_title(&format!("Implicit — {}", self.document.title));
-        }
+        self.sync_window_title();
     }
 
     fn open_document(&mut self, path: &Path) {
@@ -246,9 +268,34 @@ impl WindowApp {
         }
     }
 
+    fn save_document(&mut self) {
+        match self.document.source_path.clone() {
+            Some(path) => match self.document.buffer.save_to_path(&path) {
+                Ok(()) => {
+                    self.document.status = format!("Saved {}", path.display());
+                    self.sync_window_title();
+                }
+                Err(error) => {
+                    self.document.status = error.to_string();
+                }
+            },
+            None => {
+                self.document.status =
+                    String::from("Save As is not implemented in native app mode");
+            }
+        }
+        self.request_redraw();
+    }
+
+    fn sync_window_title(&self) {
+        if let Some(window) = &self.window {
+            window.set_title(&format!("Implicit — {}", self.document.display_title()));
+        }
+    }
+
     fn window_attributes(&self) -> WindowAttributes {
         Window::default_attributes()
-            .with_title(format!("Implicit — {}", self.document.title))
+            .with_title(format!("Implicit — {}", self.document.display_title()))
             .with_inner_size(LogicalSize::new(WINDOW_WIDTH as f64, WINDOW_HEIGHT as f64))
             .with_min_inner_size(LogicalSize::new(640.0, 420.0))
     }
@@ -283,17 +330,19 @@ impl WindowApp {
         (content_height / row_height).max(1)
     }
 
-    fn clamp_scroll(&mut self, size: PhysicalSize<u32>) {
-        let wrapped = wrap_lines(&self.document.lines, max_cols(size.width));
-        let max_scroll = wrapped.len().saturating_sub(self.visible_rows(size));
-        self.scroll_line = self.scroll_line.min(max_scroll);
+    fn visible_cols(&self, size: PhysicalSize<u32>) -> usize {
+        max_cols(size.width).max(1)
     }
 
     fn handle_scroll_lines(&mut self, delta: isize) {
         if delta.is_negative() {
-            self.scroll_line = self.scroll_line.saturating_sub(delta.unsigned_abs());
+            for _ in 0..delta.unsigned_abs() {
+                self.document.buffer.move_up();
+            }
         } else {
-            self.scroll_line = self.scroll_line.saturating_add(delta as usize);
+            for _ in 0..delta as usize {
+                self.document.buffer.move_down();
+            }
         }
     }
 
@@ -305,9 +354,12 @@ impl WindowApp {
         if size.width == 0 || size.height == 0 {
             return Ok(());
         }
-        self.clamp_scroll(size);
-        let wrapped = wrap_lines(&self.document.lines, max_cols(size.width));
         let visible_rows = self.visible_rows(size);
+        let visible_cols = self.visible_cols(size);
+        self.document
+            .buffer
+            .sync_viewport(visible_rows, visible_cols);
+        let (scroll_row, scroll_col) = self.document.buffer.scroll_offset();
 
         let Some(surface) = self.surface.as_mut() else {
             return Ok(());
@@ -327,7 +379,7 @@ impl WindowApp {
             width,
             H_PADDING,
             10,
-            &self.document.title,
+            &self.document.display_title(),
             ACCENT,
         );
         draw_text(
@@ -336,7 +388,7 @@ impl WindowApp {
             H_PADDING,
             24,
             &abbreviate_middle(
-                &self.document.subtitle,
+                &self.document.subtitle(),
                 max_cols(size.width).saturating_sub(4),
             ),
             MUTED,
@@ -352,8 +404,10 @@ impl WindowApp {
             PANEL,
         );
         let footer = format!(
-            "Esc close  Up/Down scroll  PageUp/PageDown faster  Cmd+R reload  Drop file to open  {} lines",
-            wrapped.len()
+            "Cmd+S save  Cmd+R reload  Cmd+W close  Drop file to open  Ln {} Col {}  {}",
+            self.document.buffer.cursor().0 + 1,
+            self.document.buffer.cursor().1 + 1,
+            self.document.status
         );
         draw_text(
             &mut buffer,
@@ -361,17 +415,43 @@ impl WindowApp {
             H_PADDING,
             height.saturating_sub(BOTTOM_BAR_HEIGHT).saturating_add(8),
             &abbreviate_middle(&footer, max_cols(size.width).saturating_sub(2)),
-            MUTED,
+            if self.document.buffer.is_dirty() {
+                STATUS_WARN
+            } else {
+                STATUS_OK
+            },
         );
 
-        let start = self.scroll_line.min(wrapped.len());
-        let end = (start + visible_rows).min(wrapped.len());
-        for (index, line) in wrapped[start..end].iter().enumerate() {
+        let visible_lines = self.document.buffer.lines();
+        let start = scroll_row.min(visible_lines.len());
+        let end = (start + visible_rows).min(visible_lines.len());
+        let cursor_screen = self.document.buffer.cursor_screen_position();
+        for (index, line) in visible_lines[start..end].iter().enumerate() {
             let y = TOP_BAR_HEIGHT + 10 + index * (CHAR_HEIGHT + LINE_SPACING);
             if y + CHAR_HEIGHT >= height.saturating_sub(BOTTOM_BAR_HEIGHT) {
                 break;
             }
-            draw_text(&mut buffer, width, H_PADDING, y, line, TEXT);
+            if cursor_screen.map(|(_, row)| row) == Some(index) {
+                fill_rect(
+                    &mut buffer,
+                    width,
+                    0,
+                    y.saturating_sub(2),
+                    width,
+                    CHAR_HEIGHT + 4,
+                    CURRENT_LINE,
+                );
+            }
+            let clipped = visible_fragment(line, scroll_col, visible_cols);
+            draw_text(&mut buffer, width, H_PADDING, y, &clipped, TEXT);
+        }
+
+        if let Some((cursor_x, cursor_y)) = cursor_screen
+            && cursor_y < visible_rows
+        {
+            let y = TOP_BAR_HEIGHT + 10 + cursor_y * (CHAR_HEIGHT + LINE_SPACING);
+            let x = H_PADDING + cursor_x * CHAR_WIDTH;
+            fill_rect(&mut buffer, width, x, y, 2, CHAR_HEIGHT, CURSOR);
         }
 
         buffer
@@ -400,6 +480,7 @@ impl ApplicationHandler for WindowApp {
             event_loop.exit();
             return;
         };
+        window.set_ime_allowed(true);
 
         self.window = Some(window);
         self.context = Some(context);
@@ -443,9 +524,14 @@ impl ApplicationHandler for WindowApp {
                 };
                 if amount != 0 {
                     self.handle_scroll_lines(amount);
-                    if let Some(window) = &self.window {
-                        self.clamp_scroll(window.inner_size());
-                    }
+                    let size = self
+                        .window
+                        .as_ref()
+                        .map(|window| window.inner_size())
+                        .unwrap_or(PhysicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT));
+                    self.document
+                        .buffer
+                        .sync_viewport(self.visible_rows(size), self.visible_cols(size));
                     self.request_redraw();
                 }
             }
@@ -458,25 +544,69 @@ impl ApplicationHandler for WindowApp {
                 let page = self.visible_rows(size).max(1) as isize;
                 match &event.logical_key {
                     Key::Named(NamedKey::Escape) => event_loop.exit(),
-                    Key::Named(NamedKey::ArrowUp) => self.handle_scroll_lines(-1),
-                    Key::Named(NamedKey::ArrowDown) => self.handle_scroll_lines(1),
-                    Key::Named(NamedKey::PageUp) => self.handle_scroll_lines(-page),
-                    Key::Named(NamedKey::PageDown) => self.handle_scroll_lines(page),
-                    Key::Named(NamedKey::Home) => self.scroll_line = 0,
-                    Key::Named(NamedKey::End) => self.scroll_line = usize::MAX,
+                    Key::Named(NamedKey::ArrowUp) => self.document.buffer.move_up(),
+                    Key::Named(NamedKey::ArrowDown) => self.document.buffer.move_down(),
+                    Key::Named(NamedKey::ArrowLeft) => self.document.buffer.move_left(),
+                    Key::Named(NamedKey::ArrowRight) => self.document.buffer.move_right(),
+                    Key::Named(NamedKey::PageUp) => self.document.buffer.page_up(page as usize),
+                    Key::Named(NamedKey::PageDown) => self.document.buffer.page_down(page as usize),
+                    Key::Named(NamedKey::Home) => self.document.buffer.move_home(),
+                    Key::Named(NamedKey::End) => self.document.buffer.move_end(),
+                    Key::Named(NamedKey::Backspace) => self.document.buffer.backspace(),
+                    Key::Named(NamedKey::Delete) => self.document.buffer.delete_forward(),
+                    Key::Named(NamedKey::Enter) => self.document.buffer.insert_newline(),
+                    Key::Named(NamedKey::Tab) => self.document.buffer.insert_spaces(4),
                     Key::Character(text)
                         if self.modifiers.super_key() && text.eq_ignore_ascii_case("w") =>
                     {
                         event_loop.exit();
                     }
                     Key::Character(text)
+                        if self.modifiers.super_key() && text.eq_ignore_ascii_case("s") =>
+                    {
+                        self.save_document();
+                    }
+                    Key::Character(text)
                         if self.modifiers.super_key() && text.eq_ignore_ascii_case("r") =>
                     {
                         self.reload_document();
                     }
+                    Key::Character(text)
+                        if !self.modifiers.super_key()
+                            && !self.modifiers.control_key()
+                            && !self.modifiers.alt_key() =>
+                    {
+                        for ch in text.chars().filter(|ch| !ch.is_control()) {
+                            self.document.buffer.insert_char(ch);
+                        }
+                    }
                     _ => return,
                 }
-                self.clamp_scroll(size);
+                self.document
+                    .buffer
+                    .sync_viewport(self.visible_rows(size), self.visible_cols(size));
+                self.sync_window_title();
+                self.request_redraw();
+            }
+            WindowEvent::Ime(Ime::Commit(text)) => {
+                if self.modifiers.super_key()
+                    || self.modifiers.control_key()
+                    || self.modifiers.alt_key()
+                {
+                    return;
+                }
+                for ch in text.chars().filter(|ch| !ch.is_control()) {
+                    self.document.buffer.insert_char(ch);
+                }
+                let size = self
+                    .window
+                    .as_ref()
+                    .map(|window| window.inner_size())
+                    .unwrap_or(PhysicalSize::new(WINDOW_WIDTH, WINDOW_HEIGHT));
+                self.document
+                    .buffer
+                    .sync_viewport(self.visible_rows(size), self.visible_cols(size));
+                self.sync_window_title();
                 self.request_redraw();
             }
             WindowEvent::RedrawRequested => {
@@ -493,24 +623,11 @@ fn max_cols(width: u32) -> usize {
     (width as usize).saturating_sub(H_PADDING * 2) / CHAR_WIDTH.max(1)
 }
 
-fn wrap_lines(lines: &[String], max_cols: usize) -> Vec<String> {
-    let max_cols = max_cols.max(1);
-    let mut wrapped = Vec::new();
-    for line in lines {
-        let chars = line.chars().collect::<Vec<_>>();
-        if chars.is_empty() {
-            wrapped.push(String::new());
-            continue;
-        }
-
-        for chunk in chars.chunks(max_cols) {
-            wrapped.push(chunk.iter().collect());
-        }
-    }
-    if wrapped.is_empty() {
-        wrapped.push(String::new());
-    }
-    wrapped
+fn visible_fragment(line: &str, scroll_col: usize, visible_cols: usize) -> String {
+    line.chars()
+        .skip(scroll_col)
+        .take(visible_cols)
+        .collect::<String>()
 }
 
 fn abbreviate_middle(text: &str, max_chars: usize) -> String {
@@ -623,9 +740,9 @@ mod tests {
     }
 
     #[test]
-    fn wrap_lines_chunks_long_lines() {
-        let wrapped = wrap_lines(&[String::from("abcdefgh")], 3);
-        assert_eq!(wrapped, vec!["abc", "def", "gh"]);
+    fn visible_fragment_applies_horizontal_scroll() {
+        let clipped = visible_fragment("abcdefgh", 2, 3);
+        assert_eq!(clipped, "cde");
     }
 
     #[test]
@@ -637,8 +754,8 @@ mod tests {
     #[test]
     fn load_document_without_path_returns_welcome() {
         let document = load_document(None);
-        assert_eq!(document.title, "Implicit");
-        assert!(document.lines[0].contains("Implicit native window mode"));
+        assert_eq!(document.display_title(), "Implicit");
+        assert!(document.buffer.lines()[0].contains("Implicit native window mode"));
     }
 
     #[test]
@@ -649,12 +766,30 @@ mod tests {
         let document = load_document(Some(&path));
 
         assert_eq!(document.source_path.as_deref(), Some(path.as_path()));
-        assert_eq!(document.title, "implicit-window-app-load.txt");
-        assert_eq!(
-            document.lines,
-            vec![String::from("hello"), String::from("world")]
-        );
+        assert_eq!(document.display_title(), "implicit-window-app-load.txt");
+        assert_eq!(document.buffer.lines(), ["hello", "world"]);
 
         fs::remove_file(path).expect("cleanup");
+    }
+
+    #[test]
+    fn missing_path_opens_editable_new_file() {
+        let path = std::env::temp_dir().join("implicit-window-app-missing.txt");
+        let _ = fs::remove_file(&path);
+
+        let document = load_document(Some(&path));
+
+        assert_eq!(document.source_path.as_deref(), Some(path.as_path()));
+        assert_eq!(document.status, "New file");
+        assert_eq!(document.buffer.lines(), [""]);
+    }
+
+    #[test]
+    fn dirty_document_title_includes_marker() {
+        let mut document = NativeDocument::message(None, vec![String::from("alpha")], "Ready");
+        document.buffer.move_end();
+        document.buffer.insert_char('!');
+
+        assert_eq!(document.display_title(), "Implicit •");
     }
 }

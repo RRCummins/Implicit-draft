@@ -29,26 +29,37 @@
     }
 }
 
-- (NSArray<NSString *> *)forwardedArguments {
+- (NSArray<NSString *> *)forwardedPaths {
     NSArray<NSString *> *arguments = [[NSProcessInfo processInfo] arguments];
     if ([arguments count] <= 1) {
         return @[];
     }
 
-    NSMutableArray<NSString *> *forwarded = [NSMutableArray arrayWithObject:@"--app"];
+    NSMutableArray<NSString *> *paths = [NSMutableArray array];
     for (NSUInteger index = 1; index < [arguments count]; index++) {
         NSString *argument = arguments[index];
-        if ([argument hasPrefix:@"-psn_"]) {
+        if ([argument hasPrefix:@"-psn_"] || [argument isEqualToString:@"--app"]) {
             continue;
         }
-        [forwarded addObject:argument];
+        [paths addObject:argument];
     }
-    return forwarded;
+    return paths;
+}
+
+- (void)launchPaths:(NSArray<NSString *> *)paths {
+    if ([paths count] == 0) {
+        [self launchImplicitWithArguments:@[@"--app"]];
+        return;
+    }
+
+    for (NSString *path in paths) {
+        [self launchImplicitWithArguments:@[@"--app", path]];
+    }
 }
 
 - (void)launchDefaultIfNeeded {
     if (!self.launched) {
-        [self launchImplicitWithArguments:@[@"--app"]];
+        [self launchPaths:@[]];
         [NSApp terminate:nil];
     }
 }
@@ -56,9 +67,9 @@
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     (void)notification;
 
-    NSArray<NSString *> *forwarded = [self forwardedArguments];
-    if ([forwarded count] > 1) {
-        [self launchImplicitWithArguments:forwarded];
+    NSArray<NSString *> *paths = [self forwardedPaths];
+    if ([paths count] > 0) {
+        [self launchPaths:paths];
         [NSApp terminate:nil];
         return;
     }
@@ -67,13 +78,7 @@
 }
 
 - (void)application:(NSApplication *)sender openFiles:(NSArray<NSString *> *)filenames {
-    if ([filenames count] == 0) {
-        [self launchDefaultIfNeeded];
-    } else {
-        for (NSString *filename in filenames) {
-            [self launchImplicitWithArguments:@[@"--app", filename]];
-        }
-    }
+    [self launchPaths:filenames];
 
     [sender replyToOpenOrPrint:NSApplicationDelegateReplySuccess];
     [NSApp terminate:nil];

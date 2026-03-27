@@ -53,19 +53,56 @@
             <array>
                 <string>rs</string>
                 <string>swift</string>
+                <string>swiftinterface</string>
                 <string>kt</string>
                 <string>kts</string>
                 <string>py</string>
+                <string>pyi</string>
+                <string>pyw</string>
                 <string>js</string>
+                <string>mjs</string>
+                <string>cjs</string>
                 <string>ts</string>
+                <string>tsx</string>
+                <string>jsx</string>
+                <string>go</string>
                 <string>json</string>
+                <string>jsonc</string>
                 <string>toml</string>
                 <string>yaml</string>
                 <string>yml</string>
+                <string>ini</string>
+                <string>conf</string>
+                <string>sh</string>
+                <string>bash</string>
+                <string>zsh</string>
+                <string>fish</string>
+                <string>css</string>
+                <string>scss</string>
+                <string>html</string>
+                <string>htm</string>
+                <string>xml</string>
                 <string>c</string>
+                <string>cc</string>
                 <string>cpp</string>
+                <string>cxx</string>
                 <string>h</string>
+                <string>hh</string>
                 <string>hpp</string>
+                <string>hxx</string>
+                <string>ipp</string>
+                <string>java</string>
+                <string>rb</string>
+                <string>php</string>
+                <string>m</string>
+                <string>mm</string>
+                <string>cs</string>
+                <string>scala</string>
+                <string>lua</string>
+                <string>dart</string>
+                <string>sql</string>
+                <string>r</string>
+                <string>zig</string>
             </array>
         </dict>
     </array>
