@@ -1,9 +1,4 @@
-//
-//  AppDelegate.swift
-//  implicit
-//
-//  Created by Ryan Cummins on 3/28/26.
-//
+// AppDelegate.swift
 
 import Cocoa
 
@@ -22,8 +17,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func application(_ sender: NSApplication, openFiles filenames: [String]) {
         let urls = filenames.map(URL.init(fileURLWithPath:))
-        if let mainViewController {
-            mainViewController.applicationOpenFiles(urls)
+        if let vc = mainViewController {
+            vc.applicationOpenFiles(urls)
         } else {
             pendingOpenURLs.append(contentsOf: urls)
         }
@@ -31,26 +26,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag {
-            NSApp.windows.first?.makeKeyAndOrderFront(self)
-        }
-        if NSApp.windows.first == nil {
-            mainViewController?.applicationCreateNewDocument()
-        }
+        if !flag { NSApp.windows.first?.makeKeyAndOrderFront(self) }
+        if NSApp.windows.first == nil { mainViewController?.applicationCreateNewDocument() }
         return true
     }
 
-    func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
-        true
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let vc = mainViewController, vc.hasDirtyDocuments else {
+            return .terminateNow
+        }
+
+        let count = vc.dirtyDocumentCount
+        let plural = count == 1 ? "document" : "documents"
+
+        let alert = NSAlert()
+        alert.messageText = "Quit with unsaved changes?"
+        alert.informativeText = "You have \(count) unsaved \(plural). Your changes will be lost."
+        alert.addButton(withTitle: "Quit Anyway")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+
+        alert.beginSheetModal(for: NSApp.windows.first!) { response in
+            NSApp.reply(toApplicationShouldTerminate: response == .alertFirstButtonReturn)
+        }
+
+        return .terminateLater
     }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        mainViewController?.saveSession()
+    }
+
+    func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
+
+    // MARK: Private
 
     private var mainViewController: ViewController? {
         NSApp.windows.first?.contentViewController as? ViewController
     }
 
     private func flushPendingOpenURLs() {
-        guard !pendingOpenURLs.isEmpty, let mainViewController else { return }
-        mainViewController.applicationOpenFiles(pendingOpenURLs)
+        guard !pendingOpenURLs.isEmpty, let vc = mainViewController else { return }
+        vc.applicationOpenFiles(pendingOpenURLs)
         pendingOpenURLs.removeAll()
     }
 }

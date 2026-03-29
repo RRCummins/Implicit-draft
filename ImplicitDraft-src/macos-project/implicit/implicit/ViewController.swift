@@ -1,5 +1,5 @@
 // ViewController.swift
-// Single-window flat layout — Phase 1 complete.
+// Single-window flat layout — Phase 2: session persistence.
 
 import Cocoa
 
@@ -62,14 +62,24 @@ final class ViewController: NSViewController,
     private var mode:                 EditorMode = .source
     private var didSetInitialSplit:   Bool = false
     private var theme:                ImplicitTheme = ImplicitThemeLoader.load()
+    private var recoveryTimer:        Timer?
+
+    // MARK: Public interface for AppDelegate
+
+    var hasDirtyDocuments: Bool { documents.contains { $0.isDirty } }
+    var dirtyDocumentCount: Int { documents.filter(\.isDirty).count }
 
     // MARK: Lifecycle
 
     override func viewDidLoad() {
         super.viewDidLoad()
         buildInterface()
-        seedInitialDocumentIfNeeded()
+        restoreSessionOrSeed()
         updateVisibleDocument()
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(appWillResignActive),
+            name: NSApplication.willResignActiveNotification, object: nil
+        )
     }
 
     override func viewDidAppear() {
@@ -232,6 +242,7 @@ final class ViewController: NSViewController,
         rebuildSidebarRows()
         refreshTabStrip()
         updateStatusBar()
+        scheduleRecoveryWrite(for: documents[index])
     }
 
     // MARK: Interface construction
@@ -761,6 +772,94 @@ final class ViewController: NSViewController,
         }
     }
 
+    // MARK: Session save / restore
+
+    func saveSession() {
+        let saved = documents.map { doc -> SavedDocument in
+            // For dirty docs without a saved URL, embed the text directly.
+            // For clean saved docs, omit the text (re-read from disk on restore).
+            let embedText = doc.isDirty || doc.url == nil
+            return SavedDocument(
+                id: doc.id,
+                urlPath: doc.url?.path(percentEncoded: false),
+                title: doc.title,
+                text: embedText ? doc.text : nil,
+                isDirty: doc.isDirty
+            )
+        }
+        SessionStore.save(SavedSession(
+            documents: saved,
+            selectedDocumentID: selectedDocumentID
+        ))
+    }
+
+    private func restoreSessionOrSeed() {
+        guard let session = SessionStore.load(), !session.documents.isEmpty else {
+            seedInitialDocumentIfNeeded()
+            return
+        }
+
+        var restored: [EditorDocument] = []
+        for saved in session.documents {
+            // Check for a recovery file first (crash recovery path)
+            let recoveryText = SessionStore.loadRecovery(id: saved.id)
+
+            if let path = saved.urlPath {
+                let url = URL(fileURLWithPath: path)
+                // Try to re-read from disk for clean documents
+                if !saved.isDirty, let text = try? String(contentsOf: url, encoding: .utf8) {
+                    restored.append(EditorDocument(
+                        id: saved.id, url: url, title: saved.title,
+                        text: text, isDirty: false
+                    ))
+                    continue
+                }
+                // Fall back to embedded session text or recovery text
+                let text = recoveryText ?? saved.text ?? ""
+                restored.append(EditorDocument(
+                    id: saved.id, url: url, title: saved.title,
+                    text: text, isDirty: !text.isEmpty || saved.isDirty
+                ))
+            } else {
+                // Untitled document — restore from session text or recovery
+                let text = recoveryText ?? saved.text ?? ""
+                restored.append(EditorDocument(
+                    id: saved.id, url: nil, title: saved.title,
+                    text: text, isDirty: text.isEmpty ? false : saved.isDirty
+                ))
+            }
+        }
+
+        if restored.isEmpty {
+            seedInitialDocumentIfNeeded()
+            return
+        }
+
+        documents = restored
+        selectedDocumentID = session.selectedDocumentID
+            .flatMap { id in restored.first(where: { $0.id == id })?.id }
+            ?? restored.first?.id
+        refreshAll()
+    }
+
+    @objc private func appWillResignActive() {
+        saveSession()
+    }
+
+    // MARK: Recovery
+
+    private func scheduleRecoveryWrite(for doc: EditorDocument) {
+        recoveryTimer?.invalidate()
+        recoveryTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { [weak self] _ in
+            guard let self, let current = self.documents.first(where: { $0.id == doc.id }) else {
+                return
+            }
+            if current.isDirty {
+                SessionStore.writeRecovery(id: current.id, text: current.text)
+            }
+        }
+    }
+
     // MARK: Document management
 
     private var selectedDocumentIndex: Int? {
@@ -843,11 +942,14 @@ final class ViewController: NSViewController,
     private func writeDocument(at index: Int, to url: URL) {
         do {
             try documents[index].text.write(to: url, atomically: true, encoding: .utf8)
+            let docID = documents[index].id
             documents[index].url = url
             documents[index].title = url.lastPathComponent
             documents[index].isDirty = false
             statusLabel.stringValue = "Saved \(url.lastPathComponent)"
             NSDocumentController.shared.noteNewRecentDocumentURL(url)
+            SessionStore.clearRecovery(id: docID)
+            saveSession()
             refreshAll()
         } catch {
             statusLabel.stringValue = "Save failed: \(error.localizedDescription)"
