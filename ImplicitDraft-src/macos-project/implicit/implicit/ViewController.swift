@@ -136,12 +136,13 @@ final class ViewController: NSViewController,
     }
 
     private func saveDocumentAs(at index: Int, completion: (() -> Void)?) {
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = StandaloneDocumentIO.suggestedFilename(for: documents[index])
-        panel.canCreateDirectories = true
-        panel.beginSheetModal(for: view.window!) { [weak self] response in
-            guard response == .OK, let url = panel.url else { return }
-            self?.writeDocument(at: index, to: url, completion: completion)
+        guard let window = view.window else { return }
+        StandaloneDocumentCoordinator.requestSaveURL(
+            window: window,
+            suggestedFilename: StandaloneDocumentIO.suggestedFilename(for: documents[index])
+        ) { [weak self] url in
+            guard let self, let url else { return }
+            self.writeDocument(at: index, to: url, completion: completion)
         }
     }
 
@@ -964,22 +965,19 @@ final class ViewController: NSViewController,
         url: URL,
         completion: (() -> Void)?
     ) {
-        let alert = NSAlert()
-        alert.messageText = "File changed on disk"
-        alert.informativeText = "\"\(url.lastPathComponent)\" was modified outside Implicit. Overwrite it, or save your buffer somewhere else."
-        alert.addButton(withTitle: "Overwrite")
-        alert.addButton(withTitle: "Save As")
-        alert.addButton(withTitle: "Cancel")
-        alert.alertStyle = .warning
-        alert.beginSheetModal(for: view.window!) { [weak self] response in
+        guard let window = view.window else { return }
+        StandaloneDocumentCoordinator.requestConflictResolution(
+            window: window,
+            url: url
+        ) { [weak self] response in
             guard let self else { return }
             switch response {
-            case .alertFirstButtonReturn:
+            case .overwrite:
                 self.writeDocument(at: index, to: url, completion: completion)
-            case .alertSecondButtonReturn:
+            case .saveAs:
                 self.saveDocumentAs(at: index, completion: completion)
-            default:
-                break
+            case .cancel:
+                return
             }
         }
     }
@@ -1055,17 +1053,17 @@ final class ViewController: NSViewController,
         activateDocument(at: index)
 
         let doc = documents[index]
-        let alert = NSAlert()
-        alert.messageText = "Save \"\(doc.title)\"?"
-        alert.informativeText = "Your changes will be lost if you don't save before closing."
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Don't Save")
-        alert.addButton(withTitle: "Cancel")
-        alert.alertStyle = .warning
-        alert.beginSheetModal(for: view.window!) { [weak self] response in
+        guard let window = view.window else {
+            completion(false)
+            return
+        }
+        StandaloneDocumentCoordinator.requestLossyClose(
+            window: window,
+            title: doc.title
+        ) { [weak self] response in
             guard let self else { return }
             switch response {
-            case .alertFirstButtonReturn:
+            case .save:
                 self.saveDocument(at: index) { [weak self] in
                     guard let self else { return }
                     self.confirmLossyClose(
@@ -1073,12 +1071,12 @@ final class ViewController: NSViewController,
                         completion: completion
                     )
                 }
-            case .alertSecondButtonReturn:
+            case .discard:
                 self.confirmLossyClose(
                     for: Array(pendingIndices.dropFirst()),
                     completion: completion
                 )
-            default:
+            case .cancel:
                 completion(false)
             }
         }
