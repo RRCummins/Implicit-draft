@@ -3,3 +3,7 @@ ImplicitDraft-tmp/
 ImplicitDraft-src/target/
 
 .DS_Store
+
+*.xcuserstate
+xcuserdata/
+DerivedData/
