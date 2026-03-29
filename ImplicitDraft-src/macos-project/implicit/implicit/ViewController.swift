@@ -16,7 +16,7 @@ private enum SidebarRow {
 final class ViewController: NSViewController,
                              NSTableViewDataSource, NSTableViewDelegate,
                              NSTextViewDelegate, NSMenuItemValidation,
-                             NSWindowDelegate {
+                             NSWindowDelegate, WKNavigationDelegate {
     // MARK: Subviews
     private let splitView          = FlatSplitView()
     private let sidebarTable       = NSTableView(frame: .zero)
@@ -45,6 +45,7 @@ final class ViewController: NSViewController,
     private var theme:                ImplicitTheme = ImplicitThemeLoader.load()
     private var recoveryTimer:        Timer?
     private var pendingWindowCloseApproval = false
+    private var pendingPreviewScrollOffset: Double?
 
     // MARK: Public interface for AppDelegate
 
@@ -285,6 +286,15 @@ final class ViewController: NSViewController,
         captureCurrentDocumentViewState()
     }
 
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard webView == previewWebView, let offset = pendingPreviewScrollOffset else { return }
+        pendingPreviewScrollOffset = nil
+        let point = NSPoint(x: 0, y: max(0, offset))
+        guard let scrollView = previewScrollView else { return }
+        scrollView.contentView.scroll(to: point)
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+    }
+
     // MARK: Interface construction
 
     private func buildInterface() {
@@ -326,6 +336,10 @@ final class ViewController: NSViewController,
     private var selectedDocumentID: UUID? {
         get { session.selectedDocumentID }
         set { session.selectedDocumentID = newValue }
+    }
+
+    private var previewScrollView: NSScrollView? {
+        previewWebView.subviews.compactMap { $0 as? NSScrollView }.first
     }
 
     // MARK: Tab bar
@@ -524,6 +538,7 @@ final class ViewController: NSViewController,
 
         previewWebView.translatesAutoresizingMaskIntoConstraints = false
         previewWebView.setValue(false, forKey: "drawsBackground")
+        previewWebView.navigationDelegate = self
         previewWebView.isHidden = true
         container.addSubview(previewWebView)
 
@@ -920,24 +935,33 @@ final class ViewController: NSViewController,
     private func captureCurrentDocumentViewState() {
         guard let index = selectedDocumentIndex else { return }
         documents[index].mode = mode
-        documents[index].selectionLocation = editorTextView.selectedRange().location
-        documents[index].selectionLength = editorTextView.selectedRange().length
-        documents[index].scrollOffset = editorScrollView.contentView.bounds.origin.y
+        if mode == .source {
+            documents[index].selectionLocation = editorTextView.selectedRange().location
+            documents[index].selectionLength = editorTextView.selectedRange().length
+            documents[index].scrollOffset = editorScrollView.contentView.bounds.origin.y
+        } else {
+            documents[index].scrollOffset = Double(
+                previewScrollView?.contentView.bounds.origin.y ?? 0
+            )
+        }
     }
 
     private func restoreDocumentViewState(_ doc: EditorDocument) {
-        guard mode == .source else { return }
-        let length = (editorTextView.string as NSString).length
-        let clampedLocation = min(max(0, doc.selectionLocation), length)
-        let clampedLength = min(max(0, doc.selectionLength), max(0, length - clampedLocation))
-        let range = NSRange(location: clampedLocation, length: clampedLength)
-        editorTextView.setSelectedRange(range)
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.editorScrollView.contentView.scroll(
-                to: NSPoint(x: 0, y: max(0, doc.scrollOffset))
-            )
-            self.editorScrollView.reflectScrolledClipView(self.editorScrollView.contentView)
+        if mode == .source {
+            let length = (editorTextView.string as NSString).length
+            let clampedLocation = min(max(0, doc.selectionLocation), length)
+            let clampedLength = min(max(0, doc.selectionLength), max(0, length - clampedLocation))
+            let range = NSRange(location: clampedLocation, length: clampedLength)
+            editorTextView.setSelectedRange(range)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.editorScrollView.contentView.scroll(
+                    to: NSPoint(x: 0, y: max(0, doc.scrollOffset))
+                )
+                self.editorScrollView.reflectScrolledClipView(self.editorScrollView.contentView)
+            }
+        } else {
+            pendingPreviewScrollOffset = doc.scrollOffset
         }
     }
 
