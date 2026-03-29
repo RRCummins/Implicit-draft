@@ -961,6 +961,20 @@ final class ViewController: NSViewController,
         documents.indices.filter { documents[$0].isDirty }
     }
 
+    private var pristineSeedDocumentIndex: Int? {
+        guard documents.count == 1 else { return nil }
+        let doc = documents[0]
+        guard doc.url == nil,
+              doc.text.isEmpty,
+              !doc.isDirty,
+              doc.selectionLocation == 0,
+              doc.selectionLength == 0,
+              doc.scrollOffset == 0 else {
+            return nil
+        }
+        return 0
+    }
+
     private func seedInitialDocumentIfNeeded() {
         guard documents.isEmpty else { return }
         let doc = EditorDocument.untitled()
@@ -1078,6 +1092,7 @@ final class ViewController: NSViewController,
     private func openDocuments(_ urls: [URL]) {
         captureCurrentDocumentViewState()
         var changed = false
+        var replaceSeedIndex = pristineSeedDocumentIndex
         for url in urls {
             if let i = documents.firstIndex(where: { $0.url == url }) {
                 if documents[i].isDirty {
@@ -1116,7 +1131,12 @@ final class ViewController: NSViewController,
                     selectionLength: 0,
                     mode: .source
                 )
-                documents.append(doc)
+                if let seedIndex = replaceSeedIndex, documents.indices.contains(seedIndex) {
+                    documents[seedIndex] = doc
+                    replaceSeedIndex = nil
+                } else {
+                    documents.append(doc)
+                }
                 selectedDocumentID = doc.id
                 NSDocumentController.shared.noteNewRecentDocumentURL(url)
                 changed = true
