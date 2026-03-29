@@ -1,6 +1,5 @@
 // ViewController.swift
-// Single-window flat layout for Implicit Standalone.
-// Phase 1: design system wired in, header removed, editor card/margins gone.
+// Single-window flat layout — Phase 1 complete.
 
 import Cocoa
 
@@ -25,13 +24,21 @@ private enum EditorMode: Int {
     case preview = 1
 }
 
+// Unified sidebar row model. Section header rows are not selectable.
+private enum SidebarRow {
+    case header(String)
+    case openDoc(Int)    // index into documents
+    case recent(URL)
+}
+
 // MARK: - ViewController
 
-final class ViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate,
+final class ViewController: NSViewController,
+                             NSTableViewDataSource, NSTableViewDelegate,
                              NSTextViewDelegate, NSMenuItemValidation {
     // MARK: Subviews
     private let splitView          = FlatSplitView()
-    private let documentsTableView = NSTableView(frame: .zero)
+    private let sidebarTable       = NSTableView(frame: .zero)
     private let editorTextView     = NSTextView(frame: .zero)
     private let editorScrollView   = NSScrollView()
     private let tabStripStack      = NSStackView()
@@ -50,6 +57,7 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
     // MARK: State
     private var documents:            [EditorDocument] = []
     private var selectedDocumentID:   UUID?
+    private var sidebarRows:          [SidebarRow] = []
     private var isSwitchingDocuments: Bool = false
     private var mode:                 EditorMode = .source
     private var didSetInitialSplit:   Bool = false
@@ -94,9 +102,7 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
         let doc = EditorDocument.untitled()
         documents.insert(doc, at: 0)
         selectedDocumentID = doc.id
-        documentsTableView.reloadData()
-        documentsTableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
-        updateVisibleDocument()
+        refreshAll()
     }
 
     @IBAction func openDocument(_ sender: Any?) {
@@ -136,7 +142,7 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
             documents[index].text = text
             documents[index].isDirty = false
             statusLabel.stringValue = "Reverted \(documents[index].title)"
-            updateVisibleDocument()
+            refreshAll()
         } catch {
             statusLabel.stringValue = "Error: \(error.localizedDescription)"
         }
@@ -162,49 +168,58 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
 
     // MARK: NSTableViewDataSource
 
-    func numberOfRows(in tableView: NSTableView) -> Int { documents.count }
+    func numberOfRows(in tableView: NSTableView) -> Int { sidebarRows.count }
 
     func tableView(
         _ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int
     ) -> NSView? {
-        let cellID = NSUserInterfaceItemIdentifier("DocRow")
-        let cell: NSTableCellView
-        if let existing = tableView.makeView(withIdentifier: cellID, owner: self) as? NSTableCellView {
-            cell = existing
-        } else {
-            cell = NSTableCellView()
-            cell.identifier = cellID
-            let tf = NSTextField(labelWithString: "")
-            tf.identifier = NSUserInterfaceItemIdentifier("DocLabel")
-            tf.font = NSFont.systemFont(ofSize: AppMetrics.bodyFontSize, weight: .regular)
-            tf.lineBreakMode = .byTruncatingMiddle
-            tf.translatesAutoresizingMaskIntoConstraints = false
-            cell.addSubview(tf)
-            NSLayoutConstraint.activate([
-                tf.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 12),
-                tf.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
-                tf.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-            ])
+        switch sidebarRows[row] {
+        case .header(let title):
+            return makeSidebarHeaderCell(title: title)
+        case .openDoc(let index):
+            let doc = documents[index]
+            let isActive = doc.id == selectedDocumentID
+            return makeSidebarDocCell(title: doc.displayTitle, isActive: isActive)
+        case .recent(let url):
+            return makeSidebarRecentCell(url: url)
         }
-        if let tf = cell.subviews.compactMap({ $0 as? NSTextField }).first {
-            let isSelected = documents[row].id == selectedDocumentID
-            tf.stringValue = documents[row].displayTitle
-            tf.textColor = isSelected ? AppPalette.textPrimary : AppPalette.textMuted
-        }
-        return cell
     }
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
-        FlatTableRowView()
+        switch sidebarRows[row] {
+        case .header: return TransparentTableRowView()
+        default:      return FlatTableRowView()
+        }
     }
 
     // MARK: NSTableViewDelegate
 
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        switch sidebarRows[row] {
+        case .header: return 28
+        default:      return AppMetrics.sidebarRowHeight
+        }
+    }
+
+    func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
+        switch sidebarRows[row] {
+        case .header: return false
+        default:      return true
+        }
+    }
+
     func tableViewSelectionDidChange(_ notification: Notification) {
-        let row = documentsTableView.selectedRow
-        guard documents.indices.contains(row) else { return }
-        selectedDocumentID = documents[row].id
-        updateVisibleDocument()
+        let row = sidebarTable.selectedRow
+        guard sidebarRows.indices.contains(row) else { return }
+        switch sidebarRows[row] {
+        case .header:
+            break
+        case .openDoc(let index):
+            selectedDocumentID = documents[index].id
+            updateVisibleDocument()
+        case .recent(let url):
+            openDocuments([url])
+        }
     }
 
     // MARK: NSTextViewDelegate
@@ -214,7 +229,7 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
         documents[index].text = editorTextView.string
         documents[index].isDirty = true
         updateWindowTitle()
-        documentsTableView.reloadData()
+        rebuildSidebarRows()
         refreshTabStrip()
         updateStatusBar()
     }
@@ -284,7 +299,7 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
         return bar
     }
 
-    // MARK: Body (sidebar + editor)
+    // MARK: Body
 
     private func makeBody() -> NSView {
         let container = NSView()
@@ -320,31 +335,24 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
         sidebar.wantsLayer = true
         sidebar.layer?.backgroundColor = AppPalette.sidebarBg.cgColor
 
-        let sectionHeader = NSTextField(labelWithString: "DOCUMENTS")
-        sectionHeader.font = NSFont.systemFont(ofSize: 10, weight: .semibold)
-        sectionHeader.textColor = AppPalette.textMuted
-        sectionHeader.translatesAutoresizingMaskIntoConstraints = false
-        sidebar.addSubview(sectionHeader)
-
-        documentsTableView.headerView = nil
-        documentsTableView.style = .plain
-        documentsTableView.rowHeight = AppMetrics.sidebarRowHeight
-        documentsTableView.focusRingType = .none
-        documentsTableView.backgroundColor = .clear
-        documentsTableView.intercellSpacing = .zero
-        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("documents"))
-        documentsTableView.addTableColumn(column)
-        documentsTableView.delegate = self
-        documentsTableView.dataSource = self
+        sidebarTable.headerView = nil
+        sidebarTable.style = .plain
+        sidebarTable.focusRingType = .none
+        sidebarTable.backgroundColor = .clear
+        sidebarTable.intercellSpacing = .zero
+        sidebarTable.usesAutomaticRowHeights = false
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("sidebar"))
+        sidebarTable.addTableColumn(column)
+        sidebarTable.delegate = self
+        sidebarTable.dataSource = self
 
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
         scroll.drawsBackground = false
         scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.documentView = documentsTableView
+        scroll.documentView = sidebarTable
         sidebar.addSubview(scroll)
 
-        // Right-edge border (avoids relying on NSSplitView's divider color)
         let rightBorder = NSView()
         rightBorder.wantsLayer = true
         rightBorder.layer?.backgroundColor = AppPalette.border.cgColor
@@ -352,13 +360,9 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
         sidebar.addSubview(rightBorder)
 
         NSLayoutConstraint.activate([
-            sectionHeader.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 12),
-            sectionHeader.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -4),
-            sectionHeader.topAnchor.constraint(equalTo: sidebar.topAnchor, constant: 8),
-            sectionHeader.heightAnchor.constraint(equalToConstant: 28),
             scroll.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: rightBorder.leadingAnchor),
-            scroll.topAnchor.constraint(equalTo: sectionHeader.bottomAnchor),
+            scroll.topAnchor.constraint(equalTo: sidebar.topAnchor),
             scroll.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor),
             rightBorder.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor),
             rightBorder.topAnchor.constraint(equalTo: sidebar.topAnchor),
@@ -369,6 +373,74 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
         return sidebar
     }
 
+    // MARK: Sidebar cells
+
+    private func makeSidebarHeaderCell(title: String) -> NSView {
+        let id = NSUserInterfaceItemIdentifier("SidebarHeader")
+        let cell = NSTableCellView()
+        cell.identifier = id
+        let label = NSTextField(labelWithString: title)
+        label.font = NSFont.systemFont(ofSize: 10, weight: .semibold)
+        label.textColor = AppPalette.textMuted
+        label.translatesAutoresizingMaskIntoConstraints = false
+        cell.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 12),
+            label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+        ])
+        return cell
+    }
+
+    private func makeSidebarDocCell(title: String, isActive: Bool) -> NSView {
+        let id = NSUserInterfaceItemIdentifier("SidebarDoc")
+        let cell = NSTableCellView()
+        cell.identifier = id
+        let label = NSTextField(labelWithString: title)
+        label.font = NSFont.systemFont(ofSize: AppMetrics.bodyFontSize, weight: .regular)
+        label.textColor = isActive ? AppPalette.textPrimary : AppPalette.textMuted
+        label.lineBreakMode = .byTruncatingMiddle
+        label.translatesAutoresizingMaskIntoConstraints = false
+        cell.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 12),
+            label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
+            label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+        ])
+        return cell
+    }
+
+    private func makeSidebarRecentCell(url: URL) -> NSView {
+        let id = NSUserInterfaceItemIdentifier("SidebarRecent")
+        let cell = NSTableCellView()
+        cell.identifier = id
+
+        let name = NSTextField(labelWithString: url.lastPathComponent)
+        name.font = NSFont.systemFont(ofSize: AppMetrics.bodyFontSize, weight: .regular)
+        name.textColor = AppPalette.textMuted
+        name.lineBreakMode = .byTruncatingMiddle
+        name.translatesAutoresizingMaskIntoConstraints = false
+
+        let dir = NSTextField(
+            labelWithString: url.deletingLastPathComponent().lastPathComponent
+        )
+        dir.font = NSFont.systemFont(ofSize: 10, weight: .regular)
+        dir.textColor = AppPalette.textMuted.withAlphaComponent(0.6)
+        dir.lineBreakMode = .byTruncatingHead
+        dir.translatesAutoresizingMaskIntoConstraints = false
+
+        cell.addSubview(name)
+        cell.addSubview(dir)
+        NSLayoutConstraint.activate([
+            name.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 12),
+            name.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
+            name.topAnchor.constraint(equalTo: cell.topAnchor, constant: 5),
+            dir.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 12),
+            dir.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
+            dir.topAnchor.constraint(equalTo: name.bottomAnchor, constant: 1),
+        ])
+        return cell
+    }
+
     // MARK: Editor
 
     private func makeEditor() -> NSView {
@@ -376,7 +448,6 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
         container.wantsLayer = true
         container.layer?.backgroundColor = AppPalette.windowBg.cgColor
 
-        // Editor scroll + text view
         editorScrollView.hasVerticalScroller = true
         editorScrollView.hasHorizontalScroller = false
         editorScrollView.borderType = .noBorder
@@ -389,7 +460,9 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
         editorTextView.isAutomaticDataDetectionEnabled = false
         editorTextView.isContinuousSpellCheckingEnabled = false
         editorTextView.usesFindBar = true
-        editorTextView.font = NSFont.monospacedSystemFont(ofSize: AppMetrics.monoFontSize, weight: .regular)
+        editorTextView.font = NSFont.monospacedSystemFont(
+            ofSize: AppMetrics.monoFontSize, weight: .regular
+        )
         editorTextView.textColor = AppPalette.textPrimary
         editorTextView.backgroundColor = AppPalette.windowBg
         editorTextView.insertionPointColor = AppPalette.accent
@@ -407,7 +480,7 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
         editorTextView.delegate = self
         editorScrollView.documentView = editorTextView
 
-        // Empty state — inline centered content, no card border
+        // Empty state — inline centered, no card border
         emptyContainer.wantsLayer = true
         emptyContainer.layer?.backgroundColor = AppPalette.windowBg.cgColor
         emptyContainer.isHidden = true
@@ -423,12 +496,10 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
 
         emptyTitleLabel.font = NSFont.systemFont(ofSize: 20, weight: .semibold)
         emptyTitleLabel.textColor = AppPalette.textPrimary
-
         emptyBodyLabel.font = NSFont.systemFont(ofSize: AppMetrics.bodyFontSize, weight: .regular)
         emptyBodyLabel.textColor = AppPalette.textMuted
-        emptyBodyLabel.maximumNumberOfLines = 0
-        emptyBodyLabel.lineBreakMode = .byWordWrapping
-
+        emptyBodyLabel.maximumNumberOfLines = 3
+        emptyBodyLabel.preferredMaxLayoutWidth = 360
         emptyOpenButton.isBordered = false
         emptyOpenButton.font = NSFont.systemFont(ofSize: AppMetrics.bodyFontSize, weight: .medium)
         emptyOpenButton.contentTintColor = AppPalette.accent
@@ -452,7 +523,7 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
                 equalTo: emptyContainer.leadingAnchor,
                 constant: AppMetrics.editorInsetH + 12
             ),
-            emptyStack.widthAnchor.constraint(equalToConstant: 380),
+            emptyStack.widthAnchor.constraint(equalToConstant: 360),
             emptyStack.centerYAnchor.constraint(
                 equalTo: emptyContainer.centerYAnchor, constant: -20
             ),
@@ -485,7 +556,7 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
         bar.addSubview(statusMetaLabel)
 
         modeControl.controlSize = .mini
-        modeControl.segmentStyle = .texturedSquare
+        modeControl.segmentStyle = .rounded
         modeControl.selectedSegment = 0
         modeControl.target = self
         modeControl.action = #selector(changeMode(_:))
@@ -501,7 +572,9 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
             statusLabel.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
             modeControl.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -8),
             modeControl.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
-            statusMetaLabel.trailingAnchor.constraint(equalTo: modeControl.leadingAnchor, constant: -12),
+            statusMetaLabel.trailingAnchor.constraint(
+                equalTo: modeControl.leadingAnchor, constant: -12
+            ),
             statusMetaLabel.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
             statusLabel.trailingAnchor.constraint(
                 lessThanOrEqualTo: statusMetaLabel.leadingAnchor, constant: -16
@@ -517,12 +590,57 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
         let index = sender.tag
         guard documents.indices.contains(index) else { return }
         selectedDocumentID = documents[index].id
-        documentsTableView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+        syncSidebarSelection()
         updateVisibleDocument()
+    }
+
+    @objc private func closeTabFromStrip(_ sender: NSButton) {
+        let index = sender.tag
+        guard documents.indices.contains(index) else { return }
+
+        if documents[index].isDirty {
+            let alert = NSAlert()
+            alert.messageText = "Save \"\(documents[index].title)\"?"
+            alert.informativeText = "Your changes will be lost if you don't save."
+            alert.addButton(withTitle: "Save")
+            alert.addButton(withTitle: "Don't Save")
+            alert.addButton(withTitle: "Cancel")
+            alert.alertStyle = .warning
+            alert.beginSheetModal(for: view.window!) { [weak self] response in
+                guard let self else { return }
+                switch response {
+                case .alertFirstButtonReturn:  // Save
+                    self.saveDocument(nil)
+                    self.closeDocument(at: index)
+                case .alertSecondButtonReturn: // Don't Save
+                    self.closeDocument(at: index)
+                default:
+                    break
+                }
+            }
+        } else {
+            closeDocument(at: index)
+        }
     }
 
     @objc private func createTabFromStrip(_ sender: Any?) {
         newDocument(sender)
+    }
+
+    private func closeDocument(at index: Int) {
+        let wasSelected = documents[index].id == selectedDocumentID
+        documents.remove(at: index)
+
+        if wasSelected {
+            if documents.isEmpty {
+                selectedDocumentID = nil
+            } else {
+                let newIndex = max(0, min(index, documents.count - 1))
+                selectedDocumentID = documents[newIndex].id
+            }
+        }
+
+        refreshAll()
     }
 
     private func refreshTabStrip() {
@@ -558,13 +676,24 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
         ).cgColor
         container.translatesAutoresizingMaskIntoConstraints = false
 
-        let btn = NSButton(title: title, target: self, action: #selector(selectTabFromStrip(_:)))
-        btn.tag = index
-        btn.isBordered = false
-        btn.font = NSFont.systemFont(ofSize: 12, weight: isActive ? .medium : .regular)
-        btn.contentTintColor = isActive ? AppPalette.textPrimary : AppPalette.textMuted
-        btn.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(btn)
+        let titleBtn = NSButton(title: title, target: self,
+                                action: #selector(selectTabFromStrip(_:)))
+        titleBtn.tag = index
+        titleBtn.isBordered = false
+        titleBtn.font = NSFont.systemFont(ofSize: 12, weight: isActive ? .medium : .regular)
+        titleBtn.contentTintColor = isActive ? AppPalette.textPrimary : AppPalette.textMuted
+        titleBtn.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(titleBtn)
+
+        let closeBtn = NSButton(title: "×", target: self,
+                                action: #selector(closeTabFromStrip(_:)))
+        closeBtn.tag = index
+        closeBtn.isBordered = false
+        closeBtn.font = NSFont.systemFont(ofSize: 12, weight: .regular)
+        closeBtn.contentTintColor = isActive ? AppPalette.textMuted : AppPalette.textMuted
+            .withAlphaComponent(0.4)
+        closeBtn.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(closeBtn)
 
         // Active underline
         let indicator = NSView()
@@ -576,10 +705,12 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
         container.addSubview(indicator)
 
         NSLayoutConstraint.activate([
-            btn.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
-            btn.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
-            btn.topAnchor.constraint(equalTo: container.topAnchor),
-            btn.bottomAnchor.constraint(equalTo: indicator.topAnchor),
+            titleBtn.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
+            titleBtn.centerYAnchor.constraint(equalTo: container.centerYAnchor, constant: -1),
+            closeBtn.leadingAnchor.constraint(equalTo: titleBtn.trailingAnchor, constant: 2),
+            closeBtn.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -6),
+            closeBtn.centerYAnchor.constraint(equalTo: container.centerYAnchor, constant: -1),
+            closeBtn.widthAnchor.constraint(equalToConstant: 16),
             indicator.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             indicator.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             indicator.bottomAnchor.constraint(equalTo: container.bottomAnchor),
@@ -589,6 +720,45 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
         ])
 
         return container
+    }
+
+    // MARK: Sidebar data
+
+    private func rebuildSidebarRows() {
+        var rows: [SidebarRow] = []
+
+        rows.append(.header("OPEN"))
+        for i in documents.indices { rows.append(.openDoc(i)) }
+
+        let openURLs = Set(documents.compactMap(\.url))
+        let recent = NSDocumentController.shared.recentDocumentURLs
+            .filter { !openURLs.contains($0) }
+            .prefix(8)
+
+        if !recent.isEmpty {
+            rows.append(.header("RECENT"))
+            recent.forEach { rows.append(.recent($0)) }
+        }
+
+        sidebarRows = rows
+        sidebarTable.reloadData()
+        syncSidebarSelection()
+    }
+
+    private func syncSidebarSelection() {
+        guard let id = selectedDocumentID else {
+            sidebarTable.deselectAll(nil)
+            return
+        }
+        let row = sidebarRows.firstIndex {
+            if case .openDoc(let i) = $0,
+               documents.indices.contains(i),
+               documents[i].id == id { return true }
+            return false
+        }
+        if let row {
+            sidebarTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        }
     }
 
     // MARK: Document management
@@ -603,9 +773,14 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
         let doc = EditorDocument.untitled()
         documents = [doc]
         selectedDocumentID = doc.id
-        documentsTableView.reloadData()
-        documentsTableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        refreshAll()
+    }
+
+    /// Rebuild sidebar + tab strip + visible document in one call.
+    private func refreshAll() {
+        rebuildSidebarRows()
         refreshTabStrip()
+        updateVisibleDocument()
     }
 
     private func updateVisibleDocument() {
@@ -615,7 +790,7 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
             editorScrollView.isHidden = false
             statusLabel.stringValue = "No document"
             statusMetaLabel.stringValue = ""
-            refreshTabStrip()
+            modeControl.selectedSegment = mode.rawValue
             return
         }
 
@@ -625,7 +800,6 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
         statusLabel.stringValue = doc.url?.path(percentEncoded: false) ?? "Untitled draft"
         statusMetaLabel.stringValue = statusSummary(for: doc)
         updateWindowTitle()
-        refreshTabStrip()
         isSwitchingDocuments = false
     }
 
@@ -663,11 +837,7 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
                 statusLabel.stringValue = "Failed to open: \(error.localizedDescription)"
             }
         }
-        documentsTableView.reloadData()
-        if let index = selectedDocumentIndex {
-            documentsTableView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
-        }
-        updateVisibleDocument()
+        refreshAll()
     }
 
     private func writeDocument(at index: Int, to url: URL) {
@@ -678,8 +848,7 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
             documents[index].isDirty = false
             statusLabel.stringValue = "Saved \(url.lastPathComponent)"
             NSDocumentController.shared.noteNewRecentDocumentURL(url)
-            documentsTableView.reloadData()
-            updateVisibleDocument()
+            refreshAll()
         } catch {
             statusLabel.stringValue = "Save failed: \(error.localizedDescription)"
         }
@@ -764,17 +933,19 @@ private final class FlatSplitView: NSSplitView {
     override var dividerColor: NSColor { AppPalette.border }
 }
 
-// MARK: - FlatTableRowView
+// MARK: - Row views
 
+/// Selection row: accent at 15% opacity.
 private final class FlatTableRowView: NSTableRowView {
     override func drawSelection(in dirtyRect: NSRect) {
         AppPalette.accent.withAlphaComponent(0.15).setFill()
         NSBezierPath.fill(bounds)
     }
+    override var isEmphasized: Bool { get { false } set {} }
+}
 
-    // Prevent AppKit from overriding our draw with its own emphasis style.
-    override var isEmphasized: Bool {
-        get { false }
-        set {}
-    }
+/// Header row: no selection highlight.
+private final class TransparentTableRowView: NSTableRowView {
+    override func drawSelection(in dirtyRect: NSRect) {}
+    override var isEmphasized: Bool { get { false } set {} }
 }
