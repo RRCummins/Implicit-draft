@@ -1,11 +1,10 @@
-//
-//  ViewController.swift
-//  implicit
-//
-//  Created by Ryan Cummins on 3/28/26.
-//
+// ViewController.swift
+// Single-window flat layout for Implicit Standalone.
+// Phase 1: design system wired in, header removed, editor card/margins gone.
 
 import Cocoa
+
+// MARK: - Data model
 
 private struct EditorDocument {
     let id: UUID
@@ -15,18 +14,10 @@ private struct EditorDocument {
     var isDirty: Bool
 
     static func untitled() -> EditorDocument {
-        EditorDocument(
-            id: UUID(),
-            url: nil,
-            title: "Untitled",
-            text: "",
-            isDirty: false
-        )
+        EditorDocument(id: UUID(), url: nil, title: "Untitled", text: "", isDirty: false)
     }
 
-    var displayTitle: String {
-        isDirty ? "\(title) •" : title
-    }
+    var displayTitle: String { isDirty ? "\(title) ●" : title }
 }
 
 private enum EditorMode: Int {
@@ -34,49 +25,37 @@ private enum EditorMode: Int {
     case preview = 1
 }
 
-final class ViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSTextViewDelegate, NSMenuItemValidation {
-    private enum Metrics {
-        static let sidebarWidth: CGFloat = 220
-        static let headerHeight: CGFloat = 52
-        static let tabStripHeight: CGFloat = 42
-        static let statusHeight: CGFloat = 28
-        static let inset: CGFloat = 18
-        static let cornerRadius: CGFloat = 14
-        static let previewTextWidth: CGFloat = 760
-    }
+// MARK: - ViewController
 
-    private enum Palette {
-        static let window = NSColor(calibratedWhite: 0.11, alpha: 1)
-        static let canvas = NSColor(calibratedWhite: 0.08, alpha: 1)
-        static let editor = NSColor(calibratedWhite: 0.12, alpha: 1)
-        static let border = NSColor(calibratedWhite: 0.22, alpha: 1)
-        static let caret = NSColor(calibratedRed: 0.91, green: 0.80, blue: 0.57, alpha: 1)
-    }
-
-    private let splitView = NSSplitView()
+final class ViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate,
+                             NSTextViewDelegate, NSMenuItemValidation {
+    // MARK: Subviews
+    private let splitView          = FlatSplitView()
     private let documentsTableView = NSTableView(frame: .zero)
-    private let editorTextView = NSTextView(frame: .zero)
-    private let editorScrollView = NSScrollView()
-    private let tabStripStack = NSStackView()
-    private let titleLabel = NSTextField(labelWithString: "Implicit")
-    private let subtitleLabel = NSTextField(labelWithString: "Standalone macOS editor")
-    private let pathLabel = NSTextField(labelWithString: "Untitled draft")
-    private let statusLabel = NSTextField(labelWithString: "Ready")
-    private let sidebarMetaLabel = NSTextField(labelWithString: "0 documents")
-    private let newButton = NSButton(title: "New", target: nil, action: nil)
-    private let openButton = NSButton(title: "Open", target: nil, action: nil)
-    private let saveButton = NSButton(title: "Save", target: nil, action: nil)
-    private let emptyStateView = NSVisualEffectView()
-    private let emptyTitleLabel = NSTextField(labelWithString: "Start a draft")
-    private let emptyBodyLabel = NSTextField(labelWithString: "Write immediately, or open an existing note into this workspace.")
-    private let emptyOpenButton = NSButton(title: "Open File", target: nil, action: nil)
-    private let modeControl = NSSegmentedControl(labels: ["Source", "Preview"], trackingMode: .selectOne, target: nil, action: nil)
+    private let editorTextView     = NSTextView(frame: .zero)
+    private let editorScrollView   = NSScrollView()
+    private let tabStripStack      = NSStackView()
+    private let statusLabel        = NSTextField(labelWithString: "Untitled draft")
+    private let statusMetaLabel    = NSTextField(labelWithString: "Source · Markdown · Saved")
+    private let modeControl        = NSSegmentedControl(
+        labels: ["Source", "Preview"], trackingMode: .selectOne, target: nil, action: nil
+    )
+    private let emptyContainer     = NSView()
+    private let emptyTitleLabel    = NSTextField(labelWithString: "Start a draft")
+    private let emptyBodyLabel     = NSTextField(
+        labelWithString: "Write immediately, or open an existing file."
+    )
+    private let emptyOpenButton    = NSButton(title: "Open File →", target: nil, action: nil)
 
-    private var documents: [EditorDocument] = []
-    private var selectedDocumentID: UUID?
-    private var isSwitchingDocuments = false
-    private var mode: EditorMode = .source
-    private var didSetInitialSplit = false
+    // MARK: State
+    private var documents:            [EditorDocument] = []
+    private var selectedDocumentID:   UUID?
+    private var isSwitchingDocuments: Bool = false
+    private var mode:                 EditorMode = .source
+    private var didSetInitialSplit:   Bool = false
+    private var theme:                ImplicitTheme = ImplicitThemeLoader.load()
+
+    // MARK: Lifecycle
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -91,33 +70,30 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.isMovableByWindowBackground = true
-        window.backgroundColor = Palette.window
+        window.backgroundColor = AppPalette.windowBg
         window.appearance = NSAppearance(named: .darkAqua)
     }
 
     override func viewDidLayout() {
         super.viewDidLayout()
         guard !didSetInitialSplit, splitView.subviews.count > 1 else { return }
-        splitView.setPosition(Metrics.sidebarWidth, ofDividerAt: 0)
+        splitView.setPosition(AppMetrics.sidebarWidth, ofDividerAt: 0)
         didSetInitialSplit = true
     }
 
-    func applicationOpenFiles(_ urls: [URL]) {
-        openDocuments(urls)
-    }
+    // MARK: App delegate bridge
 
-    func applicationCreateNewDocument() {
-        newDocument(nil)
-    }
+    func applicationOpenFiles(_ urls: [URL]) { openDocuments(urls) }
+    func applicationCreateNewDocument()      { newDocument(nil) }
 
-    override var representedObject: Any? {
-        didSet {}
-    }
+    override var representedObject: Any? { didSet {} }
+
+    // MARK: Actions
 
     @IBAction func newDocument(_ sender: Any?) {
-        let document = EditorDocument.untitled()
-        documents.insert(document, at: 0)
-        selectedDocumentID = document.id
+        let doc = EditorDocument.untitled()
+        documents.insert(doc, at: 0)
+        selectedDocumentID = doc.id
         documentsTableView.reloadData()
         documentsTableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         updateVisibleDocument()
@@ -125,10 +101,8 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
 
     @IBAction func openDocument(_ sender: Any?) {
         let panel = NSOpenPanel()
-        panel.canChooseDirectories = false
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = true
-        panel.allowedContentTypes = []
         panel.beginSheetModal(for: view.window!) { [weak self] response in
             guard response == .OK else { return }
             self?.openDocuments(panel.urls)
@@ -163,9 +137,8 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
             documents[index].isDirty = false
             statusLabel.stringValue = "Reverted \(documents[index].title)"
             updateVisibleDocument()
-            noteRecent(url)
         } catch {
-            statusLabel.stringValue = "Failed to revert: \(error.localizedDescription)"
+            statusLabel.stringValue = "Error: \(error.localizedDescription)"
         }
     }
 
@@ -173,6 +146,8 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
         mode = EditorMode(rawValue: modeControl.selectedSegment) ?? .source
         updateVisibleDocument()
     }
+
+    // MARK: Menu validation
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
@@ -185,37 +160,45 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
         }
     }
 
-    func numberOfRows(in tableView: NSTableView) -> Int {
-        documents.count
-    }
+    // MARK: NSTableViewDataSource
 
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let identifier = NSUserInterfaceItemIdentifier("DocumentCell")
-        let textField: NSTextField
-        if let cell = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTextField {
-            textField = cell
+    func numberOfRows(in tableView: NSTableView) -> Int { documents.count }
+
+    func tableView(
+        _ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int
+    ) -> NSView? {
+        let cellID = NSUserInterfaceItemIdentifier("DocRow")
+        let cell: NSTableCellView
+        if let existing = tableView.makeView(withIdentifier: cellID, owner: self) as? NSTableCellView {
+            cell = existing
         } else {
-            textField = NSTextField(labelWithString: "")
-            textField.identifier = identifier
-            textField.font = NSFont.systemFont(ofSize: 13, weight: .medium)
-            textField.textColor = .labelColor
-            textField.lineBreakMode = .byTruncatingMiddle
-            textField.translatesAutoresizingMaskIntoConstraints = false
-
-            let container = NSTableCellView()
-            container.identifier = identifier
-            container.addSubview(textField)
+            cell = NSTableCellView()
+            cell.identifier = cellID
+            let tf = NSTextField(labelWithString: "")
+            tf.identifier = NSUserInterfaceItemIdentifier("DocLabel")
+            tf.font = NSFont.systemFont(ofSize: AppMetrics.bodyFontSize, weight: .regular)
+            tf.lineBreakMode = .byTruncatingMiddle
+            tf.translatesAutoresizingMaskIntoConstraints = false
+            cell.addSubview(tf)
             NSLayoutConstraint.activate([
-                textField.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 14),
-                textField.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
-                textField.centerYAnchor.constraint(equalTo: container.centerYAnchor)
+                tf.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 12),
+                tf.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
+                tf.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
             ])
-            return container
         }
-
-        textField.stringValue = documents[row].displayTitle
-        return textField.superview
+        if let tf = cell.subviews.compactMap({ $0 as? NSTextField }).first {
+            let isSelected = documents[row].id == selectedDocumentID
+            tf.stringValue = documents[row].displayTitle
+            tf.textColor = isSelected ? AppPalette.textPrimary : AppPalette.textMuted
+        }
+        return cell
     }
+
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+        FlatTableRowView()
+    }
+
+    // MARK: NSTableViewDelegate
 
     func tableViewSelectionDidChange(_ notification: Notification) {
         let row = documentsTableView.selectedRow
@@ -224,145 +207,86 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
         updateVisibleDocument()
     }
 
+    // MARK: NSTextViewDelegate
+
     func textDidChange(_ notification: Notification) {
         guard !isSwitchingDocuments, let index = selectedDocumentIndex else { return }
         documents[index].text = editorTextView.string
         documents[index].isDirty = true
-        titleLabel.stringValue = documents[index].displayTitle
         updateWindowTitle()
         documentsTableView.reloadData()
-        statusLabel.stringValue = "Edited \(documents[index].title)"
+        refreshTabStrip()
+        updateStatusBar()
     }
 
-    private var selectedDocumentIndex: Int? {
-        guard let selectedDocumentID else { return nil }
-        return documents.firstIndex { $0.id == selectedDocumentID }
-    }
+    // MARK: Interface construction
 
     private func buildInterface() {
         view.wantsLayer = true
-        view.layer?.backgroundColor = Palette.window.cgColor
+        view.layer?.backgroundColor = AppPalette.windowBg.cgColor
 
         let root = NSStackView()
         root.orientation = .vertical
-        root.translatesAutoresizingMaskIntoConstraints = false
         root.spacing = 0
+        root.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(root)
 
-        let header = makeHeaderView()
-        let tabStrip = makeTabStripView()
-        let body = makeBodyView()
-        let status = makeStatusView()
+        let tabBar    = makeTabBar()
+        let body      = makeBody()
+        let statusBar = makeStatusBar()
 
-        root.addArrangedSubview(header)
-        root.addArrangedSubview(tabStrip)
+        root.addArrangedSubview(tabBar)
         root.addArrangedSubview(body)
-        root.addArrangedSubview(status)
+        root.addArrangedSubview(statusBar)
 
         NSLayoutConstraint.activate([
             root.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             root.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             root.topAnchor.constraint(equalTo: view.topAnchor),
             root.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            header.heightAnchor.constraint(equalToConstant: Metrics.headerHeight),
-            tabStrip.heightAnchor.constraint(equalToConstant: Metrics.tabStripHeight),
-            status.heightAnchor.constraint(equalToConstant: Metrics.statusHeight)
+            tabBar.heightAnchor.constraint(equalToConstant: AppMetrics.tabBarHeight),
+            statusBar.heightAnchor.constraint(equalToConstant: AppMetrics.statusBarHeight),
         ])
     }
 
-    private func makeHeaderView() -> NSView {
-        let header = NSVisualEffectView()
-        header.material = .headerView
-        header.blendingMode = .behindWindow
-        header.state = .active
+    // MARK: Tab bar
 
-        let stack = NSStackView()
-        stack.orientation = .horizontal
-        stack.alignment = .centerY
-        stack.distribution = .fill
-        stack.spacing = 12
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        header.addSubview(stack)
-
-        let titleStack = NSStackView()
-        titleStack.orientation = .vertical
-        titleStack.spacing = 1
-        titleStack.translatesAutoresizingMaskIntoConstraints = false
-
-        titleLabel.font = NSFont.systemFont(ofSize: 18, weight: .semibold)
-        titleLabel.textColor = .labelColor
-        subtitleLabel.font = NSFont.systemFont(ofSize: 11, weight: .medium)
-        subtitleLabel.textColor = .secondaryLabelColor
-        titleStack.addArrangedSubview(titleLabel)
-        titleStack.addArrangedSubview(subtitleLabel)
-
-        let spacer = NSView()
-        spacer.translatesAutoresizingMaskIntoConstraints = false
-
-        modeControl.segmentStyle = .texturedRounded
-        modeControl.controlSize = .small
-        modeControl.selectedSegment = 0
-        modeControl.target = self
-        modeControl.action = #selector(changeMode(_:))
-
-        stack.addArrangedSubview(titleStack)
-        stack.addArrangedSubview(spacer)
-        stack.addArrangedSubview(modeControl)
-
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: Metrics.inset),
-            stack.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -Metrics.inset),
-            stack.topAnchor.constraint(equalTo: header.topAnchor, constant: 8),
-            stack.bottomAnchor.constraint(equalTo: header.bottomAnchor, constant: -8)
-        ])
-
-        return header
-    }
-
-    private func makeTabStripView() -> NSView {
-        let tabStrip = NSVisualEffectView()
-        tabStrip.material = .headerView
-        tabStrip.blendingMode = .behindWindow
-        tabStrip.state = .active
-
-        let scrollView = NSScrollView()
-        scrollView.drawsBackground = false
-        scrollView.hasHorizontalScroller = true
-        scrollView.hasVerticalScroller = false
-        scrollView.borderType = .noBorder
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
-        tabStrip.addSubview(scrollView)
-
-        let content = NSView()
-        content.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.documentView = content
+    private func makeTabBar() -> NSView {
+        let bar = NSView()
+        bar.wantsLayer = true
+        bar.layer?.backgroundColor = AppPalette.tabBarBg.cgColor
 
         tabStripStack.orientation = .horizontal
         tabStripStack.alignment = .centerY
-        tabStripStack.spacing = 8
+        tabStripStack.spacing = 2
         tabStripStack.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(tabStripStack)
+        bar.addSubview(tabStripStack)
+
+        let bottomBorder = NSView()
+        bottomBorder.wantsLayer = true
+        bottomBorder.layer?.backgroundColor = AppPalette.border.cgColor
+        bottomBorder.translatesAutoresizingMaskIntoConstraints = false
+        bar.addSubview(bottomBorder)
 
         NSLayoutConstraint.activate([
-            scrollView.leadingAnchor.constraint(equalTo: tabStrip.leadingAnchor, constant: Metrics.inset),
-            scrollView.trailingAnchor.constraint(equalTo: tabStrip.trailingAnchor, constant: -Metrics.inset),
-            scrollView.topAnchor.constraint(equalTo: tabStrip.topAnchor, constant: 6),
-            scrollView.bottomAnchor.constraint(equalTo: tabStrip.bottomAnchor, constant: -6),
-            content.leadingAnchor.constraint(equalTo: scrollView.contentView.leadingAnchor),
-            content.trailingAnchor.constraint(equalTo: scrollView.contentView.trailingAnchor),
-            content.topAnchor.constraint(equalTo: scrollView.contentView.topAnchor),
-            content.bottomAnchor.constraint(equalTo: scrollView.contentView.bottomAnchor),
-            content.heightAnchor.constraint(equalTo: scrollView.contentView.heightAnchor),
-            tabStripStack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            tabStripStack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            tabStripStack.topAnchor.constraint(equalTo: content.topAnchor),
-            tabStripStack.bottomAnchor.constraint(equalTo: content.bottomAnchor)
+            tabStripStack.leadingAnchor.constraint(
+                equalTo: bar.leadingAnchor, constant: AppMetrics.tabBarLeadInset
+            ),
+            tabStripStack.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -8),
+            tabStripStack.topAnchor.constraint(equalTo: bar.topAnchor),
+            tabStripStack.bottomAnchor.constraint(equalTo: bar.bottomAnchor, constant: -1),
+            bottomBorder.leadingAnchor.constraint(equalTo: bar.leadingAnchor),
+            bottomBorder.trailingAnchor.constraint(equalTo: bar.trailingAnchor),
+            bottomBorder.bottomAnchor.constraint(equalTo: bar.bottomAnchor),
+            bottomBorder.heightAnchor.constraint(equalToConstant: 1),
         ])
 
-        return tabStrip
+        return bar
     }
 
-    private func makeBodyView() -> NSView {
+    // MARK: Body (sidebar + editor)
+
+    private func makeBody() -> NSView {
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
 
@@ -371,189 +295,11 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
         splitView.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(splitView)
 
-        let sidebarContainer = NSVisualEffectView()
-        sidebarContainer.material = .sidebar
-        sidebarContainer.blendingMode = .behindWindow
-        sidebarContainer.state = .active
+        let sidebarView = makeSidebar()
+        let editorView  = makeEditor()
 
-        let sidebarHeader = NSTextField(labelWithString: "Documents")
-        sidebarHeader.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
-        sidebarHeader.textColor = .secondaryLabelColor
-        sidebarHeader.translatesAutoresizingMaskIntoConstraints = false
-
-        let sidebarActionRow = NSStackView()
-        sidebarActionRow.orientation = .horizontal
-        sidebarActionRow.alignment = .centerY
-        sidebarActionRow.spacing = 8
-        sidebarActionRow.translatesAutoresizingMaskIntoConstraints = false
-
-        configureHeaderButton(newButton, action: #selector(newDocument(_:)))
-        configureHeaderButton(openButton, action: #selector(openDocument(_:)))
-        configureHeaderButton(saveButton, action: #selector(saveDocument(_:)))
-
-        sidebarActionRow.addArrangedSubview(newButton)
-        sidebarActionRow.addArrangedSubview(openButton)
-        sidebarActionRow.addArrangedSubview(saveButton)
-
-        let sidebarHeaderRow = NSStackView()
-        sidebarHeaderRow.orientation = .horizontal
-        sidebarHeaderRow.alignment = .centerY
-        sidebarHeaderRow.distribution = .fill
-        sidebarHeaderRow.spacing = 8
-        sidebarHeaderRow.translatesAutoresizingMaskIntoConstraints = false
-
-        let sidebarSpacer = NSView()
-        sidebarSpacer.translatesAutoresizingMaskIntoConstraints = false
-        sidebarMetaLabel.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-        sidebarMetaLabel.textColor = .tertiaryLabelColor
-
-        sidebarHeaderRow.addArrangedSubview(sidebarHeader)
-        sidebarHeaderRow.addArrangedSubview(sidebarSpacer)
-        sidebarHeaderRow.addArrangedSubview(sidebarMetaLabel)
-
-        let sidebarSection = NSView()
-        sidebarSection.wantsLayer = true
-        sidebarSection.layer?.cornerRadius = Metrics.cornerRadius - 4
-        sidebarSection.layer?.borderWidth = 1
-        sidebarSection.layer?.borderColor = Palette.border.cgColor
-        sidebarSection.layer?.backgroundColor = NSColor(calibratedWhite: 0.13, alpha: 0.9).cgColor
-        sidebarSection.translatesAutoresizingMaskIntoConstraints = false
-        sidebarContainer.addSubview(sidebarSection)
-
-        documentsTableView.headerView = nil
-        documentsTableView.style = .sourceList
-        documentsTableView.selectionHighlightStyle = .regular
-        documentsTableView.rowHeight = 32
-        documentsTableView.focusRingType = .none
-        documentsTableView.backgroundColor = .clear
-        documentsTableView.intercellSpacing = NSSize(width: 0, height: 4)
-        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("documents"))
-        documentsTableView.addTableColumn(column)
-        documentsTableView.delegate = self
-        documentsTableView.dataSource = self
-
-        let sidebarScroll = NSScrollView()
-        sidebarScroll.hasVerticalScroller = true
-        sidebarScroll.drawsBackground = false
-        sidebarScroll.translatesAutoresizingMaskIntoConstraints = false
-        sidebarScroll.documentView = documentsTableView
-        sidebarSection.addSubview(sidebarScroll)
-
-        let sidebarStack = NSStackView(views: [sidebarActionRow, sidebarHeaderRow, sidebarSection])
-        sidebarStack.orientation = .vertical
-        sidebarStack.spacing = 14
-        sidebarStack.translatesAutoresizingMaskIntoConstraints = false
-        sidebarContainer.addSubview(sidebarStack)
-
-        NSLayoutConstraint.activate([
-            sidebarStack.leadingAnchor.constraint(equalTo: sidebarContainer.leadingAnchor, constant: 14),
-            sidebarStack.trailingAnchor.constraint(equalTo: sidebarContainer.trailingAnchor, constant: -14),
-            sidebarStack.topAnchor.constraint(equalTo: sidebarContainer.topAnchor, constant: 14),
-            sidebarStack.bottomAnchor.constraint(equalTo: sidebarContainer.bottomAnchor, constant: -14),
-            sidebarScroll.leadingAnchor.constraint(equalTo: sidebarSection.leadingAnchor, constant: 4),
-            sidebarScroll.trailingAnchor.constraint(equalTo: sidebarSection.trailingAnchor, constant: -4),
-            sidebarScroll.topAnchor.constraint(equalTo: sidebarSection.topAnchor, constant: 6),
-            sidebarScroll.bottomAnchor.constraint(equalTo: sidebarSection.bottomAnchor, constant: -6)
-        ])
-
-        let editorContainer = NSView()
-        editorContainer.wantsLayer = true
-        editorContainer.layer?.backgroundColor = Palette.canvas.cgColor
-
-        let editorCard = NSVisualEffectView()
-        editorCard.material = .windowBackground
-        editorCard.blendingMode = .withinWindow
-        editorCard.state = .active
-        editorCard.wantsLayer = true
-        editorCard.layer?.cornerRadius = Metrics.cornerRadius
-        editorCard.layer?.borderWidth = 1
-        editorCard.layer?.borderColor = Palette.border.cgColor
-        editorCard.layer?.backgroundColor = Palette.editor.cgColor
-        editorCard.translatesAutoresizingMaskIntoConstraints = false
-        editorContainer.addSubview(editorCard)
-
-        pathLabel.font = NSFont.systemFont(ofSize: 12, weight: .medium)
-        pathLabel.textColor = .secondaryLabelColor
-        pathLabel.translatesAutoresizingMaskIntoConstraints = false
-        editorCard.addSubview(pathLabel)
-
-        editorScrollView.hasVerticalScroller = true
-        editorScrollView.hasHorizontalScroller = true
-        editorScrollView.borderType = .noBorder
-        editorScrollView.drawsBackground = false
-        editorScrollView.translatesAutoresizingMaskIntoConstraints = false
-        editorCard.addSubview(editorScrollView)
-
-        editorTextView.isRichText = false
-        editorTextView.isAutomaticQuoteSubstitutionEnabled = false
-        editorTextView.isAutomaticDataDetectionEnabled = false
-        editorTextView.isContinuousSpellCheckingEnabled = false
-        editorTextView.usesFindBar = true
-        editorTextView.font = NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
-        editorTextView.textColor = .labelColor
-        editorTextView.backgroundColor = Palette.editor
-        editorTextView.insertionPointColor = Palette.caret
-        editorTextView.allowsUndo = true
-        editorTextView.textContainerInset = NSSize(width: 14, height: 14)
-        editorTextView.isHorizontallyResizable = true
-        editorTextView.isVerticallyResizable = true
-        editorTextView.delegate = self
-        editorScrollView.documentView = editorTextView
-
-        emptyStateView.material = .menu
-        emptyStateView.blendingMode = .withinWindow
-        emptyStateView.state = .active
-        emptyStateView.wantsLayer = true
-        emptyStateView.layer?.cornerRadius = Metrics.cornerRadius
-        emptyStateView.layer?.borderWidth = 1
-        emptyStateView.layer?.borderColor = Palette.border.cgColor
-        emptyStateView.translatesAutoresizingMaskIntoConstraints = false
-        editorCard.addSubview(emptyStateView)
-
-        let emptyStack = NSStackView()
-        emptyStack.orientation = .vertical
-        emptyStack.alignment = .leading
-        emptyStack.spacing = 10
-        emptyStack.translatesAutoresizingMaskIntoConstraints = false
-        emptyStateView.addSubview(emptyStack)
-
-        emptyTitleLabel.font = NSFont.systemFont(ofSize: 22, weight: .semibold)
-        emptyTitleLabel.textColor = .labelColor
-
-        emptyBodyLabel.font = NSFont.systemFont(ofSize: 13, weight: .regular)
-        emptyBodyLabel.textColor = .secondaryLabelColor
-        emptyBodyLabel.maximumNumberOfLines = 0
-        emptyBodyLabel.lineBreakMode = .byWordWrapping
-
-        configureHeaderButton(emptyOpenButton, action: #selector(openDocument(_:)))
-
-        emptyStack.addArrangedSubview(emptyTitleLabel)
-        emptyStack.addArrangedSubview(emptyBodyLabel)
-        emptyStack.addArrangedSubview(emptyOpenButton)
-
-        NSLayoutConstraint.activate([
-            editorCard.leadingAnchor.constraint(equalTo: editorContainer.leadingAnchor, constant: Metrics.inset),
-            editorCard.trailingAnchor.constraint(equalTo: editorContainer.trailingAnchor, constant: -Metrics.inset),
-            editorCard.topAnchor.constraint(equalTo: editorContainer.topAnchor, constant: Metrics.inset),
-            editorCard.bottomAnchor.constraint(equalTo: editorContainer.bottomAnchor, constant: -Metrics.inset),
-            pathLabel.leadingAnchor.constraint(equalTo: editorCard.leadingAnchor, constant: 18),
-            pathLabel.trailingAnchor.constraint(equalTo: editorCard.trailingAnchor, constant: -18),
-            pathLabel.topAnchor.constraint(equalTo: editorCard.topAnchor, constant: 14),
-            editorScrollView.leadingAnchor.constraint(equalTo: editorCard.leadingAnchor, constant: 10),
-            editorScrollView.trailingAnchor.constraint(equalTo: editorCard.trailingAnchor, constant: -10),
-            editorScrollView.topAnchor.constraint(equalTo: pathLabel.bottomAnchor, constant: 10),
-            editorScrollView.bottomAnchor.constraint(equalTo: editorCard.bottomAnchor, constant: -10),
-            emptyStateView.centerXAnchor.constraint(equalTo: editorCard.centerXAnchor),
-            emptyStateView.centerYAnchor.constraint(equalTo: editorCard.centerYAnchor),
-            emptyStateView.widthAnchor.constraint(equalToConstant: 420),
-            emptyStack.leadingAnchor.constraint(equalTo: emptyStateView.leadingAnchor, constant: 22),
-            emptyStack.trailingAnchor.constraint(equalTo: emptyStateView.trailingAnchor, constant: -22),
-            emptyStack.topAnchor.constraint(equalTo: emptyStateView.topAnchor, constant: 22),
-            emptyStack.bottomAnchor.constraint(equalTo: emptyStateView.bottomAnchor, constant: -22)
-        ])
-
-        splitView.addArrangedSubview(sidebarContainer)
-        splitView.addArrangedSubview(editorContainer)
+        splitView.addArrangedSubview(sidebarView)
+        splitView.addArrangedSubview(editorView)
         splitView.setHoldingPriority(.defaultLow, forSubviewAt: 0)
 
         NSLayoutConstraint.activate([
@@ -561,44 +307,302 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
             splitView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             splitView.topAnchor.constraint(equalTo: container.topAnchor),
             splitView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            sidebarContainer.widthAnchor.constraint(equalToConstant: Metrics.sidebarWidth)
+            sidebarView.widthAnchor.constraint(equalToConstant: AppMetrics.sidebarWidth),
         ])
 
         return container
     }
 
-    private func makeStatusView() -> NSView {
-        let status = NSVisualEffectView()
-        status.material = .headerView
-        status.blendingMode = .behindWindow
-        status.state = .active
+    // MARK: Sidebar
 
-        statusLabel.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
-        statusLabel.textColor = .secondaryLabelColor
-        statusLabel.translatesAutoresizingMaskIntoConstraints = false
-        status.addSubview(statusLabel)
+    private func makeSidebar() -> NSView {
+        let sidebar = NSView()
+        sidebar.wantsLayer = true
+        sidebar.layer?.backgroundColor = AppPalette.sidebarBg.cgColor
+
+        let sectionHeader = NSTextField(labelWithString: "DOCUMENTS")
+        sectionHeader.font = NSFont.systemFont(ofSize: 10, weight: .semibold)
+        sectionHeader.textColor = AppPalette.textMuted
+        sectionHeader.translatesAutoresizingMaskIntoConstraints = false
+        sidebar.addSubview(sectionHeader)
+
+        documentsTableView.headerView = nil
+        documentsTableView.style = .plain
+        documentsTableView.rowHeight = AppMetrics.sidebarRowHeight
+        documentsTableView.focusRingType = .none
+        documentsTableView.backgroundColor = .clear
+        documentsTableView.intercellSpacing = .zero
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("documents"))
+        documentsTableView.addTableColumn(column)
+        documentsTableView.delegate = self
+        documentsTableView.dataSource = self
+
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.documentView = documentsTableView
+        sidebar.addSubview(scroll)
+
+        // Right-edge border (avoids relying on NSSplitView's divider color)
+        let rightBorder = NSView()
+        rightBorder.wantsLayer = true
+        rightBorder.layer?.backgroundColor = AppPalette.border.cgColor
+        rightBorder.translatesAutoresizingMaskIntoConstraints = false
+        sidebar.addSubview(rightBorder)
 
         NSLayoutConstraint.activate([
-            statusLabel.leadingAnchor.constraint(equalTo: status.leadingAnchor, constant: Metrics.inset),
-            statusLabel.trailingAnchor.constraint(equalTo: status.trailingAnchor, constant: -Metrics.inset),
-            statusLabel.centerYAnchor.constraint(equalTo: status.centerYAnchor)
+            sectionHeader.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 12),
+            sectionHeader.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -4),
+            sectionHeader.topAnchor.constraint(equalTo: sidebar.topAnchor, constant: 8),
+            sectionHeader.heightAnchor.constraint(equalToConstant: 28),
+            scroll.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: rightBorder.leadingAnchor),
+            scroll.topAnchor.constraint(equalTo: sectionHeader.bottomAnchor),
+            scroll.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor),
+            rightBorder.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor),
+            rightBorder.topAnchor.constraint(equalTo: sidebar.topAnchor),
+            rightBorder.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor),
+            rightBorder.widthAnchor.constraint(equalToConstant: 1),
         ])
 
-        return status
+        return sidebar
     }
 
-    private func configureHeaderButton(_ button: NSButton, action: Selector) {
-        button.bezelStyle = .texturedRounded
-        button.controlSize = .small
-        button.target = self
-        button.action = action
+    // MARK: Editor
+
+    private func makeEditor() -> NSView {
+        let container = NSView()
+        container.wantsLayer = true
+        container.layer?.backgroundColor = AppPalette.windowBg.cgColor
+
+        // Editor scroll + text view
+        editorScrollView.hasVerticalScroller = true
+        editorScrollView.hasHorizontalScroller = false
+        editorScrollView.borderType = .noBorder
+        editorScrollView.drawsBackground = false
+        editorScrollView.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(editorScrollView)
+
+        editorTextView.isRichText = false
+        editorTextView.isAutomaticQuoteSubstitutionEnabled = false
+        editorTextView.isAutomaticDataDetectionEnabled = false
+        editorTextView.isContinuousSpellCheckingEnabled = false
+        editorTextView.usesFindBar = true
+        editorTextView.font = NSFont.monospacedSystemFont(ofSize: AppMetrics.monoFontSize, weight: .regular)
+        editorTextView.textColor = AppPalette.textPrimary
+        editorTextView.backgroundColor = AppPalette.windowBg
+        editorTextView.insertionPointColor = AppPalette.accent
+        editorTextView.selectedTextAttributes = [
+            .backgroundColor: AppPalette.accent.withAlphaComponent(0.25),
+        ]
+        editorTextView.allowsUndo = true
+        editorTextView.textContainerInset = NSSize(
+            width: AppMetrics.editorInsetH, height: AppMetrics.editorInsetV
+        )
+        editorTextView.isHorizontallyResizable = false
+        editorTextView.isVerticallyResizable = true
+        editorTextView.autoresizingMask = [.width]
+        editorTextView.textContainer?.widthTracksTextView = true
+        editorTextView.delegate = self
+        editorScrollView.documentView = editorTextView
+
+        // Empty state — inline centered content, no card border
+        emptyContainer.wantsLayer = true
+        emptyContainer.layer?.backgroundColor = AppPalette.windowBg.cgColor
+        emptyContainer.isHidden = true
+        emptyContainer.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(emptyContainer)
+
+        let emptyStack = NSStackView()
+        emptyStack.orientation = .vertical
+        emptyStack.alignment = .leading
+        emptyStack.spacing = 10
+        emptyStack.translatesAutoresizingMaskIntoConstraints = false
+        emptyContainer.addSubview(emptyStack)
+
+        emptyTitleLabel.font = NSFont.systemFont(ofSize: 20, weight: .semibold)
+        emptyTitleLabel.textColor = AppPalette.textPrimary
+
+        emptyBodyLabel.font = NSFont.systemFont(ofSize: AppMetrics.bodyFontSize, weight: .regular)
+        emptyBodyLabel.textColor = AppPalette.textMuted
+        emptyBodyLabel.maximumNumberOfLines = 0
+        emptyBodyLabel.lineBreakMode = .byWordWrapping
+
+        emptyOpenButton.isBordered = false
+        emptyOpenButton.font = NSFont.systemFont(ofSize: AppMetrics.bodyFontSize, weight: .medium)
+        emptyOpenButton.contentTintColor = AppPalette.accent
+        emptyOpenButton.target = self
+        emptyOpenButton.action = #selector(openDocument(_:))
+
+        emptyStack.addArrangedSubview(emptyTitleLabel)
+        emptyStack.addArrangedSubview(emptyBodyLabel)
+        emptyStack.addArrangedSubview(emptyOpenButton)
+
+        NSLayoutConstraint.activate([
+            editorScrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            editorScrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            editorScrollView.topAnchor.constraint(equalTo: container.topAnchor),
+            editorScrollView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            emptyContainer.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            emptyContainer.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            emptyContainer.topAnchor.constraint(equalTo: container.topAnchor),
+            emptyContainer.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            emptyStack.leadingAnchor.constraint(
+                equalTo: emptyContainer.leadingAnchor,
+                constant: AppMetrics.editorInsetH + 12
+            ),
+            emptyStack.widthAnchor.constraint(equalToConstant: 380),
+            emptyStack.centerYAnchor.constraint(
+                equalTo: emptyContainer.centerYAnchor, constant: -20
+            ),
+        ])
+
+        return container
+    }
+
+    // MARK: Status bar
+
+    private func makeStatusBar() -> NSView {
+        let bar = NSView()
+        bar.wantsLayer = true
+        bar.layer?.backgroundColor = AppPalette.sidebarBg.cgColor
+
+        let topBorder = NSView()
+        topBorder.wantsLayer = true
+        topBorder.layer?.backgroundColor = AppPalette.border.cgColor
+        topBorder.translatesAutoresizingMaskIntoConstraints = false
+        bar.addSubview(topBorder)
+
+        statusLabel.font = NSFont.systemFont(ofSize: 11, weight: .regular)
+        statusLabel.textColor = AppPalette.textMuted
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        bar.addSubview(statusLabel)
+
+        statusMetaLabel.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        statusMetaLabel.textColor = AppPalette.textMuted
+        statusMetaLabel.translatesAutoresizingMaskIntoConstraints = false
+        bar.addSubview(statusMetaLabel)
+
+        modeControl.controlSize = .mini
+        modeControl.segmentStyle = .texturedSquare
+        modeControl.selectedSegment = 0
+        modeControl.target = self
+        modeControl.action = #selector(changeMode(_:))
+        modeControl.translatesAutoresizingMaskIntoConstraints = false
+        bar.addSubview(modeControl)
+
+        NSLayoutConstraint.activate([
+            topBorder.leadingAnchor.constraint(equalTo: bar.leadingAnchor),
+            topBorder.trailingAnchor.constraint(equalTo: bar.trailingAnchor),
+            topBorder.topAnchor.constraint(equalTo: bar.topAnchor),
+            topBorder.heightAnchor.constraint(equalToConstant: 1),
+            statusLabel.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 12),
+            statusLabel.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            modeControl.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -8),
+            modeControl.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            statusMetaLabel.trailingAnchor.constraint(equalTo: modeControl.leadingAnchor, constant: -12),
+            statusMetaLabel.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            statusLabel.trailingAnchor.constraint(
+                lessThanOrEqualTo: statusMetaLabel.leadingAnchor, constant: -16
+            ),
+        ])
+
+        return bar
+    }
+
+    // MARK: Tab strip
+
+    @objc private func selectTabFromStrip(_ sender: NSButton) {
+        let index = sender.tag
+        guard documents.indices.contains(index) else { return }
+        selectedDocumentID = documents[index].id
+        documentsTableView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+        updateVisibleDocument()
+    }
+
+    @objc private func createTabFromStrip(_ sender: Any?) {
+        newDocument(sender)
+    }
+
+    private func refreshTabStrip() {
+        tabStripStack.arrangedSubviews.forEach {
+            tabStripStack.removeArrangedSubview($0)
+            $0.removeFromSuperview()
+        }
+
+        for (index, doc) in documents.enumerated() {
+            tabStripStack.addArrangedSubview(
+                makeTabItem(title: doc.displayTitle, index: index,
+                            isActive: doc.id == selectedDocumentID)
+            )
+        }
+
+        let addBtn = NSButton(title: "+", target: self, action: #selector(createTabFromStrip(_:)))
+        addBtn.isBordered = false
+        addBtn.font = NSFont.systemFont(ofSize: 16, weight: .light)
+        addBtn.contentTintColor = AppPalette.textMuted
+        addBtn.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            addBtn.widthAnchor.constraint(equalToConstant: 28),
+            addBtn.heightAnchor.constraint(equalToConstant: AppMetrics.tabBarHeight - 1),
+        ])
+        tabStripStack.addArrangedSubview(addBtn)
+    }
+
+    private func makeTabItem(title: String, index: Int, isActive: Bool) -> NSView {
+        let container = NSView()
+        container.wantsLayer = true
+        container.layer?.backgroundColor = (
+            isActive ? AppPalette.tabActiveBg : AppPalette.tabBarBg
+        ).cgColor
+        container.translatesAutoresizingMaskIntoConstraints = false
+
+        let btn = NSButton(title: title, target: self, action: #selector(selectTabFromStrip(_:)))
+        btn.tag = index
+        btn.isBordered = false
+        btn.font = NSFont.systemFont(ofSize: 12, weight: isActive ? .medium : .regular)
+        btn.contentTintColor = isActive ? AppPalette.textPrimary : AppPalette.textMuted
+        btn.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(btn)
+
+        // Active underline
+        let indicator = NSView()
+        indicator.wantsLayer = true
+        indicator.layer?.backgroundColor = isActive
+            ? AppPalette.accent.cgColor
+            : NSColor.clear.cgColor
+        indicator.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(indicator)
+
+        NSLayoutConstraint.activate([
+            btn.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+            btn.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+            btn.topAnchor.constraint(equalTo: container.topAnchor),
+            btn.bottomAnchor.constraint(equalTo: indicator.topAnchor),
+            indicator.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            indicator.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            indicator.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            indicator.heightAnchor.constraint(equalToConstant: 2),
+            container.heightAnchor.constraint(equalToConstant: AppMetrics.tabBarHeight - 1),
+            container.widthAnchor.constraint(greaterThanOrEqualToConstant: AppMetrics.tabMinWidth),
+        ])
+
+        return container
+    }
+
+    // MARK: Document management
+
+    private var selectedDocumentIndex: Int? {
+        guard let id = selectedDocumentID else { return nil }
+        return documents.firstIndex { $0.id == id }
     }
 
     private func seedInitialDocumentIfNeeded() {
         guard documents.isEmpty else { return }
-        let initial = EditorDocument.untitled()
-        documents = [initial]
-        selectedDocumentID = initial.id
+        let doc = EditorDocument.untitled()
+        documents = [doc]
+        selectedDocumentID = doc.id
         documentsTableView.reloadData()
         documentsTableView.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         refreshTabStrip()
@@ -607,56 +611,58 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
     private func updateVisibleDocument() {
         guard let index = selectedDocumentIndex else {
             editorTextView.string = ""
-            pathLabel.stringValue = "No document selected"
-            statusLabel.stringValue = "Ready"
-            sidebarMetaLabel.stringValue = "0 documents"
+            emptyContainer.isHidden = true
+            editorScrollView.isHidden = false
+            statusLabel.stringValue = "No document"
+            statusMetaLabel.stringValue = ""
             refreshTabStrip()
             return
         }
 
         isSwitchingDocuments = true
-        let document = documents[index]
-        applyDocumentContent(document)
-        pathLabel.stringValue = document.url?.path(percentEncoded: false) ?? "Untitled draft"
-        titleLabel.stringValue = document.displayTitle
-        subtitleLabel.stringValue = document.url?.deletingLastPathComponent().path(percentEncoded: false) ?? "Standalone document"
-        statusLabel.stringValue = "Viewing \(document.title) in \(mode == .source ? "source" : "preview")"
-        sidebarMetaLabel.stringValue = "\(documents.count) document\(documents.count == 1 ? "" : "s")"
+        let doc = documents[index]
+        applyDocumentContent(doc)
+        statusLabel.stringValue = doc.url?.path(percentEncoded: false) ?? "Untitled draft"
+        statusMetaLabel.stringValue = statusSummary(for: doc)
         updateWindowTitle()
         refreshTabStrip()
         isSwitchingDocuments = false
     }
 
     private func updateWindowTitle() {
-        view.window?.title = documents[selectedDocumentIndex ?? 0].displayTitle
+        if let index = selectedDocumentIndex {
+            view.window?.title = documents[index].displayTitle
+        }
+    }
+
+    private func updateStatusBar() {
+        guard let index = selectedDocumentIndex else { return }
+        let doc = documents[index]
+        statusLabel.stringValue = doc.url?.path(percentEncoded: false) ?? "Untitled draft"
+        statusMetaLabel.stringValue = statusSummary(for: doc)
     }
 
     private func openDocuments(_ urls: [URL]) {
-        guard !urls.isEmpty else { return }
         for url in urls {
             do {
                 let text = try String(contentsOf: url, encoding: .utf8)
-                if let existingIndex = documents.firstIndex(where: { $0.url == url }) {
-                    documents[existingIndex].text = text
-                    documents[existingIndex].isDirty = false
-                    selectedDocumentID = documents[existingIndex].id
+                if let i = documents.firstIndex(where: { $0.url == url }) {
+                    documents[i].text = text
+                    documents[i].isDirty = false
+                    selectedDocumentID = documents[i].id
                 } else {
-                    let document = EditorDocument(
-                        id: UUID(),
-                        url: url,
-                        title: url.lastPathComponent,
-                        text: text,
-                        isDirty: false
+                    let doc = EditorDocument(
+                        id: UUID(), url: url, title: url.lastPathComponent,
+                        text: text, isDirty: false
                     )
-                    documents.append(document)
-                    selectedDocumentID = document.id
+                    documents.append(doc)
+                    selectedDocumentID = doc.id
                 }
-                noteRecent(url)
+                NSDocumentController.shared.noteNewRecentDocumentURL(url)
             } catch {
-                statusLabel.stringValue = "Failed to open \(url.lastPathComponent): \(error.localizedDescription)"
+                statusLabel.stringValue = "Failed to open: \(error.localizedDescription)"
             }
         }
-
         documentsTableView.reloadData()
         if let index = selectedDocumentIndex {
             documentsTableView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
@@ -671,151 +677,104 @@ final class ViewController: NSViewController, NSTableViewDataSource, NSTableView
             documents[index].title = url.lastPathComponent
             documents[index].isDirty = false
             statusLabel.stringValue = "Saved \(url.lastPathComponent)"
-            noteRecent(url)
+            NSDocumentController.shared.noteNewRecentDocumentURL(url)
             documentsTableView.reloadData()
             updateVisibleDocument()
         } catch {
-            statusLabel.stringValue = "Failed to save \(url.lastPathComponent): \(error.localizedDescription)"
+            statusLabel.stringValue = "Save failed: \(error.localizedDescription)"
         }
     }
 
-    private func noteRecent(_ url: URL) {
-        NSDocumentController.shared.noteNewRecentDocumentURL(url)
+    private func suggestedFilename(for doc: EditorDocument) -> String {
+        doc.url?.lastPathComponent ?? (doc.title == "Untitled" ? "Untitled.md" : doc.title)
     }
 
-    private func suggestedFilename(for document: EditorDocument) -> String {
-        if let url = document.url {
-            return url.lastPathComponent
-        }
-        return document.title == "Untitled" ? "Untitled.md" : document.title
-    }
-
-    private func applyDocumentContent(_ document: EditorDocument) {
-        let shouldShowEmptyState = document.url == nil && document.text.isEmpty && mode == .source
-        emptyStateView.isHidden = !shouldShowEmptyState
-        editorScrollView.isHidden = shouldShowEmptyState
+    private func applyDocumentContent(_ doc: EditorDocument) {
+        let showEmpty = doc.url == nil && doc.text.isEmpty && mode == .source
+        emptyContainer.isHidden = !showEmpty
+        editorScrollView.isHidden = showEmpty
 
         switch mode {
         case .source:
             editorTextView.isEditable = true
             editorTextView.isSelectable = true
-            editorScrollView.hasHorizontalScroller = true
-            editorTextView.string = document.text
-            editorTextView.font = NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
-            editorTextView.textColor = .labelColor
-            editorTextView.alignment = .left
-            editorTextView.textContainerInset = NSSize(width: 14, height: 14)
-            editorTextView.isHorizontallyResizable = true
-            editorTextView.textContainer?.widthTracksTextView = false
-            editorTextView.textContainer?.containerSize = NSSize(
-                width: CGFloat.greatestFiniteMagnitude,
-                height: CGFloat.greatestFiniteMagnitude
+            editorTextView.string = doc.text
+            editorTextView.font = NSFont.monospacedSystemFont(
+                ofSize: AppMetrics.monoFontSize, weight: .regular
             )
+            editorTextView.textColor = AppPalette.textPrimary
+            editorTextView.textContainerInset = NSSize(
+                width: AppMetrics.editorInsetH, height: AppMetrics.editorInsetV
+            )
+            editorTextView.isHorizontallyResizable = false
+            editorTextView.textContainer?.widthTracksTextView = true
         case .preview:
             editorTextView.isEditable = false
             editorTextView.isSelectable = true
-            editorScrollView.hasHorizontalScroller = false
-            editorTextView.alignment = .left
-            editorTextView.textContainerInset = NSSize(width: 36, height: 28)
+            editorTextView.textContainerInset = NSSize(
+                width: AppMetrics.editorInsetH + 24, height: AppMetrics.editorInsetV
+            )
             editorTextView.isHorizontallyResizable = false
             editorTextView.textContainer?.widthTracksTextView = true
-            editorTextView.textContainer?.containerSize = NSSize(
-                width: Metrics.previewTextWidth,
-                height: CGFloat.greatestFiniteMagnitude
+            editorTextView.textStorage?.setAttributedString(renderPreview(for: doc))
+        }
+
+        modeControl.selectedSegment = mode.rawValue
+    }
+
+    private func renderPreview(for doc: EditorDocument) -> NSAttributedString {
+        let para = NSMutableParagraphStyle()
+        para.lineHeightMultiple = AppMetrics.lineHeightMultiple
+        para.paragraphSpacing = 10
+        para.paragraphSpacingBefore = 2
+
+        if isMarkdown(doc), let attributed = try? AttributedString(markdown: doc.text) {
+            let rendered = NSMutableAttributedString(
+                attributedString: NSAttributedString(attributed)
             )
-            editorTextView.textStorage?.setAttributedString(renderPreview(for: document))
-        }
-    }
-
-    @objc
-    private func selectTabFromStrip(_ sender: NSButton) {
-        let index = sender.tag
-        guard documents.indices.contains(index) else { return }
-        selectedDocumentID = documents[index].id
-        documentsTableView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
-        updateVisibleDocument()
-    }
-
-    @objc
-    private func createTabFromStrip(_ sender: Any?) {
-        newDocument(sender)
-    }
-
-    private func refreshTabStrip() {
-        tabStripStack.arrangedSubviews.forEach { view in
-            tabStripStack.removeArrangedSubview(view)
-            view.removeFromSuperview()
-        }
-
-        for (index, document) in documents.enumerated() {
-            let button = NSButton(title: document.displayTitle, target: self, action: #selector(selectTabFromStrip(_:)))
-            button.tag = index
-            button.isBordered = false
-            button.font = NSFont.systemFont(ofSize: 12, weight: .medium)
-            button.contentTintColor = index == selectedDocumentIndex ? .labelColor : .secondaryLabelColor
-            button.wantsLayer = true
-            button.layer?.cornerRadius = 8
-            button.layer?.backgroundColor = (index == selectedDocumentIndex
-                ? NSColor(calibratedWhite: 0.18, alpha: 1)
-                : NSColor(calibratedWhite: 0.14, alpha: 0.65)).cgColor
-            button.imagePosition = .imageLeading
-            button.setButtonType(.momentaryPushIn)
-            button.bezelStyle = .regularSquare
-            button.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([
-                button.heightAnchor.constraint(equalToConstant: 28),
-                button.widthAnchor.constraint(greaterThanOrEqualToConstant: 110)
-            ])
-            tabStripStack.addArrangedSubview(button)
-        }
-
-        let addButton = NSButton(title: "+", target: self, action: #selector(createTabFromStrip(_:)))
-        addButton.isBordered = false
-        addButton.font = NSFont.systemFont(ofSize: 14, weight: .semibold)
-        addButton.contentTintColor = .secondaryLabelColor
-        addButton.wantsLayer = true
-        addButton.layer?.cornerRadius = 8
-        addButton.layer?.backgroundColor = NSColor(calibratedWhite: 0.13, alpha: 0.85).cgColor
-        addButton.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            addButton.widthAnchor.constraint(equalToConstant: 28),
-            addButton.heightAnchor.constraint(equalToConstant: 28)
-        ])
-        tabStripStack.addArrangedSubview(addButton)
-    }
-
-    private func renderPreview(for document: EditorDocument) -> NSAttributedString {
-        if isMarkdownDocument(document),
-           let attributed = try? AttributedString(markdown: document.text) {
-            let rendered = NSMutableAttributedString(attributedString: NSAttributedString(attributed))
-            let fullRange = NSRange(location: 0, length: rendered.length)
-            let paragraph = NSMutableParagraphStyle()
-            paragraph.lineHeightMultiple = 1.15
-            paragraph.paragraphSpacing = 10
-            paragraph.paragraphSpacingBefore = 2
-            rendered.addAttribute(.paragraphStyle, value: paragraph, range: fullRange)
-            rendered.addAttribute(.foregroundColor, value: NSColor.labelColor, range: fullRange)
+            let range = NSRange(location: 0, length: rendered.length)
+            rendered.addAttribute(.paragraphStyle, value: para, range: range)
+            rendered.addAttribute(.foregroundColor, value: AppPalette.textPrimary, range: range)
             return rendered
         }
 
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.lineHeightMultiple = 1.18
-        paragraph.paragraphSpacing = 8
-
-        return NSAttributedString(
-            string: document.text,
-            attributes: [
-                .font: NSFont.systemFont(ofSize: 15, weight: .regular),
-                .foregroundColor: NSColor.labelColor,
-                .paragraphStyle: paragraph
-            ]
-        )
+        return NSAttributedString(string: doc.text, attributes: [
+            .font: NSFont.systemFont(ofSize: 15, weight: .regular),
+            .foregroundColor: AppPalette.textPrimary,
+            .paragraphStyle: para,
+        ])
     }
 
-    private func isMarkdownDocument(_ document: EditorDocument) -> Bool {
-        guard let pathExtension = document.url?.pathExtension.lowercased() else {
-            return true
-        }
-        return ["md", "markdown", "mdown", "txt"].contains(pathExtension)
+    private func isMarkdown(_ doc: EditorDocument) -> Bool {
+        guard let ext = doc.url?.pathExtension.lowercased() else { return true }
+        return ["md", "markdown", "mdown", "txt"].contains(ext)
+    }
+
+    private func statusSummary(for doc: EditorDocument) -> String {
+        let modeStr  = mode == .source ? "Source" : "Preview"
+        let kindStr  = isMarkdown(doc) ? "Markdown" : "Text"
+        let dirtyStr = doc.isDirty ? "Unsaved" : "Saved"
+        return "\(modeStr) · \(kindStr) · \(dirtyStr)"
+    }
+}
+
+// MARK: - FlatSplitView
+
+private final class FlatSplitView: NSSplitView {
+    override var dividerColor: NSColor { AppPalette.border }
+}
+
+// MARK: - FlatTableRowView
+
+private final class FlatTableRowView: NSTableRowView {
+    override func drawSelection(in dirtyRect: NSRect) {
+        AppPalette.accent.withAlphaComponent(0.15).setFill()
+        NSBezierPath.fill(bounds)
+    }
+
+    // Prevent AppKit from overriding our draw with its own emphasis style.
+    override var isEmphasized: Bool {
+        get { false }
+        set {}
     }
 }

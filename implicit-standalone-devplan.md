@@ -1,421 +1,590 @@
 # Implicit Standalone Dev Plan
 
-Created: 2026-03-29  
-Scope: Restart the standalone app plan from the start of the Xcode/AppKit project while continuing CLI/TUI development in parallel.
+Created: 2026-03-29
+Updated: 2026-03-29
+Scope: AppKit native macOS standalone app — Xcode project at `ImplicitDraft-src/macos-project/implicit/`.
+
+---
 
 ## Product Direction
 
-- The project now has two active product surfaces:
-  - `Standalone`: native macOS app built with AppKit
-  - `CLI`: Rust terminal-first editor and utility tool
-- Both tracks continue in parallel.
-- Platform scope for standalone is `macOS only`.
-- Standalone architecture target is:
-  - single-window app first
-  - tabs and sidebar inside that window
-  - richer HTML/WebKit preview
-  - Warp-like product chrome
-  - built-in auto-update
-- Release target can include signing and notarization.
+Implicit Standalone is a native macOS markdown editor built with AppKit. The design target is a Warp-like product: flat, dark, no decorative chrome, every pixel deliberate.
 
-## Plan Principles
+- Platform: **macOS only**
+- Language: **Swift + AppKit**
+- Architecture: single-window, multi-tab, `NSSplitView` workspace
+- Preview: `WKWebView` HTML pipeline
+- Distribution target: signed and notarized `.app` bundle
 
-- The standalone app is not a thin wrapper around the CLI.
-- The CLI remains a first-class product surface, especially for terminal-first workflows, automation, export, and utility flows.
-- Shared behavior should stay aligned across both surfaces where it matters:
-  - file handling
-  - markdown semantics
-  - export behavior
-  - theme direction
-  - update/version semantics
-- The standalone app should feel like a native Mac product, not a terminal app embedded in a window.
+The standalone app is the primary product surface going forward. The CLI remains an independent tool.
 
-## Current Baseline
+---
 
-The Xcode/AppKit app currently has:
+## Design Language
 
-- one window
-- one controller-driven layout
-- basic source and preview modes
-- open/save/save-as/revert
-- Finder open-file handling
-- a document list sidebar
+All phases build toward a unified visual system. These tokens define it:
 
-This plan treats that as the Phase 0 baseline and builds forward from there.
+| Token | Value | Role |
+|---|---|---|
+| `bg` | `#0d1117` | main editor background |
+| `surface` | `#161b22` | sidebar, panels |
+| `chrome` | `#010409` | tab bar background |
+| `tab-active` | `#0d1117` | active tab = matches editor (seamless) |
+| `border` | `#30363d` | dividers, edges |
+| `accent` | `#58a6ff` | active state, focus ring, cursor |
+| `text-primary` | `#e6edf3` | body text |
+| `text-muted` | `#8b949e` | labels, secondary info |
+| `tab-bar-h` | `36pt` | |
+| `sidebar-w` | `220pt` | |
+| `status-bar-h` | `22pt` | |
+| `body-font` | SF Pro Text 13pt | sidebar and status labels |
+| `mono-font` | SF Mono 13pt | editor and code |
 
-## Phase 0 — Foundation Reset
+Window chrome: `titleVisibility = .hidden`, `titlebarAppearsTransparent = true`, `NSVisualEffectView` full-window background.
 
-Goal: make the Xcode project a stable base before feature expansion.
+---
 
-Tasks:
+## Current Status
 
-- [x] define repo conventions for the standalone app under `ImplicitDraft-src/macos-project/implicit/`
-- [x] clean Xcode user-state noise from source control
-- [x] stabilize target settings:
-  - deployment target
-  - bundle id
-  - product name
-  - version/build strategy
-- [x] add a small architecture note for the standalone app
-- [x] define shared product vocabulary across app and CLI:
-  - source
-  - preview
-  - tabs
-  - sidebar
-  - export
-  - update
+- `Phase 0` is complete.
+- `Phase 1` is actively underway.
+- Current committed checkpoints:
+  - `fc3f8be` `feat: reset standalone app foundation`
+  - `8abd21c` `feat: add standalone tab strip and start state`
+- Current local work after those commits is focused on:
+  - stronger sidebar document presentation
+  - a more informative bottom status surface
+  - continued shell polish before moving into the real document/session model
 
-Acceptance:
+## Current Baseline (Phase 0 Complete)
 
-- [x] Xcode project builds cleanly from command line
-- [x] no user-specific Xcode files need to be committed
-- [x] app bundle naming/versioning is deterministic
+The Xcode project at `macos-project/implicit/` currently has:
 
-## Phase 1 — App Shell And Visual System
+- `AppDelegate.swift`: window sizing (1320×860), dark Aqua appearance, Finder open-file bridge, dock re-open behavior
+- `ViewController.swift`:
+  - `EditorDocument` struct: `id UUID`, `url URL?`, `title`, `text`, `isDirty`
+  - `EditorMode` enum: `.source` / `.preview`
+  - `NSSplitView` two-column layout
+  - `NSTableView` document list sidebar (220pt fixed)
+  - `NSTextView` editor in `NSScrollView`
+  - `NSStackView` tab strip with active-document selection and `+` new-tab affordance
+  - `NSSegmentedControl` source/preview mode switch
+  - sidebar-owned new/open/save actions
+  - `emptyStateView` start surface for untitled drafts
+  - Dark monospace theme, caret amber `#E8CC91`
 
-Goal: replace the current prototype feel with a real product shell.
+Phase 0 is done. This plan builds forward from here.
 
-Tasks:
+---
 
-- define visual tokens:
-  - colors
-  - spacing
-  - radii
-  - borders
-  - typography
-- simplify top chrome into a durable structure:
-  - app identity
-  - active tab strip
-  - mode switching
-  - utility actions
-- redesign the sidebar as navigation instead of a generic panel
-- define empty-state/start-screen behavior
-- define status surface behavior
-- make preview, editor, sidebar, and header feel like one composed workspace
+## Phase 1 — Visual System And App Shell
 
-Acceptance:
+**Goal:** Replace prototype-era chrome with the full design language. Every region should feel intentional before any feature work happens.
 
-- untitled launch feels intentional
-- no prototype-looking regions remain
-- clear hierarchy between chrome, navigation, and editor content
+### Tasks
+
+**Palette and tokens:**
+- Define `Palette` and `Metrics` enums in a dedicated `DesignSystem.swift` file
+- Migrate all hardcoded colors and sizes in `ViewController.swift` to these enums
+- Establish `NSColor` extensions for hex literals: `NSColor(hex: 0x0d1117)`
+
+**Tab bar:**
+- Replace the `NSStackView` tab strip with a proper `TabBarView: NSView`
+- `TabBarView` draws its own background (`chrome` color, 36pt height)
+- Active tab background `tab-active` color seamlessly blends into the editor
+- Tab shows: title, dirty dot (•), close button (×) on hover
+- No system tab bar — drawn entirely in `TabBarView`
+
+**Sidebar:**
+- Replace `NSTableView` document list with a structured sidebar that has named sections
+- Sidebar header row: 28pt, section label in `text-muted`, no separator chrome
+- Sidebar items: 32pt row height, left-padded 12pt, selection highlight uses `accent` at 15% opacity
+- Right edge: 1pt `border` color divider, no shadow
+
+**Status bar:**
+- 22pt bottom bar, `surface` background
+- Left: file path or mode label
+- Right: word count, line/col, or mode indicator
+- 1pt top edge border
+
+**Window:**
+- Full-window `NSVisualEffectView` in `.behindWindow` material as the base layer
+- All subviews sit on top — no floating cards, no margins, no insets on the editor
+- Editor NSTextView goes edge-to-edge against the sidebar divider
+
+**Empty state:**
+- No modal overlay — inline centered content in the editor region
+- Two lines: large `text-muted` headline + smaller instruction
+- Single "Open File" button, `accent`-colored, no border
+
+### Acceptance
+
+- App launches with a blank untitled state that looks designed, not scaffolded
+- Tab bar, sidebar, editor, and status bar form one composed workspace
+- No prototype-era color values or layout constants remain in code
+- Dark Aqua appearance throughout, no light-mode artifacts
+
+---
 
 ## Phase 2 — Document And Session Model
 
-Goal: move from controller-local document state to a real app document/session model.
+**Goal:** Replace controller-local document state with a real model layer. Documents and session state are separate concerns from the view.
 
-Tasks:
+### Tasks
 
-- formal document model for:
-  - id
-  - url
-  - title
-  - dirty state
-  - editor state
-  - preview state
-- session model for:
-  - open tabs
-  - selected tab
-  - sidebar state
-  - window state
-- safe close behavior
-- recent files
-- reopen last session
-- dirty-document restore strategy
+**Document model — `Document.swift`:**
+```swift
+struct Document: Identifiable {
+    let id: UUID
+    var url: URL?
+    var title: String
+    var content: String
+    var isDirty: Bool
+    var scrollOffset: CGFloat
+    var selectionRange: NSRange
+    var mode: EditorMode
+}
+```
 
-Acceptance:
+**Session model — `Session.swift`:**
+```swift
+class Session: ObservableObject {
+    var documents: [Document]
+    var activeID: UUID?
+    var sidebarVisible: Bool
+    var sidebarSection: SidebarSection
+    func save()       // persist to UserDefaults or JSON on disk
+    func restore()    // load on launch
+}
+```
 
-- open tabs survive normal restart
-- dirty state is accurate
-- close/reopen behavior is predictable
+**Persistence:**
+- Encode session to `~/.config/implicit/session.json` (or `Application Support`)
+- Save on: tab close, app resign active, window close
+- Restore on: app launch, before first draw
+- Dirty-document recovery: autosave scratch copies to `Application Support/Implicit/Recovery/`
+
+**Close behavior:**
+- Closing a dirty tab shows `NSAlert` with "Save", "Don't Save", "Cancel"
+- Closing the window with multiple dirty tabs: iterate each, confirm in sequence
+- `applicationShouldTerminate`: return `.terminateLater`, resolve all dirty confirms, then proceed
+
+**Recent files:**
+- Track last 20 opened URLs in `UserDefaults`
+- Expose as `recentURLs: [URL]` on `Session`
+
+### Acceptance
+
+- Open tabs and their content survive a normal restart
+- Dirty state is always accurate — no false "clean" on unsaved content
+- Close/reopen behavior is predictable and matches macOS conventions
+- App never loses content across a crash or force-quit (recovery files exist)
+
+---
 
 ## Phase 3 — Tabs First
 
-Goal: deliver the first-class single-window tab workflow.
+**Goal:** First-class single-window multi-tab workflow. Tabs are the primary document surface; sidebar is navigation.
 
-Tasks:
+### Tasks
 
-- real tab model, not one document per sidebar row
-- tab creation:
-  - new untitled
-  - open file in new tab
-  - duplicate tab
-- tab closing with dirty-confirm behavior
-- tab reordering
-- tab overflow behavior
-- synchronize sidebar with tabs and recent/open documents
+**Tab model:**
+- `TabBarView` is driven entirely by `Session.documents`
+- Tab creation paths:
+  - `⌘N` — new untitled document, opens in new tab
+  - `⌘O` — open file dialog, result opens in new tab
+  - `⌘T` — alias for new tab
+  - Sidebar row double-click — opens in new tab, or activates if already open
+- Tab close: `⌘W` closes active tab; button click closes that tab
+- Tab reordering: `NSDraggingSource`/`NSDraggingDestination` in `TabBarView`
+- Tab overflow: when tabs exceed bar width, show left/right scroll arrows or compact
+- `⌘{` / `⌘}` — previous/next tab
 
-Acceptance:
+**Sidebar sync:**
+- "Open" section in sidebar reflects open tabs
+- "Recent" section reflects `session.recentURLs`
+- Selecting a sidebar item activates or opens the document
+- Active tab is highlighted in sidebar "Open" section
 
-- the main workflow is single-window multi-tab use
-- tabs feel primary, sidebar feels secondary/navigation-oriented
+### Acceptance
+
+- The main daily workflow is single-window multi-tab use with no Finder dependency
+- Tab creation, switching, and close all work without unexpected state loss
+- Sidebar accurately reflects open and recent documents
+
+---
 
 ## Phase 4 — Source Editor Core
 
-Goal: make the standalone editor credible as a daily writing and editing surface.
+**Goal:** NSTextView configuration that makes markdown writing comfortable.
 
-Tasks:
+### Tasks
 
-- robust `NSTextView` configuration or custom text system improvements
-- line/column status
-- undo/redo
-- selection handling
-- Home/End and document jump behavior
-- find
-- goto line
-- save safety
-- external file change detection
-- file type detection
+**NSTextView setup:**
+- Font: SF Mono 13pt
+- Background: `bg` color
+- Text color: `text-primary`
+- Caret color: `accent`
+- Line height: 1.5× via `NSParagraphStyle`
+- Disable autocorrect, autocapitalize, smart quotes, smart dashes
+- Horizontal scroll disabled — word wrap at content width
+- Container inset: 24pt horizontal, 20pt vertical
 
-CLI parallel tasks:
+**Behavior:**
+- Undo/redo: `NSTextView` built-in; confirm it survives tab switches
+- Home/End: move to line start/end (not document)
+- `⌘↑` / `⌘↓`: jump to document top/bottom
+- Selection: standard, plus `⌥Click` column select if feasible
+- Find: `⌘F` activates `NSTextFinder` bar inline — do not use a separate modal
+- Go to line: `⌃G` or `⌘L` — custom minimal popover input
 
-- keep source-mode behavior aligned where it makes sense
-- keep key movement and save semantics consistent
+**File safety:**
+- External file change detection: `DispatchSource.makeFileSystemObjectSource`
+- On change: banner alert "File changed externally — Reload or Keep Mine?"
+- Save shortcut: `⌘S`; Save As: `⌘⇧S`
 
-Acceptance:
+**Status bar:**
+- Live word count
+- Line and column numbers derived from current cursor position
+- Update on every `textDidChange` and selection change
 
-- normal markdown writing/editing is comfortable
-- no common editing flow feels broken or placeholder
+### Acceptance
+
+- Normal markdown writing is comfortable — no lag, no jarring autocorrections
+- Undo, find, and jump all work as expected
+- Word count and line/col are always accurate
+
+---
 
 ## Phase 5 — Preview Engine
 
-Goal: ship the first real standalone preview using HTML/WebKit.
+**Goal:** First-class HTML preview via WKWebView.
 
-Tasks:
+### Tasks
 
-- introduce `WKWebView` preview pipeline
-- define preview renderer inputs:
-  - current document text
-  - theme
-  - mode
-  - metadata
-- support:
-  - headings
-  - lists
-  - task lists
-  - links
-  - blockquotes
-  - tables
-  - fenced code blocks
-  - inline code
-- add preview CSS system
-- align preview styling direction with the standalone visual system
-- preserve source/preview mode switching cleanly per tab
+**WKWebView pipeline:**
+- Replace `NSTextView` preview fallback with a `WKWebView` in a `PreviewViewController`
+- `PreviewViewController` is swapped in/out based on active tab's `mode`
+- Preview receives: document content (markdown string), theme tokens, mode
 
-CLI parallel tasks:
+**Markdown renderer:**
+- Use `cmark-gfm` via Swift Package Manager (C library, SPM wrapper available) or `Ink` (pure Swift)
+- Support: headings, paragraphs, bold, italic, lists, task lists, blockquotes, tables, fenced code blocks, inline code, links, images (local file URLs)
+- Strikethrough and footnotes desirable but not blocking
 
-- continue aligning markdown semantics and export semantics
-- reuse markdown rules where practical
+**Preview CSS system:**
+- Embed a `preview.css` in the bundle
+- CSS uses GitHub dark palette — same tokens as the Swift design system
+- Body max-width: 760pt centered, `body-font`
+- Code blocks: `surface` background, SF Mono, syntax-highlighted via `highlight.js` (bundled)
+- No external network requests from preview
 
-Acceptance:
+**Sync:**
+- Preview updates on every `textDidChange` with 200ms debounce
+- Scroll position is preserved across content updates (inject JS `scrollTop` restore)
+- Switching source↔preview is instant — no flash or blank frame
 
-- preview reads like a designed document view, not a fallback renderer
-- switching between source and preview is immediate and stable
+### Acceptance
+
+- Preview reads like a designed document, not a fallback renderer
+- Source/preview switching is immediate and stable for documents up to ~100KB
+- Preview CSS is visually consistent with the rest of the app
+
+---
 
 ## Phase 6 — Sidebar And Navigation
 
-Goal: make navigation fast and product-grade.
+**Goal:** Sidebar becomes a real navigation surface, not just a document list.
 
-Tasks:
+### Tasks
 
-- restructure sidebar into sections such as:
-  - open tabs
-  - recent files
-  - project files
-- add quick open / command palette
-- add project/file browser mode
-- add file operations:
-  - rename
-  - delete
-  - new file
-  - new folder
-- preserve sidebar selection state
-- refine drag/drop open behavior
+**Sidebar sections:**
+- `Open` — currently open tabs, sorted by open time
+- `Recent` — last 20 files, sorted by recency
+- `Project` — file tree if a folder is open (optional, can ship later)
 
-CLI parallel tasks:
+**Section implementation:**
+- Custom `NSOutlineView` or `NSTableView` with section headers
+- Section headers: 28pt, uppercase 10pt label in `text-muted`, no disclosure triangle
+- Row height: 32pt
 
-- continue deeper sidebar/file-ops parity where relevant
+**File operations (right-click context menu):**
+- Rename (inline edit)
+- Delete (move to Trash via `FileManager`)
+- Reveal in Finder
+- Copy path
 
-Acceptance:
+**New file in sidebar:**
+- "+" button in sidebar header creates new untitled document in the active folder
 
-- opening and switching documents is fast without using Finder
-- sidebar feels like a real navigation surface
+**Quick open:**
+- `⌘P` — command palette popover
+- Fuzzy search across open tabs and recent files
+- Keyboard navigation (↑↓ + Return)
+- Appears centered in editor region, dismissed on Escape or selection
+
+**Drag and drop:**
+- Drag a file from Finder onto the sidebar → open in new tab
+- Drag a file onto the editor → insert file path or inline content
+
+### Acceptance
+
+- Opening, switching, and closing documents never requires Finder
+- Quick open (`⌘P`) finds recent and open files in under two keystrokes
+- Sidebar accurately reflects open and recent state at all times
+
+---
 
 ## Phase 7 — Writing Features
 
-Goal: close the gap on everyday editor workflows.
+**Goal:** Close the gap on everyday editing workflows.
 
-Tasks:
+### Tasks
 
-- find and replace
-- regex option
-- search result highlighting
-- replace all
-- split editor and preview if still justified
-- markdown conveniences:
-  - list continuation
-  - smart checkbox handling
-  - code fence helpers
+**Find and replace:**
+- `⌘F` — find bar (NSTextFinder)
+- `⌘⌥F` — show replace field
+- Match count displayed
+- Regex toggle
+- Replace / Replace All
+- Search result highlighting in editor
 
-CLI parallel tasks:
+**Markdown conveniences:**
+- Tab key in a list item: indent
+- Return at end of list item: continue list with same prefix (`-`, `*`, `1.`)
+- Return after empty list item: dedent and exit list
+- `- [ ]` checkbox: click to toggle in source (or in preview)
+- Triple backtick + Return: auto-close code fence with closing backticks
+- `**` / `_` wrapping: select text, type delimiter → wrap selection
 
-- keep replace/search semantics aligned
+**Word count and stats:**
+- Word count in status bar (live)
+- Estimated reading time (optional, popover or tooltip)
 
-Acceptance:
+### Acceptance
 
-- writing, editing, and revising documents does not require dropping back to the CLI
+- Writing, editing, and revising markdown never feels broken or unfinished
+- List continuation and code fence behavior matches common editors (VS Code, Typora)
 
-## Phase 8 — Code And Technical Writing Support
+---
 
-Goal: make Implicit strong for docs-plus-code workflows.
+## Phase 8 — Code And Technical Writing
 
-Tasks:
+**Goal:** Implicit should be strong for README, API docs, and mixed markdown/code workflows.
 
-- syntax highlighting strategy for source files
-- code file mode defaults
-- code-aware preview/code block treatment
-- git change indicators
-- conflict marker visibility
-- line numbers
-- technical-document authoring polish
+### Tasks
 
-CLI parallel tasks:
+**Syntax highlighting in source view:**
+- Use `NSTextStorage` + `NSLayoutManager` subclass for syntax highlighting
+- Highlight: headings (`#`), bold/italic, code spans, fenced code block language label, links, blockquotes
+- Colors from the design palette: headings in `text-primary` at full weight, code spans in `surface`-tinted background, links in `accent`
 
-- continue shared syntax/export/theme direction
+**Code file support:**
+- Detect non-markdown files (`.swift`, `.rs`, `.py`, `.json`, `.yaml`, etc.) by extension
+- Open in source mode with monospace font; no markdown conveniences applied
+- No syntax highlighting for code files in v1 (defer)
 
-Acceptance:
+**Line numbers:**
+- Optional left gutter, off by default
+- Toggle via `View > Show Line Numbers` or status bar click
+- Gutter: 44pt wide, `text-muted`, right-aligned
 
-- the app feels strong for README, API docs, and mixed markdown/code work
+**Git change indicators (stretch):**
+- Check for `.git` folder when opening a file
+- Show added/modified/removed line indicators in gutter margin
+- Defer if it adds significant complexity
+
+### Acceptance
+
+- Heading and inline code highlighting make source view readable, not just a plain textarea
+- Line numbers work correctly and don't break layout at any window size
+
+---
 
 ## Phase 9 — Native macOS Integration
 
-Goal: make the standalone app behave like a polished Mac app.
+**Goal:** Implicit behaves like a first-class Mac document app.
 
-Tasks:
+### Tasks
 
-- Finder `Open With`
-- document type associations
-- drag/drop polish
-- app menu polish
-- `Open Recent`
-- Services integration if useful
-- proper `implicit --new-window` bridge into the app
-- app-level settings/preferences window
+**Document type associations:**
+- `Info.plist`: register `.md` and `.markdown` as handled UTIs
+- `CFBundleDocumentTypes` with `LSHandlerRank = Default`
+- Icon for document type (defer custom icon)
 
-Acceptance:
+**App menu polish:**
+- `File` menu: New, Open, Open Recent (using `NSDocumentController.shared.noteNewRecentDocumentURL`), Close, Save, Save As, Revert
+- `Edit` menu: standard undo/redo/cut/copy/paste + Find submenu
+- `View` menu: Toggle Sidebar, Toggle Preview, Show Line Numbers
+- `Window` menu: standard macOS window management
+- Remove any placeholder or debug menu items
 
-- users can treat Implicit as a normal Mac document app
+**Open Recent:**
+- `NSDocumentController.shared.noteNewRecentDocumentURL(url)` on every file open
+- "Open Recent" submenu auto-populated by AppKit
+
+**Services:**
+- Register text service for "New Implicit Document from Selection" (stretch)
+
+**Dock menu:**
+- `applicationDockMenu`: add "New Document" item
+
+**Preferences window:**
+- `⌘,` opens a minimal preferences window
+- Settings: font size, line height, word wrap width, auto-save interval, startup behavior (restore session / open new)
+
+### Acceptance
+
+- Double-clicking a `.md` file in Finder opens it in Implicit
+- Open Recent works identically to other Mac document apps
+- App menu is complete, correct, and has no debug-era items
+
+---
 
 ## Phase 10 — Export And Utility Flows
 
-Goal: bring the strong CLI export story into the standalone app.
+**Goal:** Export is trustworthy and covers the common cases.
 
-Tasks:
+### Tasks
 
-- export HTML
-- export PDF
-- export snapshot/image
-- print
-- selection export
-- export presets
-- export dialog with format-specific messaging
+**Export HTML:**
+- `File > Export > HTML…` — save panel
+- Writes the same HTML the preview renders, with embedded CSS
 
-CLI parallel tasks:
+**Export PDF:**
+- Use `WKWebView.printOperation(with:)` → print to PDF
+- Default destination: same directory as source file
 
-- keep the CLI export feature set ahead or equal where practical
+**Print:**
+- `⌘P` in non-find context → `NSPrintOperation` via WKWebView
+- Print preview shows the same rendered markdown, not the source text
 
-Acceptance:
+**Selection export:**
+- Select text in source → `File > Export > Selection as HTML…`
+- Only exports the selected range, rendered as HTML
 
-- standalone export is trustworthy and coherent with the CLI
+**Export presets (stretch):**
+- Save export settings (paper size, margins, CSS overrides) as named presets
+
+### Acceptance
+
+- HTML export produces a self-contained file that renders correctly in Safari and Chrome
+- PDF export produces a paginated document that resembles the preview
+- Print dialog works without crashes on current macOS
+
+---
 
 ## Phase 11 — Auto-Update And Release Flow
 
-Goal: make the standalone app independently installable and updateable.
+**Goal:** The app can deliver updates to users without requiring a CLI or manual download.
 
-Tasks:
+### Tasks
 
-- define update channel strategy
-- implement built-in update check UI
-- implement in-app update apply flow
-- define release asset layout:
-  - app zip
-  - CLI binary
-  - checksums
-- version/build presentation in the app
-- release notes surface
+**Update channel:**
+- Host releases on GitHub Releases (or a custom endpoint)
+- Release asset: `Implicit-{version}.zip` containing the signed `.app`
+- `appcast.xml` or a JSON version manifest at a fixed URL
 
-Acceptance:
+**In-app update check:**
+- On launch (once per day): fetch version manifest, compare with bundle version
+- If update available: banner notification at top of window with "Update Available" + version
+- `Help > Check for Updates…` for manual check
 
-- users can install and update the standalone app without using the CLI
+**Update download and apply:**
+- Download zip to `~/Library/Caches/Implicit/`
+- Verify SHA-256 checksum against manifest
+- Extract, replace app in `/Applications`, relaunch
+- Use `LaunchServices` for relaunch; handle sandboxing constraints
+
+**In-app version display:**
+- `Help > About Implicit` shows version, build number, and a link to release notes
+- Version from `CFBundleShortVersionString`, build from `CFBundleVersion`
+
+**Release notes:**
+- Release notes URL embedded in manifest
+- "What's New" view: simple `WKWebView` loading release notes page
+
+### Acceptance
+
+- User can receive and apply an update entirely within the app
+- Update process never silently corrupts the installed app
+- Version is always visible and correct
+
+---
 
 ## Phase 12 — Hardening, Signing, And Notarization
 
-Goal: move from dev build to shippable Mac app.
+**Goal:** Repeatable signed and notarized release pipeline. App is stable enough for daily use.
 
-Tasks:
+### Tasks
 
-- crash and recovery review
-- large-file behavior
-- startup/perf profiling
-- memory review for long sessions
-- notarization flow
-- signed release flow
-- QA checklist for file handling and session restore
+**Stability:**
+- Test session restore with 10+ open tabs
+- Test large file behavior (≥1MB markdown)
+- Test with files on iCloud Drive, network volumes
+- Confirm undo history is bounded (no unbounded memory growth)
+- Confirm no main-thread file I/O (all disk access on background queues)
 
-Acceptance:
+**Startup performance:**
+- Cold launch to first paint: target ≤400ms
+- Session restore should not block the main thread
 
-- repeatable signed and notarized release pipeline exists
-- app is stable enough for real use
+**Signing:**
+- Developer ID Application certificate
+- Hardened runtime enabled
+- Entitlements: `com.apple.security.files.user-selected.read-write`, `com.apple.security.network.client` (for update check)
 
-## Parallel CLI Track
+**Notarization:**
+- `xcrun notarytool submit` pipeline
+- Staple notarization ticket: `xcrun stapler staple`
+- Automate in `macos/archive_app.sh` or a new `release_app.sh` script
 
-The CLI stays active during the standalone build-out.
+**QA checklist:**
+- [ ] Open, edit, save new file
+- [ ] Open, edit, save existing file
+- [ ] Dirty-state warning on close
+- [ ] Session restore across restart
+- [ ] Finder double-click open
+- [ ] Drag file onto dock icon
+- [ ] Export HTML and PDF
+- [ ] Update check and apply flow
+- [ ] First launch on a clean system (no `~/.config/implicit`)
 
-CLI priorities during the standalone phases:
+### Acceptance
 
-- keep core editor quality improving
-- preserve export and utility leadership
-- remain the fastest automation-friendly entry point
-- continue shared markdown and file-behavior alignment
-- expose app-launch bridges:
-  - `implicit --new-window`
-  - future app handoff flows
+- Signed and notarized `.app` passes Gatekeeper on a clean Mac
+- No known crashes in the QA checklist flows
+- `archive_app.sh` produces a distributable zip with no manual steps
 
-The CLI should not be frozen while the standalone app matures.
+---
 
-## Recommended Immediate Order
+## Recommended Phase Order
 
-1. Phase 0
-2. Phase 1
-3. Phase 2
-4. Phase 3
-5. Phase 5
-6. Phase 6
-7. Phase 7
-8. Phase 8
-9. Phase 9
-10. Phase 10
-11. Phase 11
-12. Phase 12
+```
+1  → Phase 1  (Visual System)
+2  → Phase 2  (Document + Session Model)
+3  → Phase 3  (Tabs First)
+4  → Phase 5  (Preview Engine)
+5  → Phase 4  (Source Editor Core)     ← after tabs, before writing features
+6  → Phase 6  (Sidebar + Navigation)
+7  → Phase 7  (Writing Features)
+8  → Phase 9  (Native macOS Integration)
+9  → Phase 8  (Code + Technical Writing)
+10 → Phase 10 (Export)
+11 → Phase 11 (Auto-Update)
+12 → Phase 12 (Hardening + Signing)
+```
 
-Rationale:
+Preview (Phase 5) comes before full editor polish (Phase 4) because it defines the app's identity — users need to see that the preview is real before the editing experience is complete.
 
-- tabs and document/session state have to come before deeper editor and preview polish
-- preview should happen early because it defines the standalone app’s identity
-- auto-update should land before the final release hardening pass, not after
+---
 
 ## Immediate Next Slice
 
-Start with `Phase 0` and finish it completely:
+**Phase 1 tasks to start now:**
 
-- clean Xcode git noise
-- lock the standalone app structure
-- add a lightweight standalone architecture note
-- define versioning/release expectations for app plus CLI
-
-Then move directly into `Phase 1` with a real shell pass:
-
-- top chrome
-- tab strip
-- sidebar hierarchy
-- empty state
-- status surface
+1. Create `DesignSystem.swift` — all palette and metric constants, `NSColor(hex:)` extension
+2. Implement `TabBarView` — custom `NSView`, 36pt, drawn background, tab items as subviews or drawn directly
+3. Replace `NSTableView` sidebar with the three-section structure (`Open`, `Recent`, `Project`)
+4. Add `StatusBarView` — 22pt, `surface` background, word count left, line/col right
+5. Strip all prototype-era inline constants from `ViewController.swift`
