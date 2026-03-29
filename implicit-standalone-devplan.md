@@ -47,14 +47,15 @@ Window chrome: `titleVisibility = .hidden`, `titlebarAppearsTransparent = true`,
 ## Current Status
 
 - `Phase 0` is complete.
-- `Phase 1` is actively underway.
+- `Phase 1` is complete enough to build on.
+- `Phase 2` is now in progress.
 - Current committed checkpoints:
   - `fc3f8be` `feat: reset standalone app foundation`
   - `8abd21c` `feat: add standalone tab strip and start state`
 - Current local work after those commits is focused on:
-  - stronger sidebar document presentation
-  - a more informative bottom status surface
-  - continued shell polish before moving into the real document/session model
+  - document-owned editor state for tabs
+  - safer open/save state transitions
+  - moving controller-local document behavior into the session/model layer
 
 ## Current Baseline (Phase 0 Complete)
 

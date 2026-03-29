@@ -2,27 +2,7 @@
 // Single-window flat layout — Phase 2: session persistence.
 
 import Cocoa
-
-// MARK: - Data model
-
-private struct EditorDocument {
-    let id: UUID
-    var url: URL?
-    var title: String
-    var text: String
-    var isDirty: Bool
-
-    static func untitled() -> EditorDocument {
-        EditorDocument(id: UUID(), url: nil, title: "Untitled", text: "", isDirty: false)
-    }
-
-    var displayTitle: String { isDirty ? "\(title) ●" : title }
-}
-
-private enum EditorMode: Int {
-    case source = 0
-    case preview = 1
-}
+import WebKit
 
 // Unified sidebar row model. Section header rows are not selectable.
 private enum SidebarRow {
@@ -41,6 +21,7 @@ final class ViewController: NSViewController,
     private let sidebarTable       = NSTableView(frame: .zero)
     private let editorTextView     = NSTextView(frame: .zero)
     private let editorScrollView   = NSScrollView()
+    private let previewWebView     = WKWebView(frame: .zero)
     private let tabStripStack      = NSStackView()
     private let statusLabel        = NSTextField(labelWithString: "Untitled draft")
     private let statusMetaLabel    = NSTextField(labelWithString: "Source · Markdown · Saved")
@@ -109,6 +90,7 @@ final class ViewController: NSViewController,
     // MARK: Actions
 
     @IBAction func newDocument(_ sender: Any?) {
+        captureCurrentDocumentViewState()
         let doc = EditorDocument.untitled()
         documents.insert(doc, at: 0)
         selectedDocumentID = doc.id
@@ -151,6 +133,9 @@ final class ViewController: NSViewController,
             let text = try String(contentsOf: url, encoding: .utf8)
             documents[index].text = text
             documents[index].isDirty = false
+            documents[index].selectionLocation = 0
+            documents[index].selectionLength = 0
+            documents[index].scrollOffset = 0
             statusLabel.stringValue = "Reverted \(documents[index].title)"
             refreshAll()
         } catch {
@@ -160,6 +145,9 @@ final class ViewController: NSViewController,
 
     @IBAction func changeMode(_ sender: Any?) {
         mode = EditorMode(rawValue: modeControl.selectedSegment) ?? .source
+        if let index = selectedDocumentIndex {
+            documents[index].mode = mode
+        }
         updateVisibleDocument()
     }
 
@@ -225,9 +213,11 @@ final class ViewController: NSViewController,
         case .header:
             break
         case .openDoc(let index):
+            captureCurrentDocumentViewState()
             selectedDocumentID = documents[index].id
             updateVisibleDocument()
         case .recent(let url):
+            captureCurrentDocumentViewState()
             openDocuments([url])
         }
     }
@@ -238,11 +228,17 @@ final class ViewController: NSViewController,
         guard !isSwitchingDocuments, let index = selectedDocumentIndex else { return }
         documents[index].text = editorTextView.string
         documents[index].isDirty = true
+        captureCurrentDocumentViewState()
         updateWindowTitle()
         rebuildSidebarRows()
         refreshTabStrip()
         updateStatusBar()
         scheduleRecoveryWrite(for: documents[index])
+    }
+
+    func textViewDidChangeSelection(_ notification: Notification) {
+        guard !isSwitchingDocuments else { return }
+        captureCurrentDocumentViewState()
     }
 
     // MARK: Interface construction
@@ -251,27 +247,30 @@ final class ViewController: NSViewController,
         view.wantsLayer = true
         view.layer?.backgroundColor = AppPalette.windowBg.cgColor
 
-        let root = NSStackView()
-        root.orientation = .vertical
-        root.spacing = 0
-        root.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(root)
-
         let tabBar    = makeTabBar()
         let body      = makeBody()
         let statusBar = makeStatusBar()
 
-        root.addArrangedSubview(tabBar)
-        root.addArrangedSubview(body)
-        root.addArrangedSubview(statusBar)
+        view.addSubview(tabBar)
+        view.addSubview(body)
+        view.addSubview(statusBar)
 
+        // Explicit edge-to-edge constraints — avoid NSStackView centerX default.
         NSLayoutConstraint.activate([
-            root.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            root.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            root.topAnchor.constraint(equalTo: view.topAnchor),
-            root.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            tabBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            tabBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            tabBar.topAnchor.constraint(equalTo: view.topAnchor),
             tabBar.heightAnchor.constraint(equalToConstant: AppMetrics.tabBarHeight),
+
+            statusBar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            statusBar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            statusBar.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             statusBar.heightAnchor.constraint(equalToConstant: AppMetrics.statusBarHeight),
+
+            body.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            body.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            body.topAnchor.constraint(equalTo: tabBar.bottomAnchor),
+            body.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
         ])
     }
 
@@ -279,6 +278,7 @@ final class ViewController: NSViewController,
 
     private func makeTabBar() -> NSView {
         let bar = NSView()
+        bar.translatesAutoresizingMaskIntoConstraints = false
         bar.wantsLayer = true
         bar.layer?.backgroundColor = AppPalette.tabBarBg.cgColor
 
@@ -343,6 +343,7 @@ final class ViewController: NSViewController,
 
     private func makeSidebar() -> NSView {
         let sidebar = NSView()
+        sidebar.translatesAutoresizingMaskIntoConstraints = false
         sidebar.wantsLayer = true
         sidebar.layer?.backgroundColor = AppPalette.sidebarBg.cgColor
 
@@ -456,6 +457,7 @@ final class ViewController: NSViewController,
 
     private func makeEditor() -> NSView {
         let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
         container.wantsLayer = true
         container.layer?.backgroundColor = AppPalette.windowBg.cgColor
 
@@ -465,6 +467,11 @@ final class ViewController: NSViewController,
         editorScrollView.drawsBackground = false
         editorScrollView.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(editorScrollView)
+
+        previewWebView.translatesAutoresizingMaskIntoConstraints = false
+        previewWebView.setValue(false, forKey: "drawsBackground")
+        previewWebView.isHidden = true
+        container.addSubview(previewWebView)
 
         editorTextView.isRichText = false
         editorTextView.isAutomaticQuoteSubstitutionEnabled = false
@@ -526,15 +533,19 @@ final class ViewController: NSViewController,
             editorScrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             editorScrollView.topAnchor.constraint(equalTo: container.topAnchor),
             editorScrollView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            previewWebView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            previewWebView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            previewWebView.topAnchor.constraint(equalTo: container.topAnchor),
+            previewWebView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
             emptyContainer.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             emptyContainer.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             emptyContainer.topAnchor.constraint(equalTo: container.topAnchor),
             emptyContainer.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            emptyStack.leadingAnchor.constraint(
-                equalTo: emptyContainer.leadingAnchor,
-                constant: AppMetrics.editorInsetH + 12
-            ),
             emptyStack.widthAnchor.constraint(equalToConstant: 360),
+            emptyStack.trailingAnchor.constraint(
+                equalTo: emptyContainer.trailingAnchor,
+                constant: -(AppMetrics.editorInsetH + 12)
+            ),
             emptyStack.centerYAnchor.constraint(
                 equalTo: emptyContainer.centerYAnchor, constant: -20
             ),
@@ -547,6 +558,7 @@ final class ViewController: NSViewController,
 
     private func makeStatusBar() -> NSView {
         let bar = NSView()
+        bar.translatesAutoresizingMaskIntoConstraints = false
         bar.wantsLayer = true
         bar.layer?.backgroundColor = AppPalette.sidebarBg.cgColor
 
@@ -639,6 +651,7 @@ final class ViewController: NSViewController,
     }
 
     private func closeDocument(at index: Int) {
+        captureCurrentDocumentViewState()
         let wasSelected = documents[index].id == selectedDocumentID
         documents.remove(at: index)
 
@@ -775,6 +788,7 @@ final class ViewController: NSViewController,
     // MARK: Session save / restore
 
     func saveSession() {
+        captureCurrentDocumentViewState()
         let saved = documents.map { doc -> SavedDocument in
             // For dirty docs without a saved URL, embed the text directly.
             // For clean saved docs, omit the text (re-read from disk on restore).
@@ -784,7 +798,11 @@ final class ViewController: NSViewController,
                 urlPath: doc.url?.path(percentEncoded: false),
                 title: doc.title,
                 text: embedText ? doc.text : nil,
-                isDirty: doc.isDirty
+                isDirty: doc.isDirty,
+                scrollOffset: doc.scrollOffset,
+                selectionLocation: doc.selectionLocation,
+                selectionLength: doc.selectionLength,
+                modeRawValue: doc.mode.rawValue
             )
         }
         SessionStore.save(SavedSession(
@@ -810,7 +828,12 @@ final class ViewController: NSViewController,
                 if !saved.isDirty, let text = try? String(contentsOf: url, encoding: .utf8) {
                     restored.append(EditorDocument(
                         id: saved.id, url: url, title: saved.title,
-                        text: text, isDirty: false
+                        text: text,
+                        isDirty: false,
+                        scrollOffset: saved.scrollOffset,
+                        selectionLocation: saved.selectionLocation,
+                        selectionLength: saved.selectionLength,
+                        mode: EditorMode(rawValue: saved.modeRawValue) ?? .source
                     ))
                     continue
                 }
@@ -818,14 +841,24 @@ final class ViewController: NSViewController,
                 let text = recoveryText ?? saved.text ?? ""
                 restored.append(EditorDocument(
                     id: saved.id, url: url, title: saved.title,
-                    text: text, isDirty: !text.isEmpty || saved.isDirty
+                    text: text,
+                    isDirty: !text.isEmpty || saved.isDirty,
+                    scrollOffset: saved.scrollOffset,
+                    selectionLocation: saved.selectionLocation,
+                    selectionLength: saved.selectionLength,
+                    mode: EditorMode(rawValue: saved.modeRawValue) ?? .source
                 ))
             } else {
                 // Untitled document — restore from session text or recovery
                 let text = recoveryText ?? saved.text ?? ""
                 restored.append(EditorDocument(
                     id: saved.id, url: nil, title: saved.title,
-                    text: text, isDirty: text.isEmpty ? false : saved.isDirty
+                    text: text,
+                    isDirty: text.isEmpty ? false : saved.isDirty,
+                    scrollOffset: saved.scrollOffset,
+                    selectionLocation: saved.selectionLocation,
+                    selectionLength: saved.selectionLength,
+                    mode: EditorMode(rawValue: saved.modeRawValue) ?? .source
                 ))
             }
         }
@@ -887,6 +920,7 @@ final class ViewController: NSViewController,
             editorTextView.string = ""
             emptyContainer.isHidden = true
             editorScrollView.isHidden = false
+            previewWebView.isHidden = true
             statusLabel.stringValue = "No document"
             statusMetaLabel.stringValue = ""
             modeControl.selectedSegment = mode.rawValue
@@ -895,7 +929,9 @@ final class ViewController: NSViewController,
 
         isSwitchingDocuments = true
         let doc = documents[index]
+        mode = doc.mode
         applyDocumentContent(doc)
+        restoreDocumentViewState(doc)
         statusLabel.stringValue = doc.url?.path(percentEncoded: false) ?? "Untitled draft"
         statusMetaLabel.stringValue = statusSummary(for: doc)
         updateWindowTitle()
@@ -915,18 +951,49 @@ final class ViewController: NSViewController,
         statusMetaLabel.stringValue = statusSummary(for: doc)
     }
 
+    private func captureCurrentDocumentViewState() {
+        guard let index = selectedDocumentIndex else { return }
+        documents[index].mode = mode
+        documents[index].selectionLocation = editorTextView.selectedRange().location
+        documents[index].selectionLength = editorTextView.selectedRange().length
+        documents[index].scrollOffset = editorScrollView.contentView.bounds.origin.y
+    }
+
+    private func restoreDocumentViewState(_ doc: EditorDocument) {
+        guard mode == .source else { return }
+        let length = (editorTextView.string as NSString).length
+        let clampedLocation = min(max(0, doc.selectionLocation), length)
+        let clampedLength = min(max(0, doc.selectionLength), max(0, length - clampedLocation))
+        let range = NSRange(location: clampedLocation, length: clampedLength)
+        editorTextView.setSelectedRange(range)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.editorScrollView.contentView.scroll(
+                to: NSPoint(x: 0, y: max(0, doc.scrollOffset))
+            )
+            self.editorScrollView.reflectScrolledClipView(self.editorScrollView.contentView)
+        }
+    }
+
     private func openDocuments(_ urls: [URL]) {
+        captureCurrentDocumentViewState()
         for url in urls {
             do {
                 let text = try String(contentsOf: url, encoding: .utf8)
                 if let i = documents.firstIndex(where: { $0.url == url }) {
                     documents[i].text = text
                     documents[i].isDirty = false
+                    documents[i].mode = .source
                     selectedDocumentID = documents[i].id
                 } else {
                     let doc = EditorDocument(
                         id: UUID(), url: url, title: url.lastPathComponent,
-                        text: text, isDirty: false
+                        text: text,
+                        isDirty: false,
+                        scrollOffset: 0,
+                        selectionLocation: 0,
+                        selectionLength: 0,
+                        mode: .source
                     )
                     documents.append(doc)
                     selectedDocumentID = doc.id
@@ -941,6 +1008,7 @@ final class ViewController: NSViewController,
 
     private func writeDocument(at index: Int, to url: URL) {
         do {
+            captureCurrentDocumentViewState()
             try documents[index].text.write(to: url, atomically: true, encoding: .utf8)
             let docID = documents[index].id
             documents[index].url = url
@@ -963,7 +1031,8 @@ final class ViewController: NSViewController,
     private func applyDocumentContent(_ doc: EditorDocument) {
         let showEmpty = doc.url == nil && doc.text.isEmpty && mode == .source
         emptyContainer.isHidden = !showEmpty
-        editorScrollView.isHidden = showEmpty
+        editorScrollView.isHidden = showEmpty || mode == .preview
+        previewWebView.isHidden = mode != .preview
 
         switch mode {
         case .source:
@@ -980,40 +1049,272 @@ final class ViewController: NSViewController,
             editorTextView.isHorizontallyResizable = false
             editorTextView.textContainer?.widthTracksTextView = true
         case .preview:
-            editorTextView.isEditable = false
-            editorTextView.isSelectable = true
-            editorTextView.textContainerInset = NSSize(
-                width: AppMetrics.editorInsetH + 24, height: AppMetrics.editorInsetV
+            previewWebView.loadHTMLString(
+                renderPreviewHTML(for: doc),
+                baseURL: doc.url?.deletingLastPathComponent()
             )
-            editorTextView.isHorizontallyResizable = false
-            editorTextView.textContainer?.widthTracksTextView = true
-            editorTextView.textStorage?.setAttributedString(renderPreview(for: doc))
         }
 
         modeControl.selectedSegment = mode.rawValue
     }
 
-    private func renderPreview(for doc: EditorDocument) -> NSAttributedString {
-        let para = NSMutableParagraphStyle()
-        para.lineHeightMultiple = AppMetrics.lineHeightMultiple
-        para.paragraphSpacing = 10
-        para.paragraphSpacingBefore = 2
+    private func renderPreviewHTML(for doc: EditorDocument) -> String {
+        let title = escapeHTML(doc.title)
+        let body = isMarkdown(doc) ? markdownToHTML(doc.text) : plainTextToHTML(doc.text)
+        return """
+        <!doctype html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>\(title)</title>
+          <style>
+            :root {
+              color-scheme: dark;
+              --bg: \(cssHex(AppPalette.windowBg));
+              --panel: \(cssHex(AppPalette.sidebarBg));
+              --text: \(cssHex(AppPalette.textPrimary));
+              --muted: \(cssHex(AppPalette.textMuted));
+              --border: \(cssHex(AppPalette.border));
+              --accent: \(cssHex(AppPalette.accent));
+              --code: \(cssHex(AppPalette.tabActiveBg));
+            }
+            html, body {
+              margin: 0;
+              background: var(--bg);
+              color: var(--text);
+              font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+            }
+            body { padding: 32px 0 56px; }
+            main {
+              max-width: 820px;
+              margin: 0 auto;
+              padding: 0 44px;
+              box-sizing: border-box;
+            }
+            h1, h2, h3, h4, h5, h6 {
+              line-height: 1.15;
+              margin: 1.25em 0 0.5em;
+            }
+            h1 { font-size: 2rem; }
+            h2 { font-size: 1.55rem; }
+            h3 { font-size: 1.25rem; }
+            p, li, blockquote {
+              font-size: 15px;
+              line-height: 1.7;
+            }
+            p, ul, ol, pre, blockquote, table { margin: 0 0 1rem; }
+            ul, ol { padding-left: 1.4rem; }
+            code {
+              font-family: "SF Mono", Menlo, monospace;
+              font-size: 0.92em;
+              background: color-mix(in srgb, var(--code) 88%, transparent);
+              border: 1px solid var(--border);
+              border-radius: 6px;
+              padding: 0.12rem 0.35rem;
+            }
+            pre {
+              background: var(--code);
+              border: 1px solid var(--border);
+              border-radius: 12px;
+              padding: 16px 18px;
+              overflow-x: auto;
+            }
+            pre code {
+              background: transparent;
+              border: 0;
+              padding: 0;
+            }
+            blockquote {
+              border-left: 3px solid var(--accent);
+              padding-left: 14px;
+              color: var(--muted);
+            }
+            hr {
+              border: 0;
+              height: 1px;
+              background: var(--border);
+              margin: 1.5rem 0;
+            }
+            a {
+              color: var(--accent);
+              text-decoration: none;
+            }
+            table {
+              width: 100%;
+              border-collapse: collapse;
+              font-size: 14px;
+            }
+            th, td {
+              border: 1px solid var(--border);
+              padding: 8px 10px;
+              text-align: left;
+              vertical-align: top;
+            }
+            th { background: color-mix(in srgb, var(--panel) 78%, transparent); }
+          </style>
+        </head>
+        <body>
+          <main>
+            \(body)
+          </main>
+        </body>
+        </html>
+        """
+    }
 
-        if isMarkdown(doc), let attributed = try? AttributedString(markdown: doc.text) {
-            let rendered = NSMutableAttributedString(
-                attributedString: NSAttributedString(attributed)
-            )
-            let range = NSRange(location: 0, length: rendered.length)
-            rendered.addAttribute(.paragraphStyle, value: para, range: range)
-            rendered.addAttribute(.foregroundColor, value: AppPalette.textPrimary, range: range)
-            return rendered
+    private func plainTextToHTML(_ text: String) -> String {
+        "<pre><code>\(escapeHTML(text))</code></pre>"
+    }
+
+    private func markdownToHTML(_ markdown: String) -> String {
+        var html: [String] = []
+        var paragraph: [String] = []
+        var listItems: [String] = []
+        var currentListTag: String?
+        var inCodeBlock = false
+        var codeLines: [String] = []
+
+        func flushParagraph() {
+            guard !paragraph.isEmpty else { return }
+            html.append("<p>\(renderInlineMarkdown(paragraph.joined(separator: " ")))</p>")
+            paragraph.removeAll()
         }
 
-        return NSAttributedString(string: doc.text, attributes: [
-            .font: NSFont.systemFont(ofSize: 15, weight: .regular),
-            .foregroundColor: AppPalette.textPrimary,
-            .paragraphStyle: para,
-        ])
+        func flushList() {
+            guard let tagName = currentListTag, !listItems.isEmpty else { return }
+            html.append("<\(tagName)>\(listItems.joined())</\(tagName)>")
+            listItems.removeAll()
+            currentListTag = nil
+        }
+
+        func flushCodeBlock() {
+            guard !codeLines.isEmpty else { return }
+            html.append("<pre><code>\(escapeHTML(codeLines.joined(separator: "\n")))</code></pre>")
+            codeLines.removeAll()
+        }
+
+        for rawLine in markdown.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+
+            if rawLine.hasPrefix("```") {
+                flushParagraph()
+                flushList()
+                if inCodeBlock { flushCodeBlock() }
+                inCodeBlock.toggle()
+                continue
+            }
+
+            if inCodeBlock {
+                codeLines.append(rawLine)
+                continue
+            }
+
+            if line.isEmpty {
+                flushParagraph()
+                flushList()
+                continue
+            }
+
+            if line == "---" || line == "***" {
+                flushParagraph()
+                flushList()
+                html.append("<hr>")
+                continue
+            }
+
+            if let heading = parseHeading(line) {
+                flushParagraph()
+                flushList()
+                html.append("<h\(heading.level)>\(renderInlineMarkdown(heading.text))</h\(heading.level)>")
+                continue
+            }
+
+            if let item = line.dropPrefixIfPresent("- ") ?? line.dropPrefixIfPresent("* ") {
+                flushParagraph()
+                if currentListTag != "ul" {
+                    flushList()
+                    currentListTag = "ul"
+                }
+                listItems.append("<li>\(renderInlineMarkdown(item))</li>")
+                continue
+            }
+
+            if let item = line.captureOrderedListItem() {
+                flushParagraph()
+                if currentListTag != "ol" {
+                    flushList()
+                    currentListTag = "ol"
+                }
+                listItems.append("<li>\(renderInlineMarkdown(item))</li>")
+                continue
+            }
+
+            if let quote = line.dropPrefixIfPresent("> ") {
+                flushParagraph()
+                flushList()
+                html.append("<blockquote>\(renderInlineMarkdown(quote))</blockquote>")
+                continue
+            }
+
+            flushList()
+            paragraph.append(line)
+        }
+
+        if inCodeBlock { flushCodeBlock() }
+        flushParagraph()
+        flushList()
+        return html.joined(separator: "\n")
+    }
+
+    private func parseHeading(_ line: String) -> (level: Int, text: String)? {
+        let hashes = line.prefix { $0 == "#" }
+        guard (1...6).contains(hashes.count), line.dropFirst(hashes.count).hasPrefix(" ") else {
+            return nil
+        }
+        let text = line.dropFirst(hashes.count).trimmingCharacters(in: .whitespaces)
+        return (hashes.count, text)
+    }
+
+    private func renderInlineMarkdown(_ text: String) -> String {
+        var rendered = escapeHTML(text)
+        rendered = rendered.replacingOccurrences(
+            of: #"`([^`]+)`"#,
+            with: "<code>$1</code>",
+            options: .regularExpression
+        )
+        rendered = rendered.replacingOccurrences(
+            of: #"\*\*([^*]+)\*\*"#,
+            with: "<strong>$1</strong>",
+            options: .regularExpression
+        )
+        rendered = rendered.replacingOccurrences(
+            of: #"(?<!\*)\*([^*]+)\*(?!\*)"#,
+            with: "<em>$1</em>",
+            options: .regularExpression
+        )
+        rendered = rendered.replacingOccurrences(
+            of: #"\[([^\]]+)\]\(([^)]+)\)"#,
+            with: "<a href=\"$2\">$1</a>",
+            options: .regularExpression
+        )
+        return rendered
+    }
+
+    private func escapeHTML(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+    }
+
+    private func cssHex(_ color: NSColor) -> String {
+        let rgb = color.usingColorSpace(.deviceRGB) ?? color
+        let r = Int((rgb.redComponent * 255).rounded())
+        let g = Int((rgb.greenComponent * 255).rounded())
+        let b = Int((rgb.blueComponent * 255).rounded())
+        return String(format: "#%02X%02X%02X", r, g, b)
     }
 
     private func isMarkdown(_ doc: EditorDocument) -> Bool {
@@ -1026,6 +1327,23 @@ final class ViewController: NSViewController,
         let kindStr  = isMarkdown(doc) ? "Markdown" : "Text"
         let dirtyStr = doc.isDirty ? "Unsaved" : "Saved"
         return "\(modeStr) · \(kindStr) · \(dirtyStr)"
+    }
+}
+
+private extension String {
+    func dropPrefixIfPresent(_ prefix: String) -> String? {
+        hasPrefix(prefix) ? String(dropFirst(prefix.count)) : nil
+    }
+
+    func captureOrderedListItem() -> String? {
+        guard let dot = firstIndex(of: ".") else { return nil }
+        let prefix = self[..<dot]
+        guard !prefix.isEmpty, prefix.allSatisfy(\.isNumber) else { return nil }
+        let remainderStart = index(after: dot)
+        guard remainderStart < endIndex, self[remainderStart] == " " else { return nil }
+        let contentStart = index(after: remainderStart)
+        guard contentStart <= endIndex else { return nil }
+        return String(self[contentStart...])
     }
 }
 

@@ -4,6 +4,39 @@
 
 import Foundation
 
+enum EditorMode: Int, Codable {
+    case source = 0
+    case preview = 1
+}
+
+struct EditorDocument {
+    let id: UUID
+    var url: URL?
+    var title: String
+    var text: String
+    var isDirty: Bool
+    var scrollOffset: Double
+    var selectionLocation: Int
+    var selectionLength: Int
+    var mode: EditorMode
+
+    static func untitled() -> EditorDocument {
+        EditorDocument(
+            id: UUID(),
+            url: nil,
+            title: "Untitled",
+            text: "",
+            isDirty: false,
+            scrollOffset: 0,
+            selectionLocation: 0,
+            selectionLength: 0,
+            mode: .source
+        )
+    }
+
+    var displayTitle: String { isDirty ? "\(title) ●" : title }
+}
+
 // MARK: - Codable document snapshot
 
 struct SavedDocument: Codable {
@@ -12,6 +45,10 @@ struct SavedDocument: Codable {
     var title: String
     var text: String?     // nil for clean saved-to-disk documents (re-read on restore)
     var isDirty: Bool
+    var scrollOffset: Double
+    var selectionLocation: Int
+    var selectionLength: Int
+    var modeRawValue: Int
 }
 
 // MARK: - Codable session snapshot
