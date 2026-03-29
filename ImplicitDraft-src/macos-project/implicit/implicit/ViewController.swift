@@ -109,21 +109,29 @@ final class ViewController: NSViewController,
 
     @IBAction func saveDocument(_ sender: Any?) {
         guard let index = selectedDocumentIndex else { return }
-        if let url = documents[index].url {
-            writeDocument(at: index, to: url)
-        } else {
-            saveDocumentAs(sender)
-        }
+        saveDocument(at: index, completion: nil)
     }
 
     @IBAction func saveDocumentAs(_ sender: Any?) {
         guard let index = selectedDocumentIndex else { return }
+        saveDocumentAs(at: index, completion: nil)
+    }
+
+    private func saveDocument(at index: Int, completion: (() -> Void)?) {
+        if let url = documents[index].url {
+            writeDocument(at: index, to: url, completion: completion)
+        } else {
+            saveDocumentAs(at: index, completion: completion)
+        }
+    }
+
+    private func saveDocumentAs(at index: Int, completion: (() -> Void)?) {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = suggestedFilename(for: documents[index])
         panel.canCreateDirectories = true
         panel.beginSheetModal(for: view.window!) { [weak self] response in
             guard response == .OK, let url = panel.url else { return }
-            self?.writeDocument(at: index, to: url)
+            self?.writeDocument(at: index, to: url, completion: completion)
         }
     }
 
@@ -213,9 +221,7 @@ final class ViewController: NSViewController,
         case .header:
             break
         case .openDoc(let index):
-            captureCurrentDocumentViewState()
-            selectedDocumentID = documents[index].id
-            updateVisibleDocument()
+            activateDocument(at: index)
         case .recent(let url):
             captureCurrentDocumentViewState()
             openDocuments([url])
@@ -610,11 +616,7 @@ final class ViewController: NSViewController,
     // MARK: Tab strip
 
     @objc private func selectTabFromStrip(_ sender: NSButton) {
-        let index = sender.tag
-        guard documents.indices.contains(index) else { return }
-        selectedDocumentID = documents[index].id
-        syncSidebarSelection()
-        updateVisibleDocument()
+        activateDocument(at: sender.tag)
     }
 
     @objc private func closeTabFromStrip(_ sender: NSButton) {
@@ -633,8 +635,9 @@ final class ViewController: NSViewController,
                 guard let self else { return }
                 switch response {
                 case .alertFirstButtonReturn:  // Save
-                    self.saveDocument(nil)
-                    self.closeDocument(at: index)
+                    self.saveDocument(at: index) { [weak self] in
+                        self?.closeDocument(at: index)
+                    }
                 case .alertSecondButtonReturn: // Don't Save
                     self.closeDocument(at: index)
                 default:
@@ -648,6 +651,14 @@ final class ViewController: NSViewController,
 
     @objc private func createTabFromStrip(_ sender: Any?) {
         newDocument(sender)
+    }
+
+    private func activateDocument(at index: Int) {
+        guard documents.indices.contains(index) else { return }
+        captureCurrentDocumentViewState()
+        selectedDocumentID = documents[index].id
+        syncSidebarSelection()
+        updateVisibleDocument()
     }
 
     private func closeDocument(at index: Int) {
@@ -978,26 +989,42 @@ final class ViewController: NSViewController,
     private func openDocuments(_ urls: [URL]) {
         captureCurrentDocumentViewState()
         for url in urls {
-            do {
-                let text = try String(contentsOf: url, encoding: .utf8)
-                if let i = documents.firstIndex(where: { $0.url == url }) {
+            if let i = documents.firstIndex(where: { $0.url == url }) {
+                if documents[i].isDirty {
+                    statusLabel.stringValue = "\(documents[i].title) is already open with unsaved changes"
+                    activateDocument(at: i)
+                    continue
+                }
+                do {
+                    let text = try String(contentsOf: url, encoding: .utf8)
                     documents[i].text = text
                     documents[i].isDirty = false
+                    documents[i].scrollOffset = 0
+                    documents[i].selectionLocation = 0
+                    documents[i].selectionLength = 0
                     documents[i].mode = .source
-                    selectedDocumentID = documents[i].id
-                } else {
-                    let doc = EditorDocument(
-                        id: UUID(), url: url, title: url.lastPathComponent,
-                        text: text,
-                        isDirty: false,
-                        scrollOffset: 0,
-                        selectionLocation: 0,
-                        selectionLength: 0,
-                        mode: .source
-                    )
-                    documents.append(doc)
-                    selectedDocumentID = doc.id
+                    activateDocument(at: i)
+                    NSDocumentController.shared.noteNewRecentDocumentURL(url)
+                    continue
+                } catch {
+                    statusLabel.stringValue = "Failed to open: \(error.localizedDescription)"
+                    continue
                 }
+            }
+
+            do {
+                let text = try String(contentsOf: url, encoding: .utf8)
+                let doc = EditorDocument(
+                    id: UUID(), url: url, title: url.lastPathComponent,
+                    text: text,
+                    isDirty: false,
+                    scrollOffset: 0,
+                    selectionLocation: 0,
+                    selectionLength: 0,
+                    mode: .source
+                )
+                documents.append(doc)
+                selectedDocumentID = doc.id
                 NSDocumentController.shared.noteNewRecentDocumentURL(url)
             } catch {
                 statusLabel.stringValue = "Failed to open: \(error.localizedDescription)"
@@ -1006,7 +1033,7 @@ final class ViewController: NSViewController,
         refreshAll()
     }
 
-    private func writeDocument(at index: Int, to url: URL) {
+    private func writeDocument(at index: Int, to url: URL, completion: (() -> Void)?) {
         do {
             captureCurrentDocumentViewState()
             try documents[index].text.write(to: url, atomically: true, encoding: .utf8)
@@ -1019,6 +1046,7 @@ final class ViewController: NSViewController,
             SessionStore.clearRecovery(id: docID)
             saveSession()
             refreshAll()
+            completion?()
         } catch {
             statusLabel.stringValue = "Save failed: \(error.localizedDescription)"
         }

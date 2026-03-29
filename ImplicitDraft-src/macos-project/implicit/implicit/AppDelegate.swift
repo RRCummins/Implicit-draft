@@ -12,6 +12,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.minSize = NSSize(width: 920, height: 620)
         window.center()
         window.appearance = NSAppearance(named: .darkAqua)
+        window.makeKeyAndOrderFront(self)
+        NSApp.activate(ignoringOtherApps: true)
         flushPendingOpenURLs()
     }
 
