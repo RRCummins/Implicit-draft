@@ -37,21 +37,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let vc = mainViewController, vc.hasDirtyDocuments else {
             return .terminateNow
         }
-
-        let count = vc.dirtyDocumentCount
-        let plural = count == 1 ? "document" : "documents"
-
-        let alert = NSAlert()
-        alert.messageText = "Quit with unsaved changes?"
-        alert.informativeText = "You have \(count) unsaved \(plural). Your changes will be lost."
-        alert.addButton(withTitle: "Quit Anyway")
-        alert.addButton(withTitle: "Cancel")
-        alert.alertStyle = .warning
-
-        alert.beginSheetModal(for: NSApp.windows.first!) { response in
-            NSApp.reply(toApplicationShouldTerminate: response == .alertFirstButtonReturn)
+        vc.confirmTermination { allow in
+            NSApp.reply(toApplicationShouldTerminate: allow)
         }
-
         return .terminateLater
     }
 

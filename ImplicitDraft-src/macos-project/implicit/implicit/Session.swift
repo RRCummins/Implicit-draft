@@ -15,6 +15,7 @@ struct EditorDocument {
     var title: String
     var text: String
     var isDirty: Bool
+    var diskModificationTime: TimeInterval?
     var scrollOffset: Double
     var selectionLocation: Int
     var selectionLength: Int
@@ -27,6 +28,7 @@ struct EditorDocument {
             title: "Untitled",
             text: "",
             isDirty: false,
+            diskModificationTime: nil,
             scrollOffset: 0,
             selectionLocation: 0,
             selectionLength: 0,
@@ -45,6 +47,7 @@ struct SavedDocument: Codable {
     var title: String
     var text: String?     // nil for clean saved-to-disk documents (re-read on restore)
     var isDirty: Bool
+    var diskModificationTime: TimeInterval?
     var scrollOffset: Double
     var selectionLocation: Int
     var selectionLength: Int

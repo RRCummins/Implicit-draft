@@ -15,7 +15,8 @@ private enum SidebarRow {
 
 final class ViewController: NSViewController,
                              NSTableViewDataSource, NSTableViewDelegate,
-                             NSTextViewDelegate, NSMenuItemValidation {
+                             NSTextViewDelegate, NSMenuItemValidation,
+                             NSWindowDelegate {
     // MARK: Subviews
     private let splitView          = FlatSplitView()
     private let sidebarTable       = NSTableView(frame: .zero)
@@ -44,6 +45,7 @@ final class ViewController: NSViewController,
     private var didSetInitialSplit:   Bool = false
     private var theme:                ImplicitTheme = ImplicitThemeLoader.load()
     private var recoveryTimer:        Timer?
+    private var pendingWindowCloseApproval = false
 
     // MARK: Public interface for AppDelegate
 
@@ -71,6 +73,7 @@ final class ViewController: NSViewController,
         window.isMovableByWindowBackground = true
         window.backgroundColor = AppPalette.windowBg
         window.appearance = NSAppearance(named: .darkAqua)
+        window.delegate = self
     }
 
     override func viewDidLayout() {
@@ -84,6 +87,9 @@ final class ViewController: NSViewController,
 
     func applicationOpenFiles(_ urls: [URL]) { openDocuments(urls) }
     func applicationCreateNewDocument()      { newDocument(nil) }
+    func confirmTermination(_ completion: @escaping (Bool) -> Void) {
+        confirmLossyClose(for: dirtyDocumentIndices.reversed(), completion: completion)
+    }
 
     override var representedObject: Any? { didSet {} }
 
@@ -95,6 +101,7 @@ final class ViewController: NSViewController,
         documents.insert(doc, at: 0)
         selectedDocumentID = doc.id
         refreshAll()
+        saveSession()
     }
 
     @IBAction func openDocument(_ sender: Any?) {
@@ -118,6 +125,11 @@ final class ViewController: NSViewController,
     }
 
     private func saveDocument(at index: Int, completion: (() -> Void)?) {
+        guard documents.indices.contains(index) else { return }
+        if let conflict = saveConflictURL(for: index) {
+            presentExternalChangeAlert(for: index, url: conflict, completion: completion)
+            return
+        }
         if let url = documents[index].url {
             writeDocument(at: index, to: url, completion: completion)
         } else {
@@ -141,11 +153,13 @@ final class ViewController: NSViewController,
             let text = try String(contentsOf: url, encoding: .utf8)
             documents[index].text = text
             documents[index].isDirty = false
+            documents[index].diskModificationTime = fileModificationTime(for: url)
             documents[index].selectionLocation = 0
             documents[index].selectionLength = 0
             documents[index].scrollOffset = 0
             statusLabel.stringValue = "Reverted \(documents[index].title)"
             refreshAll()
+            saveSession()
         } catch {
             statusLabel.stringValue = "Error: \(error.localizedDescription)"
         }
@@ -157,6 +171,7 @@ final class ViewController: NSViewController,
             documents[index].mode = mode
         }
         updateVisibleDocument()
+        saveSession()
     }
 
     // MARK: Menu validation
@@ -170,6 +185,32 @@ final class ViewController: NSViewController,
         default:
             return true
         }
+    }
+
+    // MARK: NSWindowDelegate
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if pendingWindowCloseApproval {
+            pendingWindowCloseApproval = false
+            return true
+        }
+
+        let dirtyIndices = Array(dirtyDocumentIndices.reversed())
+        guard !dirtyIndices.isEmpty else {
+            saveSession()
+            return true
+        }
+
+        confirmLossyClose(for: dirtyIndices) { [weak self, weak sender] allowed in
+            guard allowed, let self, let sender else { return }
+            self.pendingWindowCloseApproval = true
+            sender.performClose(nil)
+        }
+        return false
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        saveSession()
     }
 
     // MARK: NSTableViewDataSource
@@ -676,6 +717,7 @@ final class ViewController: NSViewController,
         }
 
         refreshAll()
+        saveSession()
     }
 
     private func refreshTabStrip() {
@@ -810,6 +852,7 @@ final class ViewController: NSViewController,
                 title: doc.title,
                 text: embedText ? doc.text : nil,
                 isDirty: doc.isDirty,
+                diskModificationTime: doc.diskModificationTime,
                 scrollOffset: doc.scrollOffset,
                 selectionLocation: doc.selectionLocation,
                 selectionLength: doc.selectionLength,
@@ -841,6 +884,7 @@ final class ViewController: NSViewController,
                         id: saved.id, url: url, title: saved.title,
                         text: text,
                         isDirty: false,
+                        diskModificationTime: fileModificationTime(for: url),
                         scrollOffset: saved.scrollOffset,
                         selectionLocation: saved.selectionLocation,
                         selectionLength: saved.selectionLength,
@@ -854,6 +898,7 @@ final class ViewController: NSViewController,
                     id: saved.id, url: url, title: saved.title,
                     text: text,
                     isDirty: !text.isEmpty || saved.isDirty,
+                    diskModificationTime: saved.diskModificationTime ?? fileModificationTime(for: url),
                     scrollOffset: saved.scrollOffset,
                     selectionLocation: saved.selectionLocation,
                     selectionLength: saved.selectionLength,
@@ -866,6 +911,7 @@ final class ViewController: NSViewController,
                     id: saved.id, url: nil, title: saved.title,
                     text: text,
                     isDirty: text.isEmpty ? false : saved.isDirty,
+                    diskModificationTime: nil,
                     scrollOffset: saved.scrollOffset,
                     selectionLocation: saved.selectionLocation,
                     selectionLength: saved.selectionLength,
@@ -909,6 +955,10 @@ final class ViewController: NSViewController,
     private var selectedDocumentIndex: Int? {
         guard let id = selectedDocumentID else { return nil }
         return documents.firstIndex { $0.id == id }
+    }
+
+    private var dirtyDocumentIndices: [Int] {
+        documents.indices.filter { documents[$0].isDirty }
     }
 
     private func seedInitialDocumentIfNeeded() {
@@ -986,8 +1036,48 @@ final class ViewController: NSViewController,
         }
     }
 
+    private func saveConflictURL(for index: Int) -> URL? {
+        guard documents.indices.contains(index), let url = documents[index].url else { return nil }
+        guard let knownTime = documents[index].diskModificationTime,
+              let currentTime = fileModificationTime(for: url) else {
+            return nil
+        }
+        return abs(currentTime - knownTime) > 0.5 ? url : nil
+    }
+
+    private func presentExternalChangeAlert(
+        for index: Int,
+        url: URL,
+        completion: (() -> Void)?
+    ) {
+        let alert = NSAlert()
+        alert.messageText = "File changed on disk"
+        alert.informativeText = "\"\(url.lastPathComponent)\" was modified outside Implicit. Overwrite it, or save your buffer somewhere else."
+        alert.addButton(withTitle: "Overwrite")
+        alert.addButton(withTitle: "Save As")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+        alert.beginSheetModal(for: view.window!) { [weak self] response in
+            guard let self else { return }
+            switch response {
+            case .alertFirstButtonReturn:
+                self.writeDocument(at: index, to: url, completion: completion)
+            case .alertSecondButtonReturn:
+                self.saveDocumentAs(at: index, completion: completion)
+            default:
+                break
+            }
+        }
+    }
+
+    private func fileModificationTime(for url: URL) -> TimeInterval? {
+        let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
+        return values?.contentModificationDate?.timeIntervalSince1970
+    }
+
     private func openDocuments(_ urls: [URL]) {
         captureCurrentDocumentViewState()
+        var changed = false
         for url in urls {
             if let i = documents.firstIndex(where: { $0.url == url }) {
                 if documents[i].isDirty {
@@ -999,12 +1089,14 @@ final class ViewController: NSViewController,
                     let text = try String(contentsOf: url, encoding: .utf8)
                     documents[i].text = text
                     documents[i].isDirty = false
+                    documents[i].diskModificationTime = fileModificationTime(for: url)
                     documents[i].scrollOffset = 0
                     documents[i].selectionLocation = 0
                     documents[i].selectionLength = 0
                     documents[i].mode = .source
                     activateDocument(at: i)
                     NSDocumentController.shared.noteNewRecentDocumentURL(url)
+                    changed = true
                     continue
                 } catch {
                     statusLabel.stringValue = "Failed to open: \(error.localizedDescription)"
@@ -1018,6 +1110,7 @@ final class ViewController: NSViewController,
                     id: UUID(), url: url, title: url.lastPathComponent,
                     text: text,
                     isDirty: false,
+                    diskModificationTime: fileModificationTime(for: url),
                     scrollOffset: 0,
                     selectionLocation: 0,
                     selectionLength: 0,
@@ -1026,11 +1119,15 @@ final class ViewController: NSViewController,
                 documents.append(doc)
                 selectedDocumentID = doc.id
                 NSDocumentController.shared.noteNewRecentDocumentURL(url)
+                changed = true
             } catch {
                 statusLabel.stringValue = "Failed to open: \(error.localizedDescription)"
             }
         }
         refreshAll()
+        if changed {
+            saveSession()
+        }
     }
 
     private func writeDocument(at index: Int, to url: URL, completion: (() -> Void)?) {
@@ -1041,6 +1138,7 @@ final class ViewController: NSViewController,
             documents[index].url = url
             documents[index].title = url.lastPathComponent
             documents[index].isDirty = false
+            documents[index].diskModificationTime = fileModificationTime(for: url)
             statusLabel.stringValue = "Saved \(url.lastPathComponent)"
             NSDocumentController.shared.noteNewRecentDocumentURL(url)
             SessionStore.clearRecovery(id: docID)
@@ -1049,6 +1147,47 @@ final class ViewController: NSViewController,
             completion?()
         } catch {
             statusLabel.stringValue = "Save failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func confirmLossyClose(
+        for pendingIndices: [Int],
+        completion: @escaping (Bool) -> Void
+    ) {
+        guard let index = pendingIndices.first, documents.indices.contains(index) else {
+            completion(true)
+            return
+        }
+
+        activateDocument(at: index)
+
+        let doc = documents[index]
+        let alert = NSAlert()
+        alert.messageText = "Save \"\(doc.title)\"?"
+        alert.informativeText = "Your changes will be lost if you don't save before closing."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Don't Save")
+        alert.addButton(withTitle: "Cancel")
+        alert.alertStyle = .warning
+        alert.beginSheetModal(for: view.window!) { [weak self] response in
+            guard let self else { return }
+            switch response {
+            case .alertFirstButtonReturn:
+                self.saveDocument(at: index) { [weak self] in
+                    guard let self else { return }
+                    self.confirmLossyClose(
+                        for: Array(pendingIndices.dropFirst()),
+                        completion: completion
+                    )
+                }
+            case .alertSecondButtonReturn:
+                self.confirmLossyClose(
+                    for: Array(pendingIndices.dropFirst()),
+                    completion: completion
+                )
+            default:
+                completion(false)
+            }
         }
     }
 
