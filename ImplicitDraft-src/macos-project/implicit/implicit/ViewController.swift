@@ -124,7 +124,7 @@ final class ViewController: NSViewController,
 
     private func saveDocument(at index: Int, completion: (() -> Void)?) {
         guard documents.indices.contains(index) else { return }
-        if let conflict = saveConflictURL(for: index) {
+        if let conflict = StandaloneDocumentIO.saveConflictURL(for: documents[index]) {
             presentExternalChangeAlert(for: index, url: conflict, completion: completion)
             return
         }
@@ -137,7 +137,7 @@ final class ViewController: NSViewController,
 
     private func saveDocumentAs(at index: Int, completion: (() -> Void)?) {
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = suggestedFilename(for: documents[index])
+        panel.nameFieldStringValue = StandaloneDocumentIO.suggestedFilename(for: documents[index])
         panel.canCreateDirectories = true
         panel.beginSheetModal(for: view.window!) { [weak self] response in
             guard response == .OK, let url = panel.url else { return }
@@ -146,15 +146,9 @@ final class ViewController: NSViewController,
     }
 
     @IBAction func revertDocumentToSaved(_ sender: Any?) {
-        guard let index = selectedDocumentIndex, let url = documents[index].url else { return }
+        guard let index = selectedDocumentIndex, documents[index].url != nil else { return }
         do {
-            let text = try String(contentsOf: url, encoding: .utf8)
-            documents[index].text = text
-            documents[index].isDirty = false
-            documents[index].diskModificationTime = fileModificationTime(for: url)
-            documents[index].selectionLocation = 0
-            documents[index].selectionLength = 0
-            documents[index].scrollOffset = 0
+            try StandaloneDocumentIO.revertDocument(&documents[index])
             statusLabel.stringValue = "Reverted \(documents[index].title)"
             refreshAll()
             saveSession()
@@ -965,15 +959,6 @@ final class ViewController: NSViewController,
         }
     }
 
-    private func saveConflictURL(for index: Int) -> URL? {
-        guard documents.indices.contains(index), let url = documents[index].url else { return nil }
-        guard let knownTime = documents[index].diskModificationTime,
-              let currentTime = fileModificationTime(for: url) else {
-            return nil
-        }
-        return abs(currentTime - knownTime) > 0.5 ? url : nil
-    }
-
     private func presentExternalChangeAlert(
         for index: Int,
         url: URL,
@@ -999,11 +984,6 @@ final class ViewController: NSViewController,
         }
     }
 
-    private func fileModificationTime(for url: URL) -> TimeInterval? {
-        let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
-        return values?.contentModificationDate?.timeIntervalSince1970
-    }
-
     private func openDocuments(_ urls: [URL]) {
         captureCurrentDocumentViewState()
         var changed = false
@@ -1016,14 +996,7 @@ final class ViewController: NSViewController,
                     continue
                 }
                 do {
-                    let text = try String(contentsOf: url, encoding: .utf8)
-                    documents[i].text = text
-                    documents[i].isDirty = false
-                    documents[i].diskModificationTime = fileModificationTime(for: url)
-                    documents[i].scrollOffset = 0
-                    documents[i].selectionLocation = 0
-                    documents[i].selectionLength = 0
-                    documents[i].mode = .source
+                    try StandaloneDocumentIO.reloadDocument(&documents[i])
                     activateDocument(at: i)
                     NSDocumentController.shared.noteNewRecentDocumentURL(url)
                     changed = true
@@ -1035,17 +1008,7 @@ final class ViewController: NSViewController,
             }
 
             do {
-                let text = try String(contentsOf: url, encoding: .utf8)
-                let doc = EditorDocument(
-                    id: UUID(), url: url, title: url.lastPathComponent,
-                    text: text,
-                    isDirty: false,
-                    diskModificationTime: fileModificationTime(for: url),
-                    scrollOffset: 0,
-                    selectionLocation: 0,
-                    selectionLength: 0,
-                    mode: .source
-                )
+                let doc = try StandaloneDocumentIO.loadDocument(from: url)
                 if let seedIndex = replaceSeedIndex, documents.indices.contains(seedIndex) {
                     documents[seedIndex] = doc
                     replaceSeedIndex = nil
@@ -1068,12 +1031,7 @@ final class ViewController: NSViewController,
     private func writeDocument(at index: Int, to url: URL, completion: (() -> Void)?) {
         do {
             captureCurrentDocumentViewState()
-            try documents[index].text.write(to: url, atomically: true, encoding: .utf8)
-            let docID = documents[index].id
-            documents[index].url = url
-            documents[index].title = url.lastPathComponent
-            documents[index].isDirty = false
-            documents[index].diskModificationTime = fileModificationTime(for: url)
+            let docID = try StandaloneDocumentIO.writeDocument(&documents[index], to: url)
             statusLabel.stringValue = "Saved \(url.lastPathComponent)"
             NSDocumentController.shared.noteNewRecentDocumentURL(url)
             SessionStore.clearRecovery(id: docID)
@@ -1124,10 +1082,6 @@ final class ViewController: NSViewController,
                 completion(false)
             }
         }
-    }
-
-    private func suggestedFilename(for doc: EditorDocument) -> String {
-        doc.url?.lastPathComponent ?? (doc.title == "Untitled" ? "Untitled.md" : doc.title)
     }
 
     private func applyDocumentContent(_ doc: EditorDocument) {
