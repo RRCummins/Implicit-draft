@@ -707,13 +707,13 @@ final class ViewController: NSViewController,
         let wasSelected = documents[index].id == selectedDocumentID
         documents.remove(at: index)
 
-        if wasSelected {
-            if documents.isEmpty {
-                selectedDocumentID = nil
-            } else {
-                let newIndex = max(0, min(index, documents.count - 1))
-                selectedDocumentID = documents[newIndex].id
-            }
+        if documents.isEmpty {
+            let doc = EditorDocument.untitled()
+            documents = [doc]
+            selectedDocumentID = doc.id
+        } else if wasSelected {
+            let newIndex = max(0, min(index, documents.count - 1))
+            selectedDocumentID = documents[newIndex].id
         }
 
         refreshAll()
