@@ -105,12 +105,10 @@ final class ViewController: NSViewController,
     }
 
     @IBAction func openDocument(_ sender: Any?) {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = true
-        panel.allowsMultipleSelection = true
-        panel.beginSheetModal(for: view.window!) { [weak self] response in
-            guard response == .OK else { return }
-            self?.openDocuments(panel.urls)
+        guard let window = view.window else { return }
+        StandaloneDocumentCoordinator.requestOpenURLs(window: window) { [weak self] urls in
+            guard !urls.isEmpty else { return }
+            self?.openDocuments(urls)
         }
     }
 
@@ -772,24 +770,21 @@ final class ViewController: NSViewController,
         guard documents.indices.contains(index) else { return }
 
         if documents[index].isDirty {
-            let alert = NSAlert()
-            alert.messageText = "Save \"\(documents[index].title)\"?"
-            alert.informativeText = "Your changes will be lost if you don't save."
-            alert.addButton(withTitle: "Save")
-            alert.addButton(withTitle: "Don't Save")
-            alert.addButton(withTitle: "Cancel")
-            alert.alertStyle = .warning
-            alert.beginSheetModal(for: view.window!) { [weak self] response in
+            guard let window = view.window else { return }
+            StandaloneDocumentCoordinator.requestLossyClose(
+                window: window,
+                title: documents[index].title
+            ) { [weak self] response in
                 guard let self else { return }
                 switch response {
-                case .alertFirstButtonReturn:  // Save
+                case .save:
                     self.saveDocument(at: index) { [weak self] in
                         self?.closeDocument(at: index)
                     }
-                case .alertSecondButtonReturn: // Don't Save
+                case .discard:
                     self.closeDocument(at: index)
-                default:
-                    break
+                case .cancel:
+                    return
                 }
             }
         } else {

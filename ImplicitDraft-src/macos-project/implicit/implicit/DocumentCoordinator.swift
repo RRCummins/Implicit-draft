@@ -13,6 +13,18 @@ enum LossyCloseResolution {
 }
 
 enum StandaloneDocumentCoordinator {
+    static func requestOpenURLs(
+        window: NSWindow,
+        completion: @escaping ([URL]) -> Void
+    ) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = true
+        panel.beginSheetModal(for: window) { response in
+            completion(response == .OK ? panel.urls : [])
+        }
+    }
+
     static func requestSaveURL(
         window: NSWindow,
         suggestedFilename: String,
