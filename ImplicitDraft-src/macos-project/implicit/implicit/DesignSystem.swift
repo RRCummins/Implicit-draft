@@ -44,11 +44,11 @@ enum AppPalette {
 /// Static layout constants. All values are in points (logical, not physical pixels).
 enum AppMetrics {
     static let tabBarHeight:       CGFloat = 36
-    static let sidebarWidth:       CGFloat = 220
+    static let sidebarWidth:       CGFloat = 236
     static let statusBarHeight:    CGFloat = 24
     /// Left inset for tab bar content to clear macOS traffic light buttons.
     static let tabBarLeadInset:    CGFloat = 80
-    static let sidebarRowHeight:   CGFloat = 32
+    static let sidebarRowHeight:   CGFloat = 42
     static let bodyFontSize:       CGFloat = 13
     static let monoFontSize:       CGFloat = 13
     static let editorInsetH:       CGFloat = 24

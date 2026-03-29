@@ -26,6 +26,8 @@ final class ViewController: NSViewController,
     private let tabStripStack      = NSStackView()
     private let statusLabel        = NSTextField(labelWithString: "Untitled draft")
     private let statusMetaLabel    = NSTextField(labelWithString: "Source · Markdown · Saved")
+    private let sidebarTitleLabel  = NSTextField(labelWithString: "Documents")
+    private let sidebarMetaLabel   = NSTextField(labelWithString: "0 open")
     private let modeControl        = NSSegmentedControl(
         labels: ["Source", "Preview"], trackingMode: .selectOne, target: nil, action: nil
     )
@@ -219,7 +221,7 @@ final class ViewController: NSViewController,
         case .openDoc(let index):
             let doc = documents[index]
             let isActive = doc.id == selectedDocumentID
-            return makeSidebarDocCell(title: doc.displayTitle, isActive: isActive)
+            return makeSidebarDocCell(doc: doc, isActive: isActive)
         case .recent(let url):
             return makeSidebarRecentCell(url: url)
         }
@@ -410,6 +412,25 @@ final class ViewController: NSViewController,
         sidebar.wantsLayer = true
         sidebar.layer?.backgroundColor = AppPalette.sidebarBg.cgColor
 
+        let header = NSView()
+        header.translatesAutoresizingMaskIntoConstraints = false
+        sidebar.addSubview(header)
+
+        sidebarTitleLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        sidebarTitleLabel.textColor = AppPalette.textPrimary
+        sidebarTitleLabel.translatesAutoresizingMaskIntoConstraints = false
+        header.addSubview(sidebarTitleLabel)
+
+        sidebarMetaLabel.font = NSFont.systemFont(ofSize: 10, weight: .regular)
+        sidebarMetaLabel.textColor = AppPalette.textMuted
+        sidebarMetaLabel.translatesAutoresizingMaskIntoConstraints = false
+        header.addSubview(sidebarMetaLabel)
+
+        let newButton = makeSidebarActionButton(title: "New", action: #selector(newDocument(_:)))
+        let openButton = makeSidebarActionButton(title: "Open", action: #selector(openDocument(_:)))
+        header.addSubview(newButton)
+        header.addSubview(openButton)
+
         sidebarTable.headerView = nil
         sidebarTable.style = .plain
         sidebarTable.focusRingType = .none
@@ -435,9 +456,22 @@ final class ViewController: NSViewController,
         sidebar.addSubview(rightBorder)
 
         NSLayoutConstraint.activate([
+            sidebarTitleLabel.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: 12),
+            sidebarTitleLabel.topAnchor.constraint(equalTo: header.topAnchor, constant: 10),
+            sidebarMetaLabel.leadingAnchor.constraint(equalTo: header.leadingAnchor, constant: 12),
+            sidebarMetaLabel.topAnchor.constraint(equalTo: sidebarTitleLabel.bottomAnchor, constant: 2),
+            sidebarMetaLabel.bottomAnchor.constraint(equalTo: header.bottomAnchor, constant: -8),
+            openButton.trailingAnchor.constraint(equalTo: header.trailingAnchor, constant: -12),
+            openButton.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            newButton.trailingAnchor.constraint(equalTo: openButton.leadingAnchor, constant: -6),
+            newButton.centerYAnchor.constraint(equalTo: header.centerYAnchor),
+            sidebarTitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: newButton.leadingAnchor, constant: -12),
+            header.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor),
+            header.trailingAnchor.constraint(equalTo: rightBorder.leadingAnchor),
+            header.topAnchor.constraint(equalTo: sidebar.topAnchor),
             scroll.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: rightBorder.leadingAnchor),
-            scroll.topAnchor.constraint(equalTo: sidebar.topAnchor),
+            scroll.topAnchor.constraint(equalTo: header.bottomAnchor),
             scroll.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor),
             rightBorder.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor),
             rightBorder.topAnchor.constraint(equalTo: sidebar.topAnchor),
@@ -446,6 +480,15 @@ final class ViewController: NSViewController,
         ])
 
         return sidebar
+    }
+
+    private func makeSidebarActionButton(title: String, action: Selector) -> NSButton {
+        let button = NSButton(title: title, target: self, action: action)
+        button.isBordered = false
+        button.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        button.contentTintColor = AppPalette.textMuted
+        button.translatesAutoresizingMaskIntoConstraints = false
+        return button
     }
 
     // MARK: Sidebar cells
@@ -466,20 +509,52 @@ final class ViewController: NSViewController,
         return cell
     }
 
-    private func makeSidebarDocCell(title: String, isActive: Bool) -> NSView {
+    private func makeSidebarDocCell(doc: EditorDocument, isActive: Bool) -> NSView {
         let id = NSUserInterfaceItemIdentifier("SidebarDoc")
         let cell = NSTableCellView()
         cell.identifier = id
-        let label = NSTextField(labelWithString: title)
-        label.font = NSFont.systemFont(ofSize: AppMetrics.bodyFontSize, weight: .regular)
-        label.textColor = isActive ? AppPalette.textPrimary : AppPalette.textMuted
-        label.lineBreakMode = .byTruncatingMiddle
-        label.translatesAutoresizingMaskIntoConstraints = false
-        cell.addSubview(label)
+        let title = NSTextField(labelWithString: doc.displayTitle)
+        title.font = NSFont.systemFont(ofSize: AppMetrics.bodyFontSize, weight: isActive ? .medium : .regular)
+        title.textColor = isActive ? AppPalette.textPrimary : AppPalette.textPrimary.withAlphaComponent(0.92)
+        title.lineBreakMode = .byTruncatingMiddle
+        title.translatesAutoresizingMaskIntoConstraints = false
+
+        let subtitle = NSTextField(labelWithString: sidebarSubtitle(for: doc))
+        subtitle.font = NSFont.systemFont(ofSize: 10, weight: .regular)
+        subtitle.textColor = AppPalette.textMuted
+        subtitle.lineBreakMode = .byTruncatingMiddle
+        subtitle.translatesAutoresizingMaskIntoConstraints = false
+
+        cell.addSubview(title)
+        cell.addSubview(subtitle)
+
+        if doc.isDirty {
+            let dirtyDot = NSView()
+            dirtyDot.wantsLayer = true
+            dirtyDot.layer?.backgroundColor = AppPalette.accent.cgColor
+            dirtyDot.layer?.cornerRadius = 3
+            dirtyDot.translatesAutoresizingMaskIntoConstraints = false
+            cell.addSubview(dirtyDot)
+            NSLayoutConstraint.activate([
+                dirtyDot.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -10),
+                dirtyDot.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                dirtyDot.widthAnchor.constraint(equalToConstant: 6),
+                dirtyDot.heightAnchor.constraint(equalToConstant: 6),
+                title.trailingAnchor.constraint(lessThanOrEqualTo: dirtyDot.leadingAnchor, constant: -8),
+                subtitle.trailingAnchor.constraint(lessThanOrEqualTo: dirtyDot.leadingAnchor, constant: -8),
+            ])
+        } else {
+            NSLayoutConstraint.activate([
+                title.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -10),
+                subtitle.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -10),
+            ])
+        }
+
         NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 12),
-            label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
-            label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            title.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 12),
+            title.topAnchor.constraint(equalTo: cell.topAnchor, constant: 7),
+            subtitle.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 12),
+            subtitle.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 1),
         ])
         return cell
     }
@@ -491,29 +566,44 @@ final class ViewController: NSViewController,
 
         let name = NSTextField(labelWithString: url.lastPathComponent)
         name.font = NSFont.systemFont(ofSize: AppMetrics.bodyFontSize, weight: .regular)
-        name.textColor = AppPalette.textMuted
+        name.textColor = AppPalette.textPrimary.withAlphaComponent(0.82)
         name.lineBreakMode = .byTruncatingMiddle
         name.translatesAutoresizingMaskIntoConstraints = false
 
         let dir = NSTextField(
-            labelWithString: url.deletingLastPathComponent().lastPathComponent
+            labelWithString: url.deletingLastPathComponent().path(percentEncoded: false)
         )
         dir.font = NSFont.systemFont(ofSize: 10, weight: .regular)
         dir.textColor = AppPalette.textMuted.withAlphaComponent(0.6)
-        dir.lineBreakMode = .byTruncatingHead
+        dir.lineBreakMode = .byTruncatingMiddle
         dir.translatesAutoresizingMaskIntoConstraints = false
+
+        let recentBadge = NSTextField(labelWithString: "RECENT")
+        recentBadge.font = NSFont.systemFont(ofSize: 9, weight: .semibold)
+        recentBadge.textColor = AppPalette.textMuted.withAlphaComponent(0.75)
+        recentBadge.translatesAutoresizingMaskIntoConstraints = false
 
         cell.addSubview(name)
         cell.addSubview(dir)
+        cell.addSubview(recentBadge)
         NSLayoutConstraint.activate([
             name.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 12),
-            name.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
-            name.topAnchor.constraint(equalTo: cell.topAnchor, constant: 5),
+            name.trailingAnchor.constraint(lessThanOrEqualTo: recentBadge.leadingAnchor, constant: -8),
+            name.topAnchor.constraint(equalTo: cell.topAnchor, constant: 7),
             dir.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 12),
             dir.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
             dir.topAnchor.constraint(equalTo: name.bottomAnchor, constant: 1),
+            recentBadge.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -10),
+            recentBadge.topAnchor.constraint(equalTo: cell.topAnchor, constant: 8),
         ])
         return cell
+    }
+
+    private func sidebarSubtitle(for doc: EditorDocument) -> String {
+        if let url = doc.url {
+            return url.deletingLastPathComponent().path(percentEncoded: false)
+        }
+        return doc.isDirty ? "Unsaved draft · edited locally" : "Unsaved draft"
     }
 
     // MARK: Editor
@@ -811,7 +901,7 @@ final class ViewController: NSViewController,
     private func rebuildSidebarRows() {
         var rows: [SidebarRow] = []
 
-        rows.append(.header("OPEN"))
+        rows.append(.header("OPEN · \(documents.count)"))
         for i in documents.indices { rows.append(.openDoc(i)) }
 
         let openURLs = Set(documents.compactMap(\.url))
@@ -820,10 +910,11 @@ final class ViewController: NSViewController,
             .prefix(8)
 
         if !recent.isEmpty {
-            rows.append(.header("RECENT"))
+            rows.append(.header("RECENT · \(recent.count)"))
             recent.forEach { rows.append(.recent($0)) }
         }
 
+        sidebarMetaLabel.stringValue = documents.count == 1 ? "1 open document" : "\(documents.count) open documents"
         sidebarRows = rows
         sidebarTable.reloadData()
         syncSidebarSelection()
