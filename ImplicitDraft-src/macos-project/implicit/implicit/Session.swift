@@ -123,3 +123,174 @@ enum SessionStore {
         return try? String(contentsOf: url, encoding: .utf8)
     }
 }
+
+@MainActor
+final class StandaloneSession {
+    var documents: [EditorDocument] = []
+    var selectedDocumentID: UUID?
+
+    var hasDirtyDocuments: Bool {
+        documents.contains { $0.isDirty }
+    }
+
+    var dirtyDocumentCount: Int {
+        documents.filter(\.isDirty).count
+    }
+
+    var dirtyDocumentIndices: [Int] {
+        documents.indices.filter { documents[$0].isDirty }
+    }
+
+    var pristineSeedDocumentIndex: Int? {
+        guard documents.count == 1 else { return nil }
+        let doc = documents[0]
+        guard doc.url == nil,
+              doc.text.isEmpty,
+              !doc.isDirty,
+              doc.selectionLocation == 0,
+              doc.selectionLength == 0,
+              doc.scrollOffset == 0 else {
+            return nil
+        }
+        return 0
+    }
+
+    func selectedDocumentIndex() -> Int? {
+        guard let id = selectedDocumentID else { return nil }
+        return documents.firstIndex { $0.id == id }
+    }
+
+    func activateDocument(at index: Int) {
+        guard documents.indices.contains(index) else { return }
+        selectedDocumentID = documents[index].id
+    }
+
+    func createUntitled(atStart: Bool = false) -> EditorDocument {
+        let doc = EditorDocument.untitled()
+        if atStart {
+            documents.insert(doc, at: 0)
+        } else {
+            documents.append(doc)
+        }
+        selectedDocumentID = doc.id
+        return doc
+    }
+
+    func closeDocument(at index: Int) {
+        guard documents.indices.contains(index) else { return }
+        let wasSelected = documents[index].id == selectedDocumentID
+        documents.remove(at: index)
+
+        if documents.isEmpty {
+            let doc = EditorDocument.untitled()
+            documents = [doc]
+            selectedDocumentID = doc.id
+        } else if wasSelected {
+            let newIndex = max(0, min(index, documents.count - 1))
+            selectedDocumentID = documents[newIndex].id
+        }
+    }
+
+    func restoreOrSeed() {
+        guard let session = SessionStore.load(), !session.documents.isEmpty else {
+            seedInitialDocumentIfNeeded()
+            return
+        }
+
+        let restored = session.documents.compactMap(restoredDocument(from:))
+        guard !restored.isEmpty else {
+            seedInitialDocumentIfNeeded()
+            return
+        }
+
+        documents = restored
+        selectedDocumentID = session.selectedDocumentID
+            .flatMap { id in restored.first(where: { $0.id == id })?.id }
+            ?? restored.first?.id
+    }
+
+    func seedInitialDocumentIfNeeded() {
+        guard documents.isEmpty else { return }
+        let doc = EditorDocument.untitled()
+        documents = [doc]
+        selectedDocumentID = doc.id
+    }
+
+    func save() {
+        let saved = documents.map { doc -> SavedDocument in
+            let embedText = doc.isDirty || doc.url == nil
+            return SavedDocument(
+                id: doc.id,
+                urlPath: doc.url?.path(percentEncoded: false),
+                title: doc.title,
+                text: embedText ? doc.text : nil,
+                isDirty: doc.isDirty,
+                diskModificationTime: doc.diskModificationTime,
+                scrollOffset: doc.scrollOffset,
+                selectionLocation: doc.selectionLocation,
+                selectionLength: doc.selectionLength,
+                modeRawValue: doc.mode.rawValue
+            )
+        }
+
+        SessionStore.save(SavedSession(
+            documents: saved,
+            selectedDocumentID: selectedDocumentID
+        ))
+    }
+
+    private func restoredDocument(from saved: SavedDocument) -> EditorDocument? {
+        let recoveryText = SessionStore.loadRecovery(id: saved.id)
+
+        if let path = saved.urlPath {
+            let url = URL(fileURLWithPath: path)
+            if !saved.isDirty, let text = try? String(contentsOf: url, encoding: .utf8) {
+                return EditorDocument(
+                    id: saved.id,
+                    url: url,
+                    title: saved.title,
+                    text: text,
+                    isDirty: false,
+                    diskModificationTime: fileModificationTime(for: url),
+                    scrollOffset: saved.scrollOffset,
+                    selectionLocation: saved.selectionLocation,
+                    selectionLength: saved.selectionLength,
+                    mode: EditorMode(rawValue: saved.modeRawValue) ?? .source
+                )
+            }
+
+            let text = recoveryText ?? saved.text ?? ""
+            return EditorDocument(
+                id: saved.id,
+                url: url,
+                title: saved.title,
+                text: text,
+                isDirty: !text.isEmpty || saved.isDirty,
+                diskModificationTime: saved.diskModificationTime ?? fileModificationTime(for: url),
+                scrollOffset: saved.scrollOffset,
+                selectionLocation: saved.selectionLocation,
+                selectionLength: saved.selectionLength,
+                mode: EditorMode(rawValue: saved.modeRawValue) ?? .source
+            )
+        }
+
+        let text = recoveryText ?? saved.text ?? ""
+        return EditorDocument(
+            id: saved.id,
+            url: nil,
+            title: saved.title,
+            text: text,
+            isDirty: text.isEmpty ? false : saved.isDirty,
+            diskModificationTime: nil,
+            scrollOffset: saved.scrollOffset,
+            selectionLocation: saved.selectionLocation,
+            selectionLength: saved.selectionLength,
+            mode: EditorMode(rawValue: saved.modeRawValue) ?? .source
+        )
+    }
+
+    private func fileModificationTime(for url: URL) -> TimeInterval? {
+        let values = try? url.resourceValues(forKeys: [.contentModificationDateKey])
+        return values?.contentModificationDate?.timeIntervalSince1970
+    }
+}
