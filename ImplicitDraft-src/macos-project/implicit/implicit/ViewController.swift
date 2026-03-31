@@ -60,7 +60,7 @@ final class ViewController: NSViewController,
         super.viewDidLoad()
         buildInterface()
         session.restoreOrSeed()
-        updateVisibleDocument()
+        refreshAll()
         NotificationCenter.default.addObserver(
             self, selector: #selector(appWillResignActive),
             name: NSApplication.willResignActiveNotification, object: nil
