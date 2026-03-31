@@ -800,6 +800,7 @@ final class ViewController: NSViewController,
         guard documents.indices.contains(index) else { return }
         captureCurrentDocumentViewState()
         session.activateDocument(at: index)
+        refreshTabStrip()
         syncSidebarSelection()
         updateVisibleDocument()
         saveSession()
