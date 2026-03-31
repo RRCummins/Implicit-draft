@@ -17,7 +17,7 @@ let image = NSImage(size: canvasSize)
 image.lockFocus()
 
 let canvas = NSRect(origin: .zero, size: canvasSize)
-color(0x000000).setFill()
+NSColor.clear.setFill()
 canvas.fill()
 
 let plateRect = canvas.insetBy(dx: 72, dy: 72)
@@ -25,27 +25,17 @@ let plate = NSBezierPath(roundedRect: plateRect, xRadius: 220, yRadius: 220)
 color(0x000000).setFill()
 plate.fill()
 
-let pageRect = NSRect(x: 226, y: 158, width: 572, height: 708)
-let page = NSBezierPath(roundedRect: pageRect, xRadius: 102, yRadius: 102)
-color(0x090c10).setFill()
-page.fill()
+let contentRect = NSRect(x: 226, y: 158, width: 572, height: 708)
 
-let foldPath = NSBezierPath()
-foldPath.move(to: NSPoint(x: pageRect.maxX - 146, y: pageRect.maxY))
-foldPath.line(to: NSPoint(x: pageRect.maxX, y: pageRect.maxY - 146))
-foldPath.line(to: NSPoint(x: pageRect.maxX, y: pageRect.maxY))
-foldPath.close()
-color(0x58a6ff, alpha: 0.9).setFill()
-foldPath.fill()
-
-let foldShadow = NSBezierPath()
-foldShadow.move(to: NSPoint(x: pageRect.maxX - 116, y: pageRect.maxY))
-foldShadow.line(to: NSPoint(x: pageRect.maxX, y: pageRect.maxY - 116))
-foldShadow.line(to: NSPoint(x: pageRect.maxX, y: pageRect.maxY - 28))
-foldShadow.line(to: NSPoint(x: pageRect.maxX - 28, y: pageRect.maxY))
-foldShadow.close()
-color(0x0d1117, alpha: 0.24).setFill()
-foldShadow.fill()
+let accentRect = NSRect(
+    x: contentRect.minX - 6,
+    y: contentRect.minY + 54,
+    width: 58,
+    height: contentRect.height - 108
+)
+let accent = NSBezierPath(roundedRect: accentRect, xRadius: 29, yRadius: 29)
+color(0x2ea043).setFill()
+accent.fill()
 
 func line(_ x: CGFloat, _ y: CGFloat, _ width: CGFloat, _ height: CGFloat, _ fill: NSColor) {
     let rect = NSRect(x: x, y: y, width: width, height: height)
@@ -54,14 +44,14 @@ func line(_ x: CGFloat, _ y: CGFloat, _ width: CGFloat, _ height: CGFloat, _ fil
     path.fill()
 }
 
-line(pageRect.minX + 120, pageRect.maxY - 208, 280, 36, color(0xe6edf3))
-line(pageRect.minX + 120, pageRect.maxY - 286, 370, 30, color(0xa4acb8))
-line(pageRect.minX + 120, pageRect.maxY - 356, 318, 30, color(0xa4acb8))
-line(pageRect.minX + 120, pageRect.maxY - 462, 230, 50, color(0x58a6ff))
-line(pageRect.minX + 120, pageRect.maxY - 544, 332, 30, color(0xa4acb8))
-line(pageRect.minX + 120, pageRect.maxY - 614, 268, 30, color(0xa4acb8))
+line(contentRect.minX + 110, contentRect.maxY - 204, 290, 38, color(0xe6edf3))
+line(contentRect.minX + 110, contentRect.maxY - 286, 382, 30, color(0xa4acb8))
+line(contentRect.minX + 110, contentRect.maxY - 356, 326, 30, color(0xa4acb8))
+line(contentRect.minX + 110, contentRect.maxY - 468, 236, 52, color(0x58a6ff))
+line(contentRect.minX + 110, contentRect.maxY - 554, 340, 30, color(0xa4acb8))
+line(contentRect.minX + 110, contentRect.maxY - 624, 274, 30, color(0xa4acb8))
 
-let dotRect = NSRect(x: pageRect.maxX - 130, y: pageRect.minY + 82, width: 34, height: 34)
+let dotRect = NSRect(x: contentRect.maxX - 128, y: contentRect.minY + 84, width: 34, height: 34)
 let dot = NSBezierPath(ovalIn: dotRect)
 color(0xe6edf3, alpha: 0.9).setFill()
 dot.fill()
