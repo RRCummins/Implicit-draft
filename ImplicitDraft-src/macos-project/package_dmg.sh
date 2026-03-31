@@ -16,18 +16,21 @@ if [[ ! -d "$APP_PATH" || "${APP_PATH:t:e}" != "app" ]]; then
 fi
 
 TMP_DIR=$(mktemp -d /tmp/implicit-dmg.XXXXXX)
+STAGE_DIR="$TMP_DIR/stage"
 cleanup() {
   rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
 
-cp -R "$APP_PATH" "$TMP_DIR/"
+mkdir -p "$STAGE_DIR"
+ditto "$APP_PATH" "$STAGE_DIR/${APP_PATH:t}"
+ln -s /Applications "$STAGE_DIR/Applications"
 mkdir -p "${OUTPUT_PATH:h}"
 rm -f "$OUTPUT_PATH"
 
 hdiutil create \
   -volname "$VOLUME_NAME" \
-  -srcfolder "$TMP_DIR" \
+  -srcfolder "$STAGE_DIR" \
   -ov \
   -format UDZO \
   "$OUTPUT_PATH"
