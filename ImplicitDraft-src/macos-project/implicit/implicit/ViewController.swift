@@ -37,6 +37,7 @@ final class ViewController: NSViewController,
         labelWithString: "Write immediately, or open an existing file."
     )
     private let emptyOpenButton    = NSButton(title: "Open File →", target: nil, action: nil)
+    private let formatBar          = NSStackView()
 
     // MARK: State
     private let session = StandaloneSession()
@@ -357,25 +358,20 @@ final class ViewController: NSViewController,
         bottomBorder.translatesAutoresizingMaskIntoConstraints = false
         bar.addSubview(bottomBorder)
 
-        modeControl.controlSize = .mini
-        modeControl.segmentStyle = .rounded
-        modeControl.selectedSegment = 0
-        modeControl.target = self
-        modeControl.action = #selector(changeMode(_:))
-        modeControl.translatesAutoresizingMaskIntoConstraints = false
-        bar.addSubview(modeControl)
+        configureFormatBar()
+        bar.addSubview(formatBar)
 
         NSLayoutConstraint.activate([
             tabStripStack.leadingAnchor.constraint(
                 equalTo: bar.leadingAnchor, constant: AppMetrics.tabBarLeadInset
             ),
             tabStripStack.trailingAnchor.constraint(
-                lessThanOrEqualTo: modeControl.leadingAnchor, constant: -12
+                lessThanOrEqualTo: formatBar.leadingAnchor, constant: -12
             ),
             tabStripStack.topAnchor.constraint(equalTo: bar.topAnchor),
             tabStripStack.bottomAnchor.constraint(equalTo: bar.bottomAnchor, constant: -1),
-            modeControl.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -10),
-            modeControl.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            formatBar.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -10),
+            formatBar.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
             bottomBorder.leadingAnchor.constraint(equalTo: bar.leadingAnchor),
             bottomBorder.trailingAnchor.constraint(equalTo: bar.trailingAnchor),
             bottomBorder.bottomAnchor.constraint(equalTo: bar.bottomAnchor),
@@ -742,6 +738,14 @@ final class ViewController: NSViewController,
         statusMetaLabel.translatesAutoresizingMaskIntoConstraints = false
         bar.addSubview(statusMetaLabel)
 
+        modeControl.controlSize = .mini
+        modeControl.segmentStyle = .rounded
+        modeControl.selectedSegment = 0
+        modeControl.target = self
+        modeControl.action = #selector(changeMode(_:))
+        modeControl.translatesAutoresizingMaskIntoConstraints = false
+        bar.addSubview(modeControl)
+
         NSLayoutConstraint.activate([
             topBorder.leadingAnchor.constraint(equalTo: bar.leadingAnchor),
             topBorder.trailingAnchor.constraint(equalTo: bar.trailingAnchor),
@@ -749,7 +753,11 @@ final class ViewController: NSViewController,
             topBorder.heightAnchor.constraint(equalToConstant: 1),
             statusLabel.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 12),
             statusLabel.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
-            statusMetaLabel.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -12),
+            modeControl.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -8),
+            modeControl.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
+            statusMetaLabel.trailingAnchor.constraint(
+                equalTo: modeControl.leadingAnchor, constant: -12
+            ),
             statusMetaLabel.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
             statusLabel.trailingAnchor.constraint(
                 lessThanOrEqualTo: statusMetaLabel.leadingAnchor, constant: -16
@@ -760,6 +768,35 @@ final class ViewController: NSViewController,
     }
 
     // MARK: Tab strip
+
+    private func configureFormatBar() {
+        guard formatBar.arrangedSubviews.isEmpty else { return }
+
+        formatBar.orientation = .horizontal
+        formatBar.alignment = .centerY
+        formatBar.spacing = 6
+        formatBar.translatesAutoresizingMaskIntoConstraints = false
+
+        let items: [(String, Selector)] = [
+            ("H1", #selector(applyHeadingFormatting(_:))),
+            ("B", #selector(applyBoldFormatting(_:))),
+            ("I", #selector(applyItalicFormatting(_:))),
+            ("`", #selector(applyCodeFormatting(_:))),
+            ("Link", #selector(applyLinkFormatting(_:))),
+        ]
+
+        for (title, action) in items {
+            let button = NSButton(title: title, target: self, action: action)
+            button.isBordered = false
+            button.font = NSFont.systemFont(
+                ofSize: title == "Link" ? 11 : 11,
+                weight: title == "B" || title == "H1" ? .semibold : .medium
+            )
+            button.contentTintColor = AppPalette.textMuted
+            button.translatesAutoresizingMaskIntoConstraints = false
+            formatBar.addArrangedSubview(button)
+        }
+    }
 
     @objc private func selectTabFromStrip(_ sender: NSButton) {
         activateDocument(at: sender.tag)
@@ -796,6 +833,26 @@ final class ViewController: NSViewController,
         newDocument(sender)
     }
 
+    @objc private func applyHeadingFormatting(_ sender: Any?) {
+        applyHeadingPrefix("# ")
+    }
+
+    @objc private func applyBoldFormatting(_ sender: Any?) {
+        applyMarkdownWrapper(prefix: "**", suffix: "**", placeholder: "bold text")
+    }
+
+    @objc private func applyItalicFormatting(_ sender: Any?) {
+        applyMarkdownWrapper(prefix: "*", suffix: "*", placeholder: "italic text")
+    }
+
+    @objc private func applyCodeFormatting(_ sender: Any?) {
+        applyMarkdownWrapper(prefix: "`", suffix: "`", placeholder: "code")
+    }
+
+    @objc private func applyLinkFormatting(_ sender: Any?) {
+        applyMarkdownWrapper(prefix: "[", suffix: "](https://)", placeholder: "link text")
+    }
+
     private func activateDocument(at index: Int) {
         guard documents.indices.contains(index) else { return }
         captureCurrentDocumentViewState()
@@ -811,6 +868,59 @@ final class ViewController: NSViewController,
         session.closeDocument(at: index)
         refreshAll()
         saveSession()
+    }
+
+    private func applyMarkdownWrapper(prefix: String, suffix: String, placeholder: String) {
+        guard mode == .source, let index = selectedDocumentIndex else { return }
+        let textView = editorTextView
+        let currentString = textView.string as NSString
+        let selectedRange = textView.selectedRange()
+
+        let selectedText = selectedRange.length > 0
+            ? currentString.substring(with: selectedRange)
+            : placeholder
+        let replacement = "\(prefix)\(selectedText)\(suffix)"
+
+        textView.textStorage?.replaceCharacters(in: selectedRange, with: replacement)
+
+        let newLocation = selectedRange.location + prefix.count
+        let newLength = selectedRange.length > 0 ? selectedText.count : placeholder.count
+        textView.setSelectedRange(NSRange(location: newLocation, length: newLength))
+
+        documents[index].text = textView.string
+        documents[index].isDirty = true
+        captureCurrentDocumentViewState()
+        updateWindowTitle()
+        rebuildSidebarRows()
+        refreshTabStrip()
+        updateStatusBar()
+        scheduleRecoveryWrite(for: documents[index])
+    }
+
+    private func applyHeadingPrefix(_ prefix: String) {
+        guard mode == .source, let index = selectedDocumentIndex else { return }
+        let textView = editorTextView
+        let fullText = textView.string as NSString
+        let selectedRange = textView.selectedRange()
+
+        let lineRange = fullText.lineRange(for: selectedRange)
+        let blockText = fullText.substring(with: lineRange)
+        let transformed = blockText.components(separatedBy: .newlines).map { line in
+            guard !line.isEmpty else { return line }
+            return line.hasPrefix(prefix) ? line : "\(prefix)\(line)"
+        }.joined(separator: "\n")
+
+        textView.textStorage?.replaceCharacters(in: lineRange, with: transformed)
+        textView.setSelectedRange(NSRange(location: lineRange.location, length: transformed.count))
+
+        documents[index].text = textView.string
+        documents[index].isDirty = true
+        captureCurrentDocumentViewState()
+        updateWindowTitle()
+        rebuildSidebarRows()
+        refreshTabStrip()
+        updateStatusBar()
+        scheduleRecoveryWrite(for: documents[index])
     }
 
     private func refreshTabStrip() {
