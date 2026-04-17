@@ -48,6 +48,10 @@ enum StandaloneMarkdownPreviewRenderer {
             }
             p, ul, ol, pre, blockquote { margin: 0 0 1rem; }
             ul, ol { padding-left: 1.4rem; }
+            li > ul, li > ol {
+              margin-top: 0.45rem;
+              margin-bottom: 0.45rem;
+            }
             .task-list {
               list-style: none;
               padding-left: 0;
@@ -111,14 +115,56 @@ enum StandaloneMarkdownPreviewRenderer {
               border: 0;
               padding: 0;
             }
+            .tok-keyword { color: #ff7ab2; }
+            .tok-type { color: #78c2ff; }
+            .tok-string { color: #a7f3a1; }
+            .tok-comment { color: #8b949e; }
+            .tok-number { color: #f6c177; }
+            .tok-property { color: #8ad4ff; }
             blockquote {
               border-left: 3px solid var(--accent);
               padding: 2px 0 2px 14px;
               color: var(--muted);
+              background: color-mix(in srgb, var(--panel) 18%, transparent);
+              border-radius: 0 10px 10px 0;
             }
             blockquote > :last-child {
               margin-bottom: 0;
             }
+            .callout {
+              margin: 0 0 1rem;
+              padding: 14px 16px 14px 18px;
+              border: 1px solid var(--border);
+              border-left: 3px solid var(--accent);
+              border-radius: 14px;
+              background: color-mix(in srgb, var(--panel) 42%, transparent);
+            }
+            .callout-title {
+              display: flex;
+              align-items: center;
+              gap: 10px;
+              margin-bottom: 10px;
+              font-size: 12px;
+              font-weight: 700;
+              letter-spacing: 0.05em;
+              text-transform: uppercase;
+            }
+            .callout-icon {
+              width: 8px;
+              height: 8px;
+              border-radius: 999px;
+              background: currentColor;
+            }
+            .callout-content > :last-child {
+              margin-bottom: 0;
+            }
+            .callout-note { color: #78c2ff; }
+            .callout-tip { color: #78f0b0; }
+            .callout-success { color: #78f0b0; }
+            .callout-warning { color: #f6c177; }
+            .callout-danger { color: #ff8f8f; }
+            .callout-important { color: #c4a1ff; }
+            .callout-quote { color: var(--muted); }
             hr {
               border: 0;
               height: 1px;
@@ -129,13 +175,21 @@ enum StandaloneMarkdownPreviewRenderer {
               color: var(--accent);
               text-decoration: none;
             }
+            a:hover {
+              text-decoration: underline;
+            }
+            .wikilink {
+              font-weight: 600;
+            }
             img {
               display: block;
               max-width: 100%;
+              max-height: 520px;
               height: auto;
               border: 1px solid var(--border);
               border-radius: 14px;
               margin: 0 0 1rem;
+              object-fit: contain;
             }
             .table-wrap {
               margin: 0 0 1rem;
@@ -185,8 +239,6 @@ enum StandaloneMarkdownPreviewRenderer {
     private static func markdownToHTML(_ markdown: String) -> String {
         var html: [String] = []
         var paragraph: [String] = []
-        var listItems: [String] = []
-        var currentListTag: String?
         var inCodeBlock = false
         var codeLines: [String] = []
         var codeFenceLanguage: String?
@@ -199,34 +251,16 @@ enum StandaloneMarkdownPreviewRenderer {
             paragraph.removeAll()
         }
 
-        func flushList() {
-            guard let tagName = currentListTag, !listItems.isEmpty else { return }
-            html.append("<\(tagName)>\(listItems.joined())</\(tagName)>")
-            listItems.removeAll()
-            currentListTag = nil
-        }
-
         func flushCodeBlock() {
             guard !codeLines.isEmpty else { return }
-            let escapedCode = escapeHTML(codeLines.joined(separator: "\n"))
-            if let language = codeFenceLanguage, !language.isEmpty {
-                html.append("""
-                <div class="code-block">
-                  <div class="code-label">\(escapeHTML(language))</div>
-                  <pre><code class="language-\(escapeHTML(language.lowercased()))">\(escapedCode)</code></pre>
-                </div>
-                """)
-            } else {
-                html.append("<pre><code>\(escapedCode)</code></pre>")
-            }
+            html.append(renderCodeBlockHTML(codeLines.joined(separator: "\n"), language: codeFenceLanguage))
             codeLines.removeAll()
             codeFenceLanguage = nil
         }
 
         func flushBlockquote() {
             guard !blockquoteLines.isEmpty else { return }
-            let inner = markdownToHTML(blockquoteLines.joined(separator: "\n"))
-            html.append("<blockquote>\(inner)</blockquote>")
+            html.append(renderBlockquoteHTML(blockquoteLines))
             blockquoteLines.removeAll()
         }
 
@@ -237,7 +271,6 @@ enum StandaloneMarkdownPreviewRenderer {
 
             if rawLine.hasPrefix("```") {
                 flushParagraph()
-                flushList()
                 flushBlockquote()
                 if inCodeBlock { flushCodeBlock() }
                 let fenceSuffix = rawLine.dropFirst(3).trimmingCharacters(in: .whitespaces)
@@ -255,7 +288,6 @@ enum StandaloneMarkdownPreviewRenderer {
 
             if line.isEmpty {
                 flushParagraph()
-                flushList()
                 flushBlockquote()
                 lineIndex += 1
                 continue
@@ -263,7 +295,6 @@ enum StandaloneMarkdownPreviewRenderer {
 
             if let quote = line.dropPrefixIfPresent("> ") ?? line.dropPrefixIfPresent(">") {
                 flushParagraph()
-                flushList()
                 blockquoteLines.append(quote)
                 lineIndex += 1
                 continue
@@ -272,7 +303,6 @@ enum StandaloneMarkdownPreviewRenderer {
 
             if let table = parseMarkdownTable(lines: lines, startingAt: lineIndex) {
                 flushParagraph()
-                flushList()
                 html.append(renderTableHTML(table))
                 lineIndex = table.nextIndex
                 continue
@@ -280,7 +310,6 @@ enum StandaloneMarkdownPreviewRenderer {
 
             if line == "---" || line == "***" {
                 flushParagraph()
-                flushList()
                 html.append("<hr>")
                 lineIndex += 1
                 continue
@@ -288,59 +317,108 @@ enum StandaloneMarkdownPreviewRenderer {
 
             if let heading = parseHeading(line) {
                 flushParagraph()
-                flushList()
                 html.append("<h\(heading.level)>\(renderInlineMarkdown(heading.text))</h\(heading.level)>")
                 lineIndex += 1
                 continue
             }
 
-            if let taskItem = parseTaskListItem(line) {
+            if parseListItem(rawLine) != nil {
                 flushParagraph()
-                if currentListTag != "ul class=\"task-list\"" {
-                    flushList()
-                    currentListTag = "ul class=\"task-list\""
-                }
-                let checked = taskItem.completed ? " checked" : ""
-                let doneClass = taskItem.completed ? " class=\"task-item done\"" : " class=\"task-item\""
-                listItems.append(
-                    "<li\(doneClass)><input type=\"checkbox\" disabled\(checked)><span>\(renderInlineMarkdown(taskItem.text))</span></li>"
-                )
-                lineIndex += 1
+                let list = renderListBlock(lines: lines, startingAt: lineIndex)
+                html.append(list.html)
+                lineIndex = list.nextIndex
                 continue
             }
 
-            if let item = line.dropPrefixIfPresent("- ") ?? line.dropPrefixIfPresent("* ") {
-                flushParagraph()
-                if currentListTag != "ul" {
-                    flushList()
-                    currentListTag = "ul"
-                }
-                listItems.append("<li>\(renderInlineMarkdown(item))</li>")
-                lineIndex += 1
-                continue
-            }
-
-            if let item = line.captureOrderedListItem() {
-                flushParagraph()
-                if currentListTag != "ol" {
-                    flushList()
-                    currentListTag = "ol"
-                }
-                listItems.append("<li>\(renderInlineMarkdown(item))</li>")
-                lineIndex += 1
-                continue
-            }
-
-            flushList()
             paragraph.append(line)
             lineIndex += 1
         }
 
         if inCodeBlock { flushCodeBlock() }
         flushParagraph()
-        flushList()
         flushBlockquote()
         return html.joined(separator: "\n")
+    }
+
+    private static func renderListBlock(lines: [String], startingAt startIndex: Int) -> (html: String, nextIndex: Int) {
+        guard let firstItem = parseListItem(lines[startIndex]) else {
+            return ("", startIndex)
+        }
+
+        let baseIndent = firstItem.indent
+        let listKind = firstItem.kind
+        var itemsHTML: [String] = []
+        var lineIndex = startIndex
+
+        while lineIndex < lines.count {
+            guard let item = parseListItem(lines[lineIndex]), item.indent == baseIndent, item.kind == listKind else {
+                break
+            }
+
+            var itemBodyLines = [item.text]
+            var nestedBlocks: [String] = []
+            lineIndex += 1
+
+            while lineIndex < lines.count {
+                let rawLine = lines[lineIndex]
+                let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+
+                if trimmed.isEmpty {
+                    break
+                }
+
+                if let nextItem = parseListItem(rawLine) {
+                    if nextItem.indent < baseIndent || nextItem.indent == baseIndent {
+                        break
+                    }
+
+                    let nested = renderListBlock(lines: lines, startingAt: lineIndex)
+                    nestedBlocks.append(nested.html)
+                    lineIndex = nested.nextIndex
+                    continue
+                }
+
+                let indent = leadingIndentWidth(of: rawLine)
+                if indent > baseIndent {
+                    itemBodyLines.append(trimmed)
+                    lineIndex += 1
+                    continue
+                }
+
+                break
+            }
+
+            let bodyHTML = renderInlineMarkdown(itemBodyLines.joined(separator: " "))
+            let nestedHTML = nestedBlocks.joined()
+            itemsHTML.append(renderListItemHTML(kind: item.kind, bodyHTML: bodyHTML, nestedHTML: nestedHTML))
+        }
+
+        let wrapperOpen: String
+        let wrapperClose: String
+        switch listKind {
+        case .ordered:
+            wrapperOpen = "<ol>"
+            wrapperClose = "</ol>"
+        case .task:
+            wrapperOpen = "<ul class=\"task-list\">"
+            wrapperClose = "</ul>"
+        case .unordered:
+            wrapperOpen = "<ul>"
+            wrapperClose = "</ul>"
+        }
+
+        return ("\(wrapperOpen)\(itemsHTML.joined())\(wrapperClose)", lineIndex)
+    }
+
+    private static func renderListItemHTML(kind: ListKind, bodyHTML: String, nestedHTML: String) -> String {
+        switch kind {
+        case .unordered, .ordered:
+            return "<li>\(bodyHTML)\(nestedHTML)</li>"
+        case .task(let completed):
+            let checked = completed ? " checked" : ""
+            let doneClass = completed ? " class=\"task-item done\"" : " class=\"task-item\""
+            return "<li\(doneClass)><input type=\"checkbox\" disabled\(checked)><span>\(bodyHTML)</span></li>\(nestedHTML)"
+        }
     }
 
     private static func parseMarkdownTable(lines: [String], startingAt index: Int)
@@ -460,8 +538,232 @@ enum StandaloneMarkdownPreviewRenderer {
         return nil
     }
 
+    private static func parseListItem(_ rawLine: String) -> ParsedListItem? {
+        let indent = leadingIndentWidth(of: rawLine)
+        let line = rawLine.trimmingCharacters(in: .whitespaces)
+
+        if let task = parseTaskListItem(line) {
+            return ParsedListItem(indent: indent, kind: .task(completed: task.completed), text: task.text)
+        }
+
+        if let item = line.dropPrefixIfPresent("- ")
+            ?? line.dropPrefixIfPresent("* ")
+            ?? line.dropPrefixIfPresent("+ ") {
+            return ParsedListItem(indent: indent, kind: .unordered, text: item)
+        }
+
+        if let item = line.captureOrderedListItem() {
+            return ParsedListItem(indent: indent, kind: .ordered, text: item)
+        }
+
+        return nil
+    }
+
+    private static func leadingIndentWidth(of rawLine: String) -> Int {
+        var width = 0
+        for char in rawLine {
+            switch char {
+            case " ":
+                width += 1
+            case "\t":
+                width += 4
+            default:
+                return width
+            }
+        }
+        return width
+    }
+
+    private static func renderCodeBlockHTML(_ code: String, language: String?) -> String {
+        let highlighted = highlightCode(code, language: language)
+        if let language, !language.isEmpty {
+            return """
+            <div class="code-block">
+              <div class="code-label">\(escapeHTML(language))</div>
+              <pre><code class="language-\(escapeHTML(language.lowercased()))">\(highlighted)</code></pre>
+            </div>
+            """
+        }
+        return "<pre><code>\(highlighted)</code></pre>"
+    }
+
+    private static func highlightCode(_ code: String, language: String?) -> String {
+        guard let language = canonicalLanguage(for: language) else {
+            return escapeHTML(code)
+        }
+
+        return code.components(separatedBy: .newlines)
+            .map { highlightCodeLine($0, language: language) }
+            .joined(separator: "\n")
+    }
+
+    private static func highlightCodeLine(_ line: String, language: String) -> String {
+        let commentPrefix = lineCommentPrefix(for: language)
+        let keywords = keywordSet(for: language)
+        let typeNames = typeSet(for: language)
+        var html = ""
+        var index = line.startIndex
+
+        func appendToken(_ className: String, _ value: String) {
+            html += "<span class=\"\(className)\">\(escapeHTML(value))</span>"
+        }
+
+        while index < line.endIndex {
+            if let commentPrefix,
+               line[index...].hasPrefix(commentPrefix) {
+                appendToken("tok-comment", String(line[index...]))
+                break
+            }
+
+            let char = line[index]
+
+            if char == "\"" || char == "'" {
+                let token = consumeQuotedString(in: line, from: index, delimiter: char)
+                appendToken("tok-string", token.value)
+                index = token.endIndex
+                continue
+            }
+
+            if char.isNumber {
+                let token = consumeNumber(in: line, from: index)
+                appendToken("tok-number", token.value)
+                index = token.endIndex
+                continue
+            }
+
+            if char.isLetter || char == "_" {
+                let token = consumeIdentifier(in: line, from: index)
+                if keywords.contains(token.value) {
+                    appendToken("tok-keyword", token.value)
+                } else if typeNames.contains(token.value) {
+                    appendToken("tok-type", token.value)
+                } else if token.endIndex < line.endIndex, line[token.endIndex] == ":" {
+                    appendToken("tok-property", token.value)
+                } else {
+                    html += escapeHTML(token.value)
+                }
+                index = token.endIndex
+                continue
+            }
+
+            html += escapeHTML(String(char))
+            index = line.index(after: index)
+        }
+
+        return html
+    }
+
+    private static func consumeQuotedString(in line: String, from start: String.Index, delimiter: Character)
+        -> (value: String, endIndex: String.Index)
+    {
+        var index = line.index(after: start)
+        var escaped = false
+
+        while index < line.endIndex {
+            let char = line[index]
+            if escaped {
+                escaped = false
+            } else if char == "\\" {
+                escaped = true
+            } else if char == delimiter {
+                return (String(line[start...index]), line.index(after: index))
+            }
+            index = line.index(after: index)
+        }
+
+        return (String(line[start...]), line.endIndex)
+    }
+
+    private static func consumeNumber(in line: String, from start: String.Index)
+        -> (value: String, endIndex: String.Index)
+    {
+        var index = start
+        while index < line.endIndex, line[index].isNumber || line[index] == "." {
+            index = line.index(after: index)
+        }
+        return (String(line[start..<index]), index)
+    }
+
+    private static func consumeIdentifier(in line: String, from start: String.Index)
+        -> (value: String, endIndex: String.Index)
+    {
+        var index = start
+        while index < line.endIndex, line[index].isLetter || line[index].isNumber || line[index] == "_" {
+            index = line.index(after: index)
+        }
+        return (String(line[start..<index]), index)
+    }
+
+    private static func canonicalLanguage(for language: String?) -> String? {
+        guard let language else { return nil }
+        switch language.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "swift": return "swift"
+        case "rust", "rs": return "rust"
+        case "js", "jsx", "javascript", "ts", "tsx", "typescript": return "javascript"
+        case "py", "python": return "python"
+        case "sh", "bash", "zsh", "shell": return "shell"
+        case "json", "jsonc": return "json"
+        default: return nil
+        }
+    }
+
+    private static func lineCommentPrefix(for language: String) -> String? {
+        switch language {
+        case "swift", "rust", "javascript":
+            return "//"
+        case "python", "shell":
+            return "#"
+        default:
+            return nil
+        }
+    }
+
+    private static func keywordSet(for language: String) -> Set<String> {
+        switch language {
+        case "swift":
+            return ["let", "var", "func", "struct", "class", "enum", "protocol", "extension", "if", "else", "guard", "return", "import", "private", "fileprivate", "internal", "public", "open", "static"]
+        case "rust":
+            return ["fn", "let", "mut", "struct", "enum", "impl", "trait", "match", "if", "else", "return", "pub", "use", "mod", "const", "static"]
+        case "javascript":
+            return ["const", "let", "var", "function", "class", "return", "if", "else", "import", "export", "from", "async", "await", "new"]
+        case "python":
+            return ["def", "class", "return", "if", "elif", "else", "import", "from", "as", "for", "while", "try", "except", "with", "lambda"]
+        case "shell":
+            return ["if", "then", "else", "fi", "for", "do", "done", "case", "esac", "function", "in"]
+        case "json":
+            return ["true", "false", "null"]
+        default:
+            return []
+        }
+    }
+
+    private static func typeSet(for language: String) -> Set<String> {
+        switch language {
+        case "swift":
+            return ["String", "Int", "Bool", "Double", "URL", "Date", "Data", "UUID"]
+        case "rust":
+            return ["String", "Vec", "Option", "Result", "Self"]
+        case "javascript":
+            return ["Promise", "Object", "Array", "Map", "Set"]
+        case "python":
+            return ["str", "int", "bool", "list", "dict", "set", "tuple"]
+        default:
+            return []
+        }
+    }
+
     private static func renderInlineMarkdown(_ text: String) -> String {
         var rendered = escapeHTML(text)
+        rendered = rendered.replacingOccurrences(
+            of: #"\[\[([^\]|]+)\|([^\]]+)\]\]"#,
+            with: "<a href=\"#\" class=\"wikilink\" data-target=\"$1\">$2</a>",
+            options: .regularExpression
+        )
+        rendered = rendered.replacingOccurrences(
+            of: #"\[\[([^\]]+)\]\]"#,
+            with: "<a href=\"#\" class=\"wikilink\" data-target=\"$1\">$1</a>",
+            options: .regularExpression
+        )
         rendered = rendered.replacingOccurrences(
             of: #"!\[([^\]]*)\]\(([^)]+)\)"#,
             with: "<img src=\"$2\" alt=\"$1\">",
@@ -510,6 +812,55 @@ enum StandaloneMarkdownPreviewRenderer {
         let b = Int((rgb.blueComponent * 255).rounded())
         return String(format: "#%02X%02X%02X", r, g, b)
     }
+
+    private static func renderBlockquoteHTML(_ lines: [String]) -> String {
+        guard let firstLine = lines.first else { return "" }
+
+        if let callout = parseCallout(firstLine) {
+            let title = callout.title.isEmpty ? callout.kind.capitalized : callout.title
+            var bodyLines = Array(lines.dropFirst())
+            if !callout.inlineBody.isEmpty {
+                bodyLines.insert(callout.inlineBody, at: 0)
+            }
+            let bodyHTML = bodyLines.isEmpty ? "" : markdownToHTML(bodyLines.joined(separator: "\n"))
+            let kindClass = escapeHTML(callout.kind)
+            return """
+            <div class="callout callout-\(kindClass)">
+              <div class="callout-title"><span class="callout-icon"></span><span>\(escapeHTML(title))</span></div>
+              <div class="callout-content">\(bodyHTML)</div>
+            </div>
+            """
+        }
+
+        let inner = markdownToHTML(lines.joined(separator: "\n"))
+        return "<blockquote>\(inner)</blockquote>"
+    }
+
+    private static func parseCallout(_ line: String) -> (kind: String, title: String, inlineBody: String)? {
+        let pattern = #"^\[!([A-Za-z]+)\]([+-])?\s*(.*)$"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
+              let kindRange = Range(match.range(at: 1), in: line),
+              let bodyRange = Range(match.range(at: 3), in: line) else {
+            return nil
+        }
+
+        let kind = line[kindRange].lowercased()
+        let remainder = String(line[bodyRange]).trimmingCharacters(in: .whitespaces)
+        return (kind: kind, title: remainder, inlineBody: "")
+    }
+}
+
+private struct ParsedListItem {
+    let indent: Int
+    let kind: ListKind
+    let text: String
+}
+
+private enum ListKind: Equatable {
+    case unordered
+    case ordered
+    case task(completed: Bool)
 }
 
 private extension String {
