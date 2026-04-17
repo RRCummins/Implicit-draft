@@ -2,7 +2,17 @@ import Cocoa
 
 @MainActor
 enum MarkdownEditorStyler {
-    static func apply(to textView: NSTextView, text: String, isMarkdown: Bool) {
+    enum PresentationMode {
+        case source
+        case live(revealedRange: NSRange?)
+    }
+
+    static func apply(
+        to textView: NSTextView,
+        text: String,
+        isMarkdown: Bool,
+        mode: PresentationMode
+    ) {
         guard let textStorage = textView.textStorage else { return }
 
         let fullRange = NSRange(location: 0, length: (text as NSString).length)
@@ -13,7 +23,7 @@ enum MarkdownEditorStyler {
         undoManager?.disableUndoRegistration()
         defer { undoManager?.enableUndoRegistration() }
 
-        isMarkdown ? styleMarkdown(textStorage: textStorage, text: text, fullRange: fullRange)
+        isMarkdown ? styleMarkdown(textStorage: textStorage, text: text, fullRange: fullRange, mode: mode)
                    : stylePlainText(textStorage: textStorage, text: text, fullRange: fullRange)
 
         textView.setSelectedRange(selectedRange)
@@ -29,7 +39,12 @@ enum MarkdownEditorStyler {
         textStorage.setAttributes(baseCodeAttributes(), range: fullRange)
     }
 
-    private static func styleMarkdown(textStorage: NSTextStorage, text: String, fullRange: NSRange) {
+    private static func styleMarkdown(
+        textStorage: NSTextStorage,
+        text: String,
+        fullRange: NSRange,
+        mode: PresentationMode
+    ) {
         let nsText = text as NSString
         let bodyFont = NSFont.systemFont(ofSize: 15, weight: .regular)
         let monoFont = NSFont.monospacedSystemFont(ofSize: AppMetrics.monoFontSize, weight: .regular)
@@ -96,7 +111,8 @@ enum MarkdownEditorStyler {
                     lineContentRange: lineContentRange,
                     level: heading.level,
                     bodyFont: bodyFont,
-                    textStorage: textStorage
+                    textStorage: textStorage,
+                    mode: mode
                 )
                 return
             }
@@ -114,7 +130,7 @@ enum MarkdownEditorStyler {
             }
 
             if trimmed.hasPrefix(">") {
-                applyBlockquoteLine(line: line, nsText: nsText, lineRange: lineRange, lineContentRange: lineContentRange, textStorage: textStorage)
+                applyBlockquoteLine(line: line, nsText: nsText, lineRange: lineRange, lineContentRange: lineContentRange, textStorage: textStorage, mode: mode)
                 return
             }
 
@@ -127,8 +143,8 @@ enum MarkdownEditorStyler {
                     background: AppPalette.sidebarBg.withAlphaComponent(0.16),
                     paragraphStyle: tableParagraphStyle()
                 )
-                styleTableSyntax(in: line, nsText: nsText, lineContentRange: lineContentRange, textStorage: textStorage)
-                styleInlineSyntax(in: line, nsText: nsText, lineContentRange: lineContentRange, textStorage: textStorage)
+                styleTableSyntax(in: line, nsText: nsText, lineContentRange: lineContentRange, textStorage: textStorage, mode: mode)
+                styleInlineSyntax(in: line, nsText: nsText, lineContentRange: lineContentRange, textStorage: textStorage, mode: mode)
                 return
             }
 
@@ -140,9 +156,10 @@ enum MarkdownEditorStyler {
                     lineContentRange: lineContentRange,
                     markerLength: task.prefixLength,
                     accentColor: task.completed ? AppPalette.textMuted : AppPalette.accent,
-                    textStorage: textStorage
+                    textStorage: textStorage,
+                    mode: mode
                 )
-                styleInlineSyntax(in: line, nsText: nsText, lineContentRange: lineContentRange, textStorage: textStorage)
+                styleInlineSyntax(in: line, nsText: nsText, lineContentRange: lineContentRange, textStorage: textStorage, mode: mode)
                 return
             }
 
@@ -154,9 +171,10 @@ enum MarkdownEditorStyler {
                     lineContentRange: lineContentRange,
                     markerLength: marker,
                     accentColor: AppPalette.accent.withAlphaComponent(0.8),
-                    textStorage: textStorage
+                    textStorage: textStorage,
+                    mode: mode
                 )
-                styleInlineSyntax(in: line, nsText: nsText, lineContentRange: lineContentRange, textStorage: textStorage)
+                styleInlineSyntax(in: line, nsText: nsText, lineContentRange: lineContentRange, textStorage: textStorage, mode: mode)
                 return
             }
 
@@ -168,7 +186,7 @@ enum MarkdownEditorStyler {
                 background: AppPalette.windowBg,
                 paragraphStyle: bodyParagraphStyle()
             )
-            styleInlineSyntax(in: line, nsText: nsText, lineContentRange: lineContentRange, textStorage: textStorage)
+            styleInlineSyntax(in: line, nsText: nsText, lineContentRange: lineContentRange, textStorage: textStorage, mode: mode)
         }
     }
 
@@ -179,7 +197,8 @@ enum MarkdownEditorStyler {
         lineContentRange: NSRange,
         level: Int,
         bodyFont: NSFont,
-        textStorage: NSTextStorage
+        textStorage: NSTextStorage,
+        mode: PresentationMode
     ) {
         let fontSize: CGFloat
         switch level {
@@ -204,12 +223,12 @@ enum MarkdownEditorStyler {
         if markerLength > 0 {
             let markerRange = NSRange(location: lineContentRange.location, length: markerLength)
             textStorage.addAttributes([
-                .foregroundColor: AppPalette.textMuted,
+                .foregroundColor: delimiterColor(for: markerRange, mode: mode),
                 .font: NSFont.monospacedSystemFont(ofSize: max(12, bodyFont.pointSize - 1), weight: .regular)
             ], range: markerRange)
         }
 
-        styleInlineSyntax(in: line, nsText: nsText, lineContentRange: lineContentRange, textStorage: textStorage)
+        styleInlineSyntax(in: line, nsText: nsText, lineContentRange: lineContentRange, textStorage: textStorage, mode: mode)
     }
 
     private static func applyBlockquoteLine(
@@ -217,7 +236,8 @@ enum MarkdownEditorStyler {
         nsText: NSString,
         lineRange: NSRange,
         lineContentRange: NSRange,
-        textStorage: NSTextStorage
+        textStorage: NSTextStorage,
+        mode: PresentationMode
     ) {
         applyWholeLine(
             textStorage,
@@ -231,11 +251,11 @@ enum MarkdownEditorStyler {
         let markerLength = line.hasPrefix("> ") ? 2 : 1
         let markerRange = NSRange(location: lineContentRange.location, length: min(markerLength, lineContentRange.length))
         textStorage.addAttributes([
-            .foregroundColor: AppPalette.accent,
+            .foregroundColor: markerAccentColor(for: markerRange, accentColor: AppPalette.accent, mode: mode),
             .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
         ], range: markerRange)
 
-        styleInlineSyntax(in: line, nsText: nsText, lineContentRange: lineContentRange, textStorage: textStorage)
+        styleInlineSyntax(in: line, nsText: nsText, lineContentRange: lineContentRange, textStorage: textStorage, mode: mode)
     }
 
     private static func applyListLine(
@@ -245,7 +265,8 @@ enum MarkdownEditorStyler {
         lineContentRange: NSRange,
         markerLength: Int,
         accentColor: NSColor,
-        textStorage: NSTextStorage
+        textStorage: NSTextStorage,
+        mode: PresentationMode
     ) {
         let indent = leadingIndentWidth(of: line)
         applyWholeLine(
@@ -259,7 +280,7 @@ enum MarkdownEditorStyler {
 
         let markerRange = NSRange(location: lineContentRange.location + indent, length: min(markerLength, max(0, lineContentRange.length - indent)))
         textStorage.addAttributes([
-            .foregroundColor: accentColor,
+            .foregroundColor: markerAccentColor(for: markerRange, accentColor: accentColor, mode: mode),
             .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .medium)
         ], range: markerRange)
     }
@@ -268,13 +289,14 @@ enum MarkdownEditorStyler {
         in line: String,
         nsText: NSString,
         lineContentRange: NSRange,
-        textStorage: NSTextStorage
+        textStorage: NSTextStorage,
+        mode: PresentationMode
     ) {
         styleRegex(#"`([^`]+)`"#, in: line, lineContentRange: lineContentRange, textStorage: textStorage) { match, lineRange, storage in
             let codeRange = match.range(at: 1)
             let full = match.range(at: 0)
             storage.addAttributes([
-                .foregroundColor: AppPalette.textMuted,
+                .foregroundColor: delimiterColor(for: shifted(full, by: lineRange.location), mode: mode),
                 .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
             ], range: shifted(full, by: lineRange.location))
             storage.addAttributes([
@@ -290,7 +312,7 @@ enum MarkdownEditorStyler {
                 .foregroundColor: AppPalette.textPrimary
             ], delimiterAttributes: [
                 .foregroundColor: AppPalette.textMuted
-            ], storage: storage)
+            ], storage: storage, mode: mode)
         }
 
         styleRegex(#"(?<!\*)\*([^*]+)\*(?!\*)"#, in: line, lineContentRange: lineContentRange, textStorage: textStorage) { match, lineRange, storage in
@@ -299,7 +321,7 @@ enum MarkdownEditorStyler {
                 .foregroundColor: AppPalette.textPrimary
             ], delimiterAttributes: [
                 .foregroundColor: AppPalette.textMuted
-            ], storage: storage)
+            ], storage: storage, mode: mode)
         }
 
         styleRegex(#"~~([^~]+)~~"#, in: line, lineContentRange: lineContentRange, textStorage: textStorage) { match, lineRange, storage in
@@ -308,32 +330,36 @@ enum MarkdownEditorStyler {
                 .strikethroughStyle: NSUnderlineStyle.single.rawValue
             ], delimiterAttributes: [
                 .foregroundColor: AppPalette.textMuted.withAlphaComponent(0.75)
-            ], storage: storage)
+            ], storage: storage, mode: mode)
         }
 
         styleRegex(#"\[([^\]]+)\]\(([^)]+)\)"#, in: line, lineContentRange: lineContentRange, textStorage: textStorage) { match, lineRange, storage in
+            let fullRange = shifted(match.range(at: 0), by: lineRange.location)
+            let showSyntax = isRangeRevealed(fullRange, mode: mode)
             if let textRange = rangeForGroup(match, 1, lineRange), let urlRange = rangeForGroup(match, 2, lineRange) {
                 storage.addAttributes([
                     .foregroundColor: AppPalette.accent,
                     .underlineStyle: NSUnderlineStyle.single.rawValue
                 ], range: textRange)
                 storage.addAttributes([
-                    .foregroundColor: AppPalette.textMuted,
+                    .foregroundColor: showSyntax ? AppPalette.textMuted : hiddenDelimiterColor(),
                     .font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
                 ], range: urlRange)
             }
-            styleMarkdownDelimiters(for: match, lineRange: lineRange, storage: storage)
+            styleMarkdownDelimiters(for: match, lineRange: lineRange, storage: storage, mode: mode)
         }
 
         styleRegex(#"\[\[([^\]|]+)\|([^\]]+)\]\]"#, in: line, lineContentRange: lineContentRange, textStorage: textStorage) { match, lineRange, storage in
+            let fullRange = shifted(match.range(at: 0), by: lineRange.location)
+            let showSyntax = isRangeRevealed(fullRange, mode: mode)
             if let targetRange = rangeForGroup(match, 1, lineRange), let aliasRange = rangeForGroup(match, 2, lineRange) {
-                storage.addAttributes([.foregroundColor: AppPalette.textMuted], range: targetRange)
+                storage.addAttributes([.foregroundColor: showSyntax ? AppPalette.textMuted : hiddenDelimiterColor()], range: targetRange)
                 storage.addAttributes([
                     .foregroundColor: AppPalette.accent,
                     .font: NSFont.systemFont(ofSize: 15, weight: .semibold)
                 ], range: aliasRange)
             }
-            styleMarkdownDelimiters(for: match, lineRange: lineRange, storage: storage)
+            styleMarkdownDelimiters(for: match, lineRange: lineRange, storage: storage, mode: mode)
         }
 
         styleRegex(#"\[\[([^\]]+)\]\]"#, in: line, lineContentRange: lineContentRange, textStorage: textStorage) { match, lineRange, storage in
@@ -343,7 +369,7 @@ enum MarkdownEditorStyler {
                     .font: NSFont.systemFont(ofSize: 15, weight: .semibold)
                 ], range: targetRange)
             }
-            styleMarkdownDelimiters(for: match, lineRange: lineRange, storage: storage)
+            styleMarkdownDelimiters(for: match, lineRange: lineRange, storage: storage, mode: mode)
         }
     }
 
@@ -351,14 +377,15 @@ enum MarkdownEditorStyler {
         in line: String,
         nsText: NSString,
         lineContentRange: NSRange,
-        textStorage: NSTextStorage
+        textStorage: NSTextStorage,
+        mode: PresentationMode
     ) {
         let nsLine = line as NSString
         let fullLength = nsLine.length
         for idx in 0..<fullLength where nsLine.character(at: idx) == 124 {
             let range = NSRange(location: lineContentRange.location + idx, length: 1)
             textStorage.addAttributes([
-                .foregroundColor: AppPalette.border
+                .foregroundColor: delimiterColor(for: range, mode: mode)
             ], range: range)
         }
     }
@@ -421,19 +448,51 @@ enum MarkdownEditorStyler {
         lineRange: NSRange,
         contentAttributes: [NSAttributedString.Key: Any],
         delimiterAttributes: [NSAttributedString.Key: Any],
-        storage: NSTextStorage
+        storage: NSTextStorage,
+        mode: PresentationMode
     ) {
         let full = shifted(match.range(at: 0), by: lineRange.location)
         let content = shifted(match.range(at: contentGroup), by: lineRange.location)
-        storage.addAttributes(delimiterAttributes, range: full)
+        var adjustedDelimiterAttributes = delimiterAttributes
+        adjustedDelimiterAttributes[.foregroundColor] = delimiterColor(for: full, mode: mode)
+        storage.addAttributes(adjustedDelimiterAttributes, range: full)
         storage.addAttributes(contentAttributes, range: content)
     }
 
-    private static func styleMarkdownDelimiters(for match: NSTextCheckingResult, lineRange: NSRange, storage: NSTextStorage) {
+    private static func styleMarkdownDelimiters(
+        for match: NSTextCheckingResult,
+        lineRange: NSRange,
+        storage: NSTextStorage,
+        mode: PresentationMode
+    ) {
         let full = shifted(match.range(at: 0), by: lineRange.location)
         storage.addAttributes([
-            .foregroundColor: AppPalette.textMuted
+            .foregroundColor: delimiterColor(for: full, mode: mode)
         ], range: full)
+    }
+
+    private static func isRangeRevealed(_ range: NSRange, mode: PresentationMode) -> Bool {
+        switch mode {
+        case .source:
+            return true
+        case .live(let revealedRange):
+            guard let revealedRange else { return false }
+            return NSIntersectionRange(range, revealedRange).length > 0
+        }
+    }
+
+    private static func delimiterColor(for range: NSRange, mode: PresentationMode) -> NSColor {
+        isRangeRevealed(range, mode: mode) ? AppPalette.textMuted : hiddenDelimiterColor()
+    }
+
+    private static func markerAccentColor(for range: NSRange, accentColor: NSColor, mode: PresentationMode) -> NSColor {
+        isRangeRevealed(range, mode: mode)
+            ? accentColor
+            : accentColor.withAlphaComponent(0.22)
+    }
+
+    private static func hiddenDelimiterColor() -> NSColor {
+        AppPalette.textPrimary.withAlphaComponent(0.07)
     }
 
     private static func rangeForGroup(_ match: NSTextCheckingResult, _ group: Int, _ lineRange: NSRange) -> NSRange? {

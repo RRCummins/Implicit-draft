@@ -29,7 +29,7 @@ final class ViewController: NSViewController,
     private let sidebarTitleLabel  = NSTextField(labelWithString: "Documents")
     private let sidebarMetaLabel   = NSTextField(labelWithString: "0 open")
     private let modeControl        = NSSegmentedControl(
-        labels: ["Edit", "Preview"], trackingMode: .selectOne, target: nil, action: nil
+        labels: ["Edit", "Live", "Preview"], trackingMode: .selectOne, target: nil, action: nil
     )
     private let emptyContainer     = NSView()
     private let emptyTitleLabel    = NSTextField(labelWithString: "Start a draft")
@@ -50,6 +50,9 @@ final class ViewController: NSViewController,
     private var pendingWindowCloseApproval = false
     private var pendingPreviewScrollOffset: Double?
     private var isApplyingEditorStyle = false
+    private var liveSyntaxRevealRange: NSRange?
+    private var liveSyntaxHideTimer: Timer?
+    private var pendingEditorStyleWorkItem: DispatchWorkItem?
 
     // MARK: Public interface for AppDelegate
 
@@ -161,9 +164,15 @@ final class ViewController: NSViewController,
     }
 
     @IBAction func changeMode(_ sender: Any?) {
-        mode = EditorMode(rawValue: modeControl.selectedSegment) ?? .source
+        mode = EditorMode.fromFooterSegmentIndex(modeControl.selectedSegment)
         if let index = selectedDocumentIndex {
             documents[index].mode = mode
+        }
+        if mode == .live {
+            revealLiveSyntaxAroundSelection()
+            scheduleLiveSyntaxHide()
+        } else {
+            clearLiveSyntaxReveal()
         }
         updateVisibleDocument()
         saveSession()
@@ -270,7 +279,11 @@ final class ViewController: NSViewController,
         guard !isSwitchingDocuments, !isApplyingEditorStyle, let index = selectedDocumentIndex else { return }
         documents[index].text = editorTextView.string
         documents[index].isDirty = true
-        applyEditorStyleIfNeeded(for: documents[index])
+        if mode == .live {
+            revealLiveSyntaxAroundSelection()
+            scheduleLiveSyntaxHide()
+        }
+        scheduleEditorStyleRefresh(for: documents[index])
         captureCurrentDocumentViewState()
         updateWindowTitle()
         rebuildSidebarRows()
@@ -280,8 +293,32 @@ final class ViewController: NSViewController,
     }
 
     func textViewDidChangeSelection(_ notification: Notification) {
-        guard !isSwitchingDocuments else { return }
+        guard !isSwitchingDocuments, !isApplyingEditorStyle else { return }
+        if mode == .live, let index = selectedDocumentIndex {
+            revealLiveSyntaxAroundSelection()
+            scheduleEditorStyleRefresh(for: documents[index])
+            scheduleLiveSyntaxHide()
+        }
         captureCurrentDocumentViewState()
+    }
+
+    func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard textView == editorTextView,
+              mode != .preview,
+              isMarkdownCurrentDocument else {
+            return false
+        }
+
+        switch commandSelector {
+        case #selector(NSResponder.insertNewline(_:)):
+            return handleMarkdownInsertNewline()
+        case #selector(NSResponder.insertTab(_:)):
+            return handleMarkdownIndent(outdent: false)
+        case #selector(NSResponder.insertBacktab(_:)):
+            return handleMarkdownIndent(outdent: true)
+        default:
+            return false
+        }
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -873,7 +910,7 @@ final class ViewController: NSViewController,
     }
 
     private func applyMarkdownWrapper(prefix: String, suffix: String, placeholder: String) {
-        guard mode == .source, let index = selectedDocumentIndex else { return }
+        guard mode != .preview, let index = selectedDocumentIndex else { return }
         let textView = editorTextView
         let currentString = textView.string as NSString
         let selectedRange = textView.selectedRange()
@@ -900,7 +937,7 @@ final class ViewController: NSViewController,
     }
 
     private func applyHeadingPrefix(_ prefix: String) {
-        guard mode == .source, let index = selectedDocumentIndex else { return }
+        guard mode != .preview, let index = selectedDocumentIndex else { return }
         let textView = editorTextView
         let fullText = textView.string as NSString
         let selectedRange = textView.selectedRange()
@@ -1098,7 +1135,7 @@ final class ViewController: NSViewController,
             previewWebView.isHidden = true
             statusLabel.stringValue = "No document"
             statusMetaLabel.stringValue = ""
-            modeControl.selectedSegment = mode.rawValue
+            modeControl.selectedSegment = mode.footerSegmentIndex
             return
         }
 
@@ -1129,7 +1166,7 @@ final class ViewController: NSViewController,
     private func captureCurrentDocumentViewState() {
         guard let index = selectedDocumentIndex else { return }
         documents[index].mode = mode
-        if mode == .source {
+        if mode != .preview {
             documents[index].selectionLocation = editorTextView.selectedRange().location
             documents[index].selectionLength = editorTextView.selectedRange().length
             documents[index].scrollOffset = editorScrollView.contentView.bounds.origin.y
@@ -1141,12 +1178,18 @@ final class ViewController: NSViewController,
     }
 
     private func restoreDocumentViewState(_ doc: EditorDocument) {
-        if mode == .source {
+        if mode != .preview {
             let length = (editorTextView.string as NSString).length
             let clampedLocation = min(max(0, doc.selectionLocation), length)
             let clampedLength = min(max(0, doc.selectionLength), max(0, length - clampedLocation))
             let range = NSRange(location: clampedLocation, length: clampedLength)
             editorTextView.setSelectedRange(range)
+            if mode == .live {
+                revealLiveSyntaxAroundSelection()
+                scheduleLiveSyntaxHide()
+            } else {
+                clearLiveSyntaxReveal()
+            }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.editorScrollView.contentView.scroll(
@@ -1282,13 +1325,13 @@ final class ViewController: NSViewController,
     }
 
     private func applyDocumentContent(_ doc: EditorDocument) {
-        let showEmpty = doc.url == nil && doc.text.isEmpty && mode == .source
+        let showEmpty = doc.url == nil && doc.text.isEmpty && mode != .preview
         emptyContainer.isHidden = !showEmpty
         editorScrollView.isHidden = showEmpty || mode == .preview
         previewWebView.isHidden = mode != .preview
 
         switch mode {
-        case .source:
+        case .source, .live:
             editorTextView.isEditable = true
             editorTextView.isSelectable = true
             editorTextView.string = doc.text
@@ -1312,7 +1355,7 @@ final class ViewController: NSViewController,
             )
         }
 
-        modeControl.selectedSegment = mode.rawValue
+        modeControl.selectedSegment = mode.footerSegmentIndex
     }
 
     private func isMarkdown(_ doc: EditorDocument) -> Bool {
@@ -1320,18 +1363,270 @@ final class ViewController: NSViewController,
         return ["md", "markdown", "mdown", "txt"].contains(ext)
     }
 
+    private var isMarkdownCurrentDocument: Bool {
+        guard let index = selectedDocumentIndex else { return false }
+        return isMarkdown(documents[index])
+    }
+
     private func statusSummary(for doc: EditorDocument) -> String {
-        let modeStr  = mode == .source ? "Edit" : "Preview"
+        let modeStr: String
+        switch mode {
+        case .source:
+            modeStr = "Edit"
+        case .live:
+            modeStr = "Live"
+        case .preview:
+            modeStr = "Preview"
+        }
         let kindStr  = isMarkdown(doc) ? "Markdown" : "Text"
         let dirtyStr = doc.isDirty ? "Unsaved" : "Saved"
         return "\(modeStr) · \(kindStr) · \(dirtyStr)"
     }
 
     private func applyEditorStyleIfNeeded(for doc: EditorDocument) {
-        guard mode == .source else { return }
+        guard mode != .preview else { return }
         isApplyingEditorStyle = true
-        MarkdownEditorStyler.apply(to: editorTextView, text: doc.text, isMarkdown: isMarkdown(doc))
+        let presentationMode: MarkdownEditorStyler.PresentationMode =
+            mode == .live
+            ? .live(revealedRange: liveSyntaxRevealRange)
+            : .source
+        MarkdownEditorStyler.apply(
+            to: editorTextView,
+            text: doc.text,
+            isMarkdown: isMarkdown(doc),
+            mode: presentationMode
+        )
         isApplyingEditorStyle = false
+    }
+
+    private func handleMarkdownInsertNewline() -> Bool {
+        guard let index = selectedDocumentIndex else { return false }
+        let textView = editorTextView
+        let nsText = textView.string as NSString
+        let selectedRange = textView.selectedRange()
+        guard selectedRange.length == 0 else { return false }
+
+        let lineRange = nsText.lineRange(for: selectedRange)
+        let rawLine = nsText.substring(with: lineRange)
+        let line = rawLine.trimmingCharacters(in: CharacterSet.newlines)
+        let caretOffsetInLine = selectedRange.location - lineRange.location
+        let prefix = markdownContinuationPrefix(for: line)
+
+        if let fence = codeFenceContinuation(for: line, caretOffsetInLine: caretOffsetInLine) {
+            replaceSelection(with: fence.text, selectedRange: fence.selection, documentIndex: index)
+            return true
+        }
+
+        guard let prefix else { return false }
+
+        if prefix.exitWhenEmpty {
+            let content = String(line.dropFirst(prefix.prefix.count)).trimmingCharacters(in: .whitespaces)
+            if content.isEmpty, caretOffsetInLine >= line.count {
+                let contentRange = contentRangeForLineRange(lineRange, in: nsText)
+                replaceCharacters(
+                    in: contentRange,
+                    with: "",
+                    selectedRange: NSRange(location: contentRange.location, length: 0),
+                    documentIndex: index
+                )
+                return true
+            }
+        }
+
+        let insertion = "\n\(prefix.prefix)"
+        let newSelection = NSRange(location: selectedRange.location + insertion.count, length: 0)
+        replaceSelection(with: insertion, selectedRange: newSelection, documentIndex: index)
+        return true
+    }
+
+    private func handleMarkdownIndent(outdent: Bool) -> Bool {
+        guard let index = selectedDocumentIndex else { return false }
+        let textView = editorTextView
+        let nsText = textView.string as NSString
+        let selectedRange = textView.selectedRange()
+        let lineRange = nsText.lineRange(for: selectedRange)
+        let block = nsText.substring(with: lineRange)
+
+        let hasTrailingNewline = block.hasSuffix("\n")
+        let core = hasTrailingNewline ? String(block.dropLast()) : block
+        let lines = core.components(separatedBy: "\n")
+        guard !lines.isEmpty else { return false }
+
+        let transformed = lines.map { line -> String in
+            if outdent {
+                if line.hasPrefix("\t") {
+                    return String(line.dropFirst())
+                }
+                if line.hasPrefix("    ") {
+                    return String(line.dropFirst(4))
+                }
+                let removable = min(line.prefix { $0 == " " }.count, 4)
+                return String(line.dropFirst(removable))
+            }
+            return "    \(line)"
+        }.joined(separator: "\n") + (hasTrailingNewline ? "\n" : "")
+
+        let firstLineIndentWidth = leadingIndentWidthOfMarkdownLine(lines.first ?? "")
+        let selectionDeltaPerLine = outdent ? -4 : 4
+        let affectedLineCount = max(1, lines.count)
+        let selectionLocation = max(lineRange.location, selectedRange.location + (outdent ? -min(4, firstLineIndentWidth) : 4))
+        let adjustedLength = max(0, selectedRange.length + selectionDeltaPerLine * affectedLineCount)
+
+        replaceCharacters(
+            in: lineRange,
+            with: transformed,
+            selectedRange: NSRange(location: selectionLocation, length: adjustedLength),
+            documentIndex: index
+        )
+        return true
+    }
+
+    private func replaceSelection(
+        with replacement: String,
+        selectedRange: NSRange,
+        documentIndex: Int
+    ) {
+        replaceCharacters(
+            in: editorTextView.selectedRange(),
+            with: replacement,
+            selectedRange: selectedRange,
+            documentIndex: documentIndex
+        )
+    }
+
+    private func markdownContinuationPrefix(for line: String) -> (prefix: String, exitWhenEmpty: Bool)? {
+        if let match = line.wholeMatch(of: /^\s*(?<fence>```[A-Za-z0-9_-]*)\s*$/) {
+            return (prefix: String(match.output.fence), exitWhenEmpty: false)
+        }
+
+        if let match = line.wholeMatch(of: /^(?<indent>\s*)(?<quote>(?:>\s*)+)(?<body>.*)$/) {
+            return (prefix: String(match.output.indent) + String(match.output.quote), exitWhenEmpty: true)
+        }
+
+        if let match = line.wholeMatch(of: /^(?<indent>\s*)(?<marker>[-+*]\s+\[(?: |x|X)\]\s+)(?<body>.*)$/) {
+            return (prefix: String(match.output.indent) + String(match.output.marker), exitWhenEmpty: true)
+        }
+
+        if let match = line.wholeMatch(of: /^(?<indent>\s*)(?<number>\d+)\.\s+(?<body>.*)$/),
+           let value = Int(match.output.number) {
+            let next = value + 1
+            return (prefix: String(match.output.indent) + "\(next). ", exitWhenEmpty: true)
+        }
+
+        if let match = line.wholeMatch(of: /^(?<indent>\s*)(?<marker>[-+*]\s+)(?<body>.*)$/) {
+            return (prefix: String(match.output.indent) + String(match.output.marker), exitWhenEmpty: true)
+        }
+
+        return nil
+    }
+
+    private func codeFenceContinuation(for line: String, caretOffsetInLine: Int) -> (text: String, selection: NSRange)? {
+        guard line.trimmingCharacters(in: .whitespaces).hasPrefix("```"),
+              caretOffsetInLine == line.count else {
+            return nil
+        }
+        let leadingWhitespace = String(line.prefix { $0 == " " || $0 == "\t" })
+        let insertion = "\n\(leadingWhitespace)\n\(leadingWhitespace)```"
+        let selection = NSRange(location: editorTextView.selectedRange().location + leadingWhitespace.count + 1, length: 0)
+        return (insertion, selection)
+    }
+
+    private func replaceCharacters(
+        in range: NSRange,
+        with replacement: String,
+        selectedRange: NSRange,
+        documentIndex: Int
+    ) {
+        editorTextView.textStorage?.replaceCharacters(in: range, with: replacement)
+        editorTextView.setSelectedRange(selectedRange)
+        documents[documentIndex].text = editorTextView.string
+        documents[documentIndex].isDirty = true
+        if mode == .live {
+            revealLiveSyntaxAroundSelection()
+            scheduleLiveSyntaxHide()
+        }
+        scheduleEditorStyleRefresh(for: documents[documentIndex])
+        captureCurrentDocumentViewState()
+        updateWindowTitle()
+        rebuildSidebarRows()
+        refreshTabStrip()
+        updateStatusBar()
+        scheduleRecoveryWrite(for: documents[documentIndex])
+    }
+
+    private func contentRangeForLineRange(_ lineRange: NSRange, in text: NSString) -> NSRange {
+        var length = lineRange.length
+        if length > 0 {
+            let lastIndex = lineRange.location + length - 1
+            if lastIndex < text.length, text.character(at: lastIndex) == 10 {
+                length -= 1
+            }
+        }
+        return NSRange(location: lineRange.location, length: max(0, length))
+    }
+
+    private func leadingIndentWidthOfMarkdownLine(_ line: String) -> Int {
+        var width = 0
+        for char in line {
+            switch char {
+            case " ":
+                width += 1
+            case "\t":
+                width += 4
+            default:
+                return width
+            }
+        }
+        return width
+    }
+
+    private func revealLiveSyntaxAroundSelection() {
+        guard mode == .live else {
+            clearLiveSyntaxReveal()
+            return
+        }
+        let nsText = editorTextView.string as NSString
+        let selectedRange = editorTextView.selectedRange()
+        let safeLocation = min(max(0, selectedRange.location), nsText.length)
+        let safeLength = min(max(0, selectedRange.length), max(0, nsText.length - safeLocation))
+        let normalizedRange = NSRange(location: safeLocation, length: safeLength)
+        liveSyntaxRevealRange = nsText.lineRange(for: normalizedRange)
+    }
+
+    private func scheduleLiveSyntaxHide() {
+        liveSyntaxHideTimer?.invalidate()
+        guard mode == .live else { return }
+        liveSyntaxHideTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { [weak self] _ in
+            guard let self, self.mode == .live, !self.isSwitchingDocuments else { return }
+            if self.editorTextView.selectedRange().length > 0 {
+                return
+            }
+            self.liveSyntaxRevealRange = nil
+            if let index = self.selectedDocumentIndex {
+                self.scheduleEditorStyleRefresh(for: self.documents[index])
+            }
+        }
+    }
+
+    private func clearLiveSyntaxReveal() {
+        liveSyntaxHideTimer?.invalidate()
+        liveSyntaxHideTimer = nil
+        liveSyntaxRevealRange = nil
+    }
+
+    private func scheduleEditorStyleRefresh(for doc: EditorDocument) {
+        pendingEditorStyleWorkItem?.cancel()
+        let docID = doc.id
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.mode != .preview,
+                  let index = self.documents.firstIndex(where: { $0.id == docID }) else {
+                return
+            }
+            self.applyEditorStyleIfNeeded(for: self.documents[index])
+        }
+        pendingEditorStyleWorkItem = workItem
+        DispatchQueue.main.async(execute: workItem)
     }
 }
 

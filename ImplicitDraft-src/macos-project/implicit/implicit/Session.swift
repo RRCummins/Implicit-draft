@@ -7,6 +7,29 @@ import Foundation
 enum EditorMode: Int, Codable {
     case source = 0
     case preview = 1
+    case live = 2
+
+    var footerSegmentIndex: Int {
+        switch self {
+        case .source:
+            return 0
+        case .live:
+            return 1
+        case .preview:
+            return 2
+        }
+    }
+
+    static func fromFooterSegmentIndex(_ index: Int) -> EditorMode {
+        switch index {
+        case 1:
+            return .live
+        case 2:
+            return .preview
+        default:
+            return .source
+        }
+    }
 }
 
 struct EditorDocument {
