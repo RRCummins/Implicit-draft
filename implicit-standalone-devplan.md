@@ -1,7 +1,7 @@
 # Implicit Standalone Dev Plan
 
 Created: 2026-03-29
-Updated: 2026-03-29
+Updated: 2026-04-16
 Scope: AppKit native macOS standalone app — Xcode project at `ImplicitDraft-src/macos-project/implicit/`.
 
 ---
@@ -17,6 +17,8 @@ Implicit Standalone is a native macOS markdown editor built with AppKit. The des
 - Distribution target: signed and notarized `.app` bundle
 
 The standalone app is the primary product surface going forward. The CLI remains an independent tool.
+
+Markdown target: **Obsidian-class markdown editing and preview.** The standalone app should get as close as practical to Obsidian’s markdown behavior, structure, and reading/writing comfort. Where choices differ, bias toward Obsidian conventions over inventing custom behavior.
 
 ---
 
@@ -56,6 +58,74 @@ Window chrome: `titleVisibility = .hidden`, `titlebarAppearsTransparent = true`,
   - document-owned editor state for tabs
   - safer open/save state transitions
   - moving controller-local document behavior into the session/model layer
+  - replacing the lightweight preview parser with a real markdown rendering architecture
+
+## Markdown Architecture
+
+**Goal:** Treat markdown as a first-class subsystem, not scattered string replacements.
+
+### Core principles
+
+- Source mode and preview mode must share the same document model, selection state, and block boundaries.
+- Preview should be rendered from a structured markdown representation, not ad hoc regex substitutions.
+- Editing conveniences should be driven by markdown structure: lists, task items, fences, blockquotes, tables, links, embeds.
+- Obsidian is the product benchmark for:
+  - markdown readability in source
+  - stable preview structure
+  - list and checkbox behavior
+  - fenced code block handling
+  - wikilinks, callouts, embeds, footnotes, and internal navigation
+
+### Recommended architecture
+
+**Layer 1 — Document text**
+- Raw document text remains the source of truth.
+- `NSTextView` owns text editing, undo, IME, selection, and typing behavior.
+
+**Layer 2 — Markdown model**
+- Add a dedicated markdown pipeline module, not more code inside `ViewController.swift`.
+- Preferred structure:
+  - `MarkdownParser.swift`
+  - `MarkdownAST.swift`
+  - `MarkdownRenderer.swift`
+  - `MarkdownPreviewRenderer.swift`
+  - `MarkdownEditBehavior.swift`
+- Parser output should describe block structure:
+  - headings
+  - paragraphs
+  - lists and nested lists
+  - task list items
+  - blockquotes
+  - code fences with language
+  - tables
+  - thematic breaks
+  - images and links
+  - footnotes / callouts / embeds later
+
+**Layer 3 — Preview HTML**
+- Preview HTML should be generated from the markdown model, not directly from raw string replacements.
+- HTML/CSS should aim visually toward Obsidian:
+  - readable centered measure
+  - strong table styling
+  - proper code fence headers
+  - callout blocks
+  - image sizing and captions
+  - polished blockquote and list spacing
+
+**Layer 4 — Edit-mode markdown behaviors**
+- Edit mode should gain markdown-aware behaviors from the same structure layer:
+  - continue lists on Return
+  - exit empty lists
+  - indent/dedent nested lists
+  - checkbox toggles
+  - fence auto-close
+  - heading-aware navigation
+  - table row editing helpers
+
+### Implementation rule
+
+- Do not continue expanding the preview with one-off regex patches unless they are short-term stopgaps.
+- New markdown work should move toward the dedicated parser / model / renderer split above.
 
 ## Current Baseline (Phase 0 Complete)
 
@@ -259,7 +329,7 @@ class Session: ObservableObject {
 
 ## Phase 5 — Preview Engine
 
-**Goal:** First-class HTML preview via WKWebView.
+**Goal:** First-class HTML preview via WKWebView with Obsidian-level markdown coverage.
 
 ### Tasks
 
@@ -269,15 +339,30 @@ class Session: ObservableObject {
 - Preview receives: document content (markdown string), theme tokens, mode
 
 **Markdown renderer:**
-- Use `cmark-gfm` via Swift Package Manager (C library, SPM wrapper available) or `Ink` (pure Swift)
-- Support: headings, paragraphs, bold, italic, lists, task lists, blockquotes, tables, fenced code blocks, inline code, links, images (local file URLs)
-- Strikethrough and footnotes desirable but not blocking
+- Replace the lightweight string-replacement renderer with a dedicated parser / model / renderer stack
+- Prefer `cmark-gfm` via Swift Package Manager if integration stays clean; otherwise keep a custom parser only if it can grow into a real markdown block model
+- Support parity target:
+  - headings, paragraphs, bold, italic, links, images
+  - ordered and unordered lists
+  - nested lists
+  - task lists
+  - blockquotes
+  - tables
+  - fenced code blocks with language labels
+  - inline code
+  - strikethrough
+  - footnotes
+  - callouts
+  - internal links / wikilinks
+  - code span escaping and fence edge cases
 
 **Preview CSS system:**
 - Embed a `preview.css` in the bundle
-- CSS uses GitHub dark palette — same tokens as the Swift design system
+- CSS uses the same design tokens as the Swift shell, but the document surface should feel closer to Obsidian than GitHub
 - Body max-width: 760pt centered, `body-font`
-- Code blocks: `surface` background, SF Mono, syntax-highlighted via `highlight.js` (bundled)
+- Code blocks: `surface` background, SF Mono, syntax-highlighted via bundled highlighter
+- Tables: horizontally scrollable wrapper, sticky visual hierarchy, alignment-aware cells
+- Callouts: Obsidian-like block treatment
 - No external network requests from preview
 
 **Sync:**
@@ -290,6 +375,8 @@ class Session: ObservableObject {
 - Preview reads like a designed document, not a fallback renderer
 - Source/preview switching is immediate and stable for documents up to ~100KB
 - Preview CSS is visually consistent with the rest of the app
+- Tables, task lists, code fences, images, and blockquotes feel production quality
+- The preview is credible next to Obsidian, not merely “good enough”
 
 ---
 
@@ -357,6 +444,15 @@ class Session: ObservableObject {
 - `- [ ]` checkbox: click to toggle in source (or in preview)
 - Triple backtick + Return: auto-close code fence with closing backticks
 - `**` / `_` wrapping: select text, type delimiter → wrap selection
+- Table editing helpers:
+  - Return adds next row when cursor is in a table row
+  - Tab / Shift-Tab moves across cells
+  - alignment separator row inserted correctly
+- Obsidian-style markdown behaviors where practical:
+  - wikilink insertion and navigation
+  - callout syntax helpers
+  - footnote insertion
+  - heading folding later if feasible
 
 **Word count and stats:**
 - Word count in status bar (live)
