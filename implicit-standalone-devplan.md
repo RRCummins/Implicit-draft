@@ -51,14 +51,18 @@ Window chrome: `titleVisibility = .hidden`, `titlebarAppearsTransparent = true`,
 - `Phase 0` is complete.
 - `Phase 1` is complete enough to build on.
 - `Phase 2` is now in progress.
+- `Phase 5` groundwork is now active through a real standalone markdown pipeline.
 - Current committed checkpoints:
   - `fc3f8be` `feat: reset standalone app foundation`
   - `8abd21c` `feat: add standalone tab strip and start state`
+  - `ff1c48a` `refactor: extract standalone markdown preview renderer`
+  - `df27a99` `feat: improve standalone markdown blocks`
 - Current local work after those commits is focused on:
   - document-owned editor state for tabs
   - safer open/save state transitions
   - moving controller-local document behavior into the session/model layer
   - replacing the lightweight preview parser with a real markdown rendering architecture
+  - landing the first explicit markdown model/parser/HTML renderer split
 
 ## Markdown Architecture
 
@@ -87,7 +91,7 @@ Window chrome: `titleVisibility = .hidden`, `titlebarAppearsTransparent = true`,
 - Preferred structure:
   - `MarkdownParser.swift`
   - `MarkdownAST.swift`
-  - `MarkdownRenderer.swift`
+  - `MarkdownHTMLRenderer.swift`
   - `MarkdownPreviewRenderer.swift`
   - `MarkdownEditBehavior.swift`
 - Parser output should describe block structure:
@@ -126,6 +130,17 @@ Window chrome: `titleVisibility = .hidden`, `titlebarAppearsTransparent = true`,
 
 - Do not continue expanding the preview with one-off regex patches unless they are short-term stopgaps.
 - New markdown work should move toward the dedicated parser / model / renderer split above.
+
+### Current implementation checkpoint
+
+The standalone app now has the first real cut of this structure:
+
+- `MarkdownAST.swift`
+- `MarkdownParser.swift`
+- `MarkdownHTMLRenderer.swift`
+- `MarkdownPreviewRenderer.swift`
+
+The renderer is still intentionally lightweight compared to Obsidian, but preview is no longer just a controller-owned string-replacement pass.
 
 ## Current Baseline (Phase 0 Complete)
 
