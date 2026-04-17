@@ -25,11 +25,11 @@ final class ViewController: NSViewController,
     private let previewWebView     = WKWebView(frame: .zero)
     private let tabStripStack      = NSStackView()
     private let statusLabel        = NSTextField(labelWithString: "Untitled draft")
-    private let statusMetaLabel    = NSTextField(labelWithString: "Source · Markdown · Saved")
+    private let statusMetaLabel    = NSTextField(labelWithString: "Edit · Markdown · Saved")
     private let sidebarTitleLabel  = NSTextField(labelWithString: "Documents")
     private let sidebarMetaLabel   = NSTextField(labelWithString: "0 open")
     private let modeControl        = NSSegmentedControl(
-        labels: ["Source", "Preview"], trackingMode: .selectOne, target: nil, action: nil
+        labels: ["Edit", "Preview"], trackingMode: .selectOne, target: nil, action: nil
     )
     private let emptyContainer     = NSView()
     private let emptyTitleLabel    = NSTextField(labelWithString: "Start a draft")
@@ -357,13 +357,25 @@ final class ViewController: NSViewController,
         bottomBorder.translatesAutoresizingMaskIntoConstraints = false
         bar.addSubview(bottomBorder)
 
+        modeControl.controlSize = .mini
+        modeControl.segmentStyle = .rounded
+        modeControl.selectedSegment = 0
+        modeControl.target = self
+        modeControl.action = #selector(changeMode(_:))
+        modeControl.translatesAutoresizingMaskIntoConstraints = false
+        bar.addSubview(modeControl)
+
         NSLayoutConstraint.activate([
             tabStripStack.leadingAnchor.constraint(
                 equalTo: bar.leadingAnchor, constant: AppMetrics.tabBarLeadInset
             ),
-            tabStripStack.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -8),
+            tabStripStack.trailingAnchor.constraint(
+                lessThanOrEqualTo: modeControl.leadingAnchor, constant: -12
+            ),
             tabStripStack.topAnchor.constraint(equalTo: bar.topAnchor),
             tabStripStack.bottomAnchor.constraint(equalTo: bar.bottomAnchor, constant: -1),
+            modeControl.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -10),
+            modeControl.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
             bottomBorder.leadingAnchor.constraint(equalTo: bar.leadingAnchor),
             bottomBorder.trailingAnchor.constraint(equalTo: bar.trailingAnchor),
             bottomBorder.bottomAnchor.constraint(equalTo: bar.bottomAnchor),
@@ -730,14 +742,6 @@ final class ViewController: NSViewController,
         statusMetaLabel.translatesAutoresizingMaskIntoConstraints = false
         bar.addSubview(statusMetaLabel)
 
-        modeControl.controlSize = .mini
-        modeControl.segmentStyle = .rounded
-        modeControl.selectedSegment = 0
-        modeControl.target = self
-        modeControl.action = #selector(changeMode(_:))
-        modeControl.translatesAutoresizingMaskIntoConstraints = false
-        bar.addSubview(modeControl)
-
         NSLayoutConstraint.activate([
             topBorder.leadingAnchor.constraint(equalTo: bar.leadingAnchor),
             topBorder.trailingAnchor.constraint(equalTo: bar.trailingAnchor),
@@ -745,11 +749,7 @@ final class ViewController: NSViewController,
             topBorder.heightAnchor.constraint(equalToConstant: 1),
             statusLabel.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 12),
             statusLabel.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
-            modeControl.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -8),
-            modeControl.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
-            statusMetaLabel.trailingAnchor.constraint(
-                equalTo: modeControl.leadingAnchor, constant: -12
-            ),
+            statusMetaLabel.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -12),
             statusMetaLabel.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
             statusLabel.trailingAnchor.constraint(
                 lessThanOrEqualTo: statusMetaLabel.leadingAnchor, constant: -16
@@ -1700,7 +1700,7 @@ final class ViewController: NSViewController,
     }
 
     private func statusSummary(for doc: EditorDocument) -> String {
-        let modeStr  = mode == .source ? "Source" : "Preview"
+        let modeStr  = mode == .source ? "Edit" : "Preview"
         let kindStr  = isMarkdown(doc) ? "Markdown" : "Text"
         let dirtyStr = doc.isDirty ? "Unsaved" : "Saved"
         return "\(modeStr) · \(kindStr) · \(dirtyStr)"
