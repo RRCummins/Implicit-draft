@@ -49,6 +49,7 @@ final class ViewController: NSViewController,
     private var recoveryTimer:        Timer?
     private var pendingWindowCloseApproval = false
     private var pendingPreviewScrollOffset: Double?
+    private var isApplyingEditorStyle = false
 
     // MARK: Public interface for AppDelegate
 
@@ -266,9 +267,10 @@ final class ViewController: NSViewController,
     // MARK: NSTextViewDelegate
 
     func textDidChange(_ notification: Notification) {
-        guard !isSwitchingDocuments, let index = selectedDocumentIndex else { return }
+        guard !isSwitchingDocuments, !isApplyingEditorStyle, let index = selectedDocumentIndex else { return }
         documents[index].text = editorTextView.string
         documents[index].isDirty = true
+        applyEditorStyleIfNeeded(for: documents[index])
         captureCurrentDocumentViewState()
         updateWindowTitle()
         rebuildSidebarRows()
@@ -1299,6 +1301,7 @@ final class ViewController: NSViewController,
             )
             editorTextView.isHorizontallyResizable = false
             editorTextView.textContainer?.widthTracksTextView = true
+            applyEditorStyleIfNeeded(for: doc)
         case .preview:
             previewWebView.loadHTMLString(
                 StandaloneMarkdownPreviewRenderer.renderPreviewHTML(
@@ -1322,6 +1325,13 @@ final class ViewController: NSViewController,
         let kindStr  = isMarkdown(doc) ? "Markdown" : "Text"
         let dirtyStr = doc.isDirty ? "Unsaved" : "Saved"
         return "\(modeStr) · \(kindStr) · \(dirtyStr)"
+    }
+
+    private func applyEditorStyleIfNeeded(for doc: EditorDocument) {
+        guard mode == .source else { return }
+        isApplyingEditorStyle = true
+        MarkdownEditorStyler.apply(to: editorTextView, text: doc.text, isMarkdown: isMarkdown(doc))
+        isApplyingEditorStyle = false
     }
 }
 
